@@ -103,6 +103,17 @@ void McpServer::AddCommonTools() {
             });
     }
 
+    // Add WiFi management tools
+    /*
+    AddTool("self.wifi.clear_configuration",
+        "Clear all WiFi configuration and credentials from the device memory. This will erase all stored WiFi networks and force the device to enter WiFi configuration mode on next boot.",
+        PropertyList(),
+        [&board](const PropertyList& properties) -> ReturnValue {
+            board.ClearWifiConfiguration();
+            return "WiFi configuration cleared successfully. Device will enter WiFi configuration mode on next boot.";
+        });
+    */
+
     // Restore the original tools list to the end of the tools list
     tools_.insert(tools_.end(), original_tools.begin(), original_tools.end());
 }

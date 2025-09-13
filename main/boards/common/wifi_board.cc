@@ -6,8 +6,6 @@
 #include "font_awesome_symbols.h"
 #include "settings.h"
 #include "assets/lang_config.h"
-
-#include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <esp_http.h>
 #include <esp_mqtt.h>
@@ -25,10 +23,22 @@ static const char *TAG = "WifiBoard";
 
 WifiBoard::WifiBoard() {
     Settings settings("wifi", true);
-    wifi_config_mode_ = settings.GetInt("force_ap") == 1;
-    if (wifi_config_mode_) {
-        ESP_LOGI(TAG, "force_ap is set to 1, reset to 0");
-        settings.SetInt("force_ap", 0);
+    // Comment out force_ap mode - use BLE instead
+    // wifi_config_mode_ = settings.GetInt("force_ap") == 1;
+    // if (wifi_config_mode_) {
+    //     ESP_LOGI(TAG, "force_ap is set to 1, reset to 0");
+    //     settings.SetInt("force_ap", 0);
+    // }
+    
+    // Initialize BLE server only when needed (not in constructor)
+    ble_initialized_ = false;
+    wifi_config_mode_ = false;
+}
+
+WifiBoard::~WifiBoard() {
+    if (ble_initialized_) {
+        ble_server_deinit();
+        ble_initialized_ = false;
     }
 }
 
@@ -64,23 +74,51 @@ void WifiBoard::EnterWifiConfigMode() {
     }
 }
 
-void WifiBoard::StartNetwork() {
-    // User can press BOOT button while starting to enter WiFi configuration mode
-    if (wifi_config_mode_) {
-        EnterWifiConfigMode();
-        return;
-    }
 
-    // If no WiFi SSID is configured, enter WiFi configuration mode
+
+void WifiBoard::StartNetwork() {
+    // If no WiFi SSID is configured, use BLE for WiFi configuration
     auto& ssid_manager = SsidManager::GetInstance();
     auto ssid_list = ssid_manager.GetSsidList();
+    
+    // Debug: Log stored WiFi credentials
+    ESP_LOGI(TAG, "Stored WiFi credentials count: %d", ssid_list.size());
+    for (size_t i = 0; i < ssid_list.size(); i++) {
+        ESP_LOGI(TAG, "WiFi %d: SSID='%s', Password='%s'", 
+                 i, ssid_list[i].ssid.c_str(), 
+                 ssid_list[i].password.c_str());
+    }
+    
     if (ssid_list.empty()) {
+        // No WiFi credentials found, use BLE for configuration
         wifi_config_mode_ = true;
-        EnterWifiConfigMode();
+        ESP_LOGI(TAG, "No WiFi credentials found, using BLE for configuration");
+        
+        // Initialize BLE server only when needed
+        if (!ble_initialized_) {
+            InitializeBleServer();
+        }
+        
+        auto& application = Application::GetInstance();
+        application.SetDeviceState(kDeviceStateWifiConfiguring);
+        
+        // Display BLE configuration instructions
+        std::string hint = "Connect to BLE device 'Xiaozhi-WiFi' to configure WiFi";
+        application.Alert("WiFi Configuration", hint.c_str(), "", Lang::Sounds::P3_WIFICONFIG);
+        
+        // Wait for BLE configuration
+        while (wifi_config_mode_) {
+            vTaskDelay(pdMS_TO_TICKS(1000));
+        }
+        
+        // After BLE configuration, restart network with new credentials
+        StartNetwork();
         return;
     }
 
+    // Start WiFi station with existing credentials
     auto& wifi_station = WifiStation::GetInstance();
+
     wifi_station.OnScanBegin([this]() {
         auto display = Board::GetInstance().GetDisplay();
         display->ShowNotification(Lang::Strings::SCANNING_WIFI, 30000);
@@ -97,14 +135,43 @@ void WifiBoard::StartNetwork() {
         std::string notification = Lang::Strings::CONNECTED_TO;
         notification += ssid;
         display->ShowNotification(notification.c_str(), 30000);
+        
+        // Stop BLE server when WiFi is connected
+        if (ble_initialized_) {
+            ESP_LOGI(TAG, "WiFi connected, stopping BLE server");
+            ble_server_stop_advertising();
+            ble_server_deinit();
+            ble_initialized_ = false;
+        }
     });
+    
     wifi_station.Start();
 
-    // Try to connect to WiFi, if failed, launch the WiFi configuration AP
+    // Try to connect to WiFi, if failed, use BLE for configuration
     if (!wifi_station.WaitForConnected(60 * 1000)) {
         wifi_station.Stop();
         wifi_config_mode_ = true;
-        EnterWifiConfigMode();
+        ESP_LOGI(TAG, "WiFi connection failed, using BLE for configuration");
+        
+        // Initialize BLE server only when needed
+        if (!ble_initialized_) {
+            InitializeBleServer();
+        }
+        
+        auto& application = Application::GetInstance();
+        application.SetDeviceState(kDeviceStateWifiConfiguring);
+        
+        // Display BLE configuration instructions
+        std::string hint = "WiFi connection failed. Connect to BLE device 'Xiaozhi-WiFi' to configure WiFi";
+        application.Alert("WiFi Configuration", hint.c_str(), "", Lang::Sounds::P3_WIFICONFIG);
+        
+        // Wait for BLE configuration
+        while (wifi_config_mode_) {
+            vTaskDelay(pdMS_TO_TICKS(1000));
+        }
+        
+        // After BLE configuration, restart network with new credentials
+        StartNetwork();
         return;
     }
 }
@@ -180,6 +247,29 @@ void WifiBoard::ResetWifiConfiguration() {
     vTaskDelay(pdMS_TO_TICKS(1000));
     // Reboot the device
     esp_restart();
+}
+
+
+void WifiBoard::ClearWifiConfiguration() {
+    ESP_LOGI(TAG, "Clearing all WiFi configuration from NVS storage");
+    
+    // Clear all WiFi credentials using SsidManager
+    auto& ssid_manager = SsidManager::GetInstance();
+    ssid_manager.Clear();
+    
+    // Also clear any additional WiFi settings
+    {
+        Settings settings("wifi", true);
+        settings.EraseAll();
+    }
+    
+    // Clear websocket settings as well
+    {
+        Settings settings("websocket", true);
+        settings.EraseAll();
+    }
+    
+    ESP_LOGI(TAG, "WiFi configuration cleared successfully");
 }
 
 std::string WifiBoard::GetDeviceStatusJson() {
@@ -272,3 +362,132 @@ std::string WifiBoard::GetDeviceStatusJson() {
     cJSON_Delete(root);
     return json;
 }
+
+// Static callback functions for BLE server
+static WifiBoard* g_wifi_board_instance = nullptr;
+
+static void ble_data_callback(const char* data, uint16_t length) {
+    if (g_wifi_board_instance) {
+        g_wifi_board_instance->HandleBleData(data, length);
+    }
+}
+
+static void ble_connection_callback(bool connected) {
+    if (g_wifi_board_instance) {
+        g_wifi_board_instance->HandleBleConnection(connected);
+    }
+}
+
+void WifiBoard::InitializeBleServer() {
+    ESP_LOGI(TAG, "Initializing BLE server for WiFi configuration");
+    
+    // Store instance pointer for static callbacks
+    g_wifi_board_instance = this;
+    
+    // Initialize BLE server with callbacks
+    if (ble_server_init("Xiaozhi-WiFi", 
+                       ble_data_callback,
+                       ble_connection_callback,
+                       nullptr)) { // No device control callback for now
+        ble_initialized_ = true;
+        ble_server_start_advertising();
+        ESP_LOGI(TAG, "BLE server initialized and advertising for WiFi config");
+    } else {
+        ESP_LOGE(TAG, "Failed to initialize BLE server");
+    }
+}
+
+void WifiBoard::HandleBleData(const char* data, uint16_t length) {
+    ESP_LOGI(TAG, "BLE data received: %.*s", length, data);
+    ParseWifiCredentials(data);
+}
+
+void WifiBoard::HandleBleConnection(bool connected) {
+    if (connected) {
+        ESP_LOGI(TAG, "BLE client connected");
+        // Send status message to client
+        ble_server_send_data("Ready for WiFi configuration", 30);
+    } else {
+        ESP_LOGI(TAG, "BLE client disconnected");
+    }
+}
+
+void WifiBoard::ParseWifiCredentials(const char* data) {
+    ESP_LOGI(TAG, "BLE data received: %s", data);
+    
+    if (strncmp(data, "ssid:", 5) == 0) {
+        std::string ssid = data + 5;
+        ESP_LOGI(TAG, "WiFi SSID received via BLE: %s", ssid.c_str());
+        ble_server_send_data("SSID received, send password", 28);
+        
+        // Store SSID temporarily for later use
+        temp_ssid_ = ssid;
+    }
+    else if (strncmp(data, "pwd:", 4) == 0) {
+        std::string password = data + 4;
+        
+        // Clean up password - remove any duplicate "pwd:" if present
+        size_t pwd_pos = password.find("pwd:");
+        if (pwd_pos != std::string::npos) {
+            password = password.substr(0, pwd_pos);
+        }
+        
+        ESP_LOGI(TAG, "WiFi password received via BLE: %s", password.c_str());
+        
+        // Check if we have a stored SSID
+        if (!temp_ssid_.empty()) {
+            ESP_LOGI(TAG, "WiFi credentials received via BLE: %s", temp_ssid_.c_str());
+            
+            // Save credentials
+            auto& ssid_manager = SsidManager::GetInstance();
+            ssid_manager.AddSsid(temp_ssid_, password);
+            
+            ble_server_send_data("WiFi credentials saved", 25);
+            
+            // Clear temporary SSID
+            temp_ssid_.clear();
+            
+            // Exit config mode and restart
+            wifi_config_mode_ = false;
+            
+            // Send confirmation to BLE client
+            ble_server_send_data("Restarting to connect...", 25);
+            // Small delay to ensure BLE message is sent
+            vTaskDelay(pdMS_TO_TICKS(500));
+            // Restart the entire application to use new credentials
+            esp_restart();
+        } else {
+            ble_server_send_data("Error: No SSID received first", 32);
+        }
+    }
+    else if (strncmp(data, "wifi:", 5) == 0) {
+        // Combined SSID and password format: "wifi:SSID:PASSWORD"
+        std::string credentials = data + 5;
+        size_t colon_pos = credentials.find(':');
+        if (colon_pos != std::string::npos) {
+            std::string ssid = credentials.substr(0, colon_pos);
+            std::string password = credentials.substr(colon_pos + 1);
+            ESP_LOGI(TAG, "WiFi credentials received via BLE: %s", ssid.c_str());
+            
+            // Save credentials
+            auto& ssid_manager = SsidManager::GetInstance();
+            ssid_manager.AddSsid(ssid, password);
+            
+            ble_server_send_data("WiFi credentials saved", 25);
+            
+            // Exit config mode and restart
+            wifi_config_mode_ = false;
+            
+            // Send confirmation to BLE client
+            ble_server_send_data("Restarting to connect...", 25);
+            // Small delay to ensure BLE message is sent
+            vTaskDelay(pdMS_TO_TICKS(500));
+            // Restart the entire application to use new credentials
+            esp_restart();
+        } else {
+            ble_server_send_data("Error: Invalid format", 20);
+        }
+    }
+}
+
+
