@@ -1,9 +1,13 @@
 #pragma once
 #include "lvgl.h"
+#include <stdbool.h>
+
 typedef struct _Animation_t{
     const lv_image_dsc_t **imges;
     int *animations;
     int len;
+    bool use_spiffs;
+    lv_image_dsc_t **spiffs_imgs;  // For SPIFFS-loaded images
 }Animation_t;
 
 
@@ -21,3 +25,12 @@ typedef enum _AnimationType_e {
 }AnimationType_e;
 
 void animation_set_now_animation(int animation);
+bool animation_load_from_spiffs(const char* filename, lv_image_dsc_t* img_dsc);
+void animation_init_spiffs(void);
+bool animation_create_spiffs_animation(Animation_t* anim, const char* filenames[], int count);
+bool animation_load_normal_from_spiffs(void);
+void animation_cleanup_spiffs_animation(Animation_t* anim);
+Animation_t* animation_get_normal_animation(void);
+void animation_load_spiffs_animations(void);
+void animation_show_current_sources(void);
+void test_spiffs_debug(void);

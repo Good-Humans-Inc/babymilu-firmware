@@ -7,6 +7,7 @@
 
 #include "application.h"
 #include "system_info.h"
+#include "animation.h"
 
 #define TAG "main"
 
@@ -23,6 +24,9 @@ extern "C" void app_main(void)
         ret = nvs_flash_init();
     }
     ESP_ERROR_CHECK(ret);
+
+    // Initialize SPIFFS for animation storage
+    animation_init_spiffs();
 
     // Launch the application
     Application::GetInstance().Start();

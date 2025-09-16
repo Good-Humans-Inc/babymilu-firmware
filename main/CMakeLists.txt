@@ -322,3 +322,16 @@ spiffs_create_partition_assets(
     MMAP_FILE_SUPPORT_FORMAT ".aaf"
 )
 endif()
+
+# Add SPIFFS configuration for animations partition
+set(ANIMATIONS_SPIFFS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/spiffs_data")
+if(EXISTS ${ANIMATIONS_SPIFFS_DIR})
+    spiffs_create_partition_image(
+        animations
+        ${ANIMATIONS_SPIFFS_DIR}
+        FLASH_IN_PROJECT
+    )
+    message(STATUS "SPIFFS animations partition configured with data from ${ANIMATIONS_SPIFFS_DIR}")
+else()
+    message(WARNING "SPIFFS animations directory ${ANIMATIONS_SPIFFS_DIR} not found")
+endif()
