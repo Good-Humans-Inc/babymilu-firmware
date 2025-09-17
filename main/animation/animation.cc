@@ -15,9 +15,12 @@
 #include "esp_log.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <cJSON.h>
+#include <esp_crc.h>
 #include <string.h>
 #include <dirent.h>
 #include <sys/stat.h>
+#include <unistd.h>
 extern const lv_image_dsc_t embarrass1;
 extern const lv_image_dsc_t embarrass2;
 extern const lv_image_dsc_t embarrass3;
@@ -239,7 +242,7 @@ void animation_init_spiffs(void)
     esp_vfs_spiffs_conf_t config = {
         .base_path = "/spiffs",
         .partition_label = "animations",
-        .max_files = 10,
+        .max_files = 20,  // Increased for more files
         .format_if_mount_failed = true,
     };
     
@@ -250,7 +253,10 @@ void animation_init_spiffs(void)
     }
     
     spiffs_initialized = true;
-    ESP_LOGI("animation", "SPIFFS initialized successfully");
+    ESP_LOGI("animation", "SPIFFS initialized successfully (read-write mode)");
+    
+    // Create updates directory for atomic operations
+    mkdir("/spiffs/.updates", 0755);
     
     // Try to load SPIFFS animations
     animation_load_spiffs_animations();
@@ -566,6 +572,196 @@ Animation_t* animation_get_normal_animation(void)
         ESP_LOGI("animation", "Using static normal animation from img directory");
         return &static_normal;
     }
+}
+
+// Atomic file write functions for runtime updates
+bool animation_write_file_atomic(const char* filename, const uint8_t* data, size_t size)
+{
+    if (!spiffs_initialized) {
+        ESP_LOGE("animation", "SPIFFS not initialized");
+        return false;
+    }
+    
+    char temp_path[128];
+    char final_path[128];
+    snprintf(temp_path, sizeof(temp_path), "/spiffs/.updates/%s.tmp", filename);
+    snprintf(final_path, sizeof(final_path), "/spiffs/%s", filename);
+    
+    ESP_LOGI("animation", "Writing file atomically: %s (%d bytes)", filename, size);
+    
+    // Write to temp file
+    FILE* f = fopen(temp_path, "wb");
+    if (!f) {
+        ESP_LOGE("animation", "Failed to create temp file: %s", temp_path);
+        return false;
+    }
+    
+    size_t written = fwrite(data, 1, size, f);
+    fclose(f);
+    
+    if (written != size) {
+        ESP_LOGE("animation", "Failed to write complete file: %d/%d bytes", written, size);
+        unlink(temp_path);  // Clean up temp file
+        return false;
+    }
+    
+    // Atomic rename
+    if (rename(temp_path, final_path) != 0) {
+        ESP_LOGE("animation", "Failed to rename temp file to final: %s", final_path);
+        unlink(temp_path);  // Clean up temp file
+        return false;
+    }
+    
+    ESP_LOGI("animation", "Successfully wrote file: %s", final_path);
+    return true;
+}
+
+bool animation_delete_file(const char* filename)
+{
+    if (!spiffs_initialized) {
+        ESP_LOGE("animation", "SPIFFS not initialized");
+        return false;
+    }
+    
+    char full_path[128];
+    snprintf(full_path, sizeof(full_path), "/spiffs/%s", filename);
+    
+    if (unlink(full_path) == 0) {
+        ESP_LOGI("animation", "Successfully deleted file: %s", filename);
+        return true;
+    } else {
+        ESP_LOGE("animation", "Failed to delete file: %s", filename);
+        return false;
+    }
+}
+
+bool animation_file_exists(const char* filename)
+{
+    if (!spiffs_initialized) {
+        return false;
+    }
+    
+    char full_path[128];
+    snprintf(full_path, sizeof(full_path), "/spiffs/%s", filename);
+    
+    FILE* f = fopen(full_path, "rb");
+    if (f) {
+        fclose(f);
+        return true;
+    }
+    return false;
+}
+
+// Manifest management functions
+bool animation_update_manifest(const char* filename, size_t size, const char* hash)
+{
+    if (!spiffs_initialized) {
+        ESP_LOGE("animation", "SPIFFS not initialized");
+        return false;
+    }
+    
+    // Read existing manifest
+    cJSON* manifest = NULL;
+    char manifest_path[128];
+    snprintf(manifest_path, sizeof(manifest_path), "/spiffs/manifest.json");
+    
+    FILE* f = fopen(manifest_path, "rb");
+    if (f) {
+        fseek(f, 0, SEEK_END);
+        size_t file_size = ftell(f);
+        fseek(f, 0, SEEK_SET);
+        
+        char* json_string = (char*)malloc(file_size + 1);
+        if (json_string) {
+            fread(json_string, 1, file_size, f);
+            json_string[file_size] = '\0';
+            manifest = cJSON_Parse(json_string);
+            free(json_string);
+        }
+        fclose(f);
+    }
+    
+    if (!manifest) {
+        manifest = cJSON_CreateObject();
+        cJSON_AddNumberToObject(manifest, "version", 1);
+        cJSON_AddObjectToObject(manifest, "files");
+    }
+    
+    // Update file entry
+    cJSON* files = cJSON_GetObjectItem(manifest, "files");
+    if (!files) {
+        files = cJSON_CreateObject();
+        cJSON_AddItemToObject(manifest, "files", files);
+    }
+    
+    cJSON* file_entry = cJSON_CreateObject();
+    cJSON_AddNumberToObject(file_entry, "size", size);
+    cJSON_AddStringToObject(file_entry, "hash", hash);
+    cJSON_AddNumberToObject(file_entry, "timestamp", esp_timer_get_time() / 1000000); // Unix timestamp
+    
+    cJSON_AddItemToObject(files, filename, file_entry);
+    
+    // Write manifest back
+    char* json_string = cJSON_Print(manifest);
+    if (!json_string) {
+        ESP_LOGE("animation", "Failed to create JSON string");
+        cJSON_Delete(manifest);
+        return false;
+    }
+    
+    bool success = animation_write_file_atomic("manifest.json", (uint8_t*)json_string, strlen(json_string));
+    
+    free(json_string);
+    cJSON_Delete(manifest);
+    
+    if (success) {
+        ESP_LOGI("animation", "Manifest updated for file: %s", filename);
+    } else {
+        ESP_LOGE("animation", "Failed to update manifest for file: %s", filename);
+    }
+    
+    return success;
+}
+
+bool animation_reload_animations_from_manifest(void)
+{
+    if (!spiffs_initialized) {
+        ESP_LOGE("animation", "SPIFFS not initialized");
+        return false;
+    }
+    
+    ESP_LOGI("animation", "Reloading animations from manifest...");
+    
+    // Reload SPIFFS animations
+    animation_load_spiffs_animations();
+    
+    return true;
+}
+
+std::string animation_get_manifest_json(void)
+{
+    if (!spiffs_initialized) {
+        return "{}";
+    }
+    
+    char manifest_path[128];
+    snprintf(manifest_path, sizeof(manifest_path), "/spiffs/manifest.json");
+    
+    FILE* f = fopen(manifest_path, "rb");
+    if (!f) {
+        return "{}";
+    }
+    
+    fseek(f, 0, SEEK_END);
+    size_t file_size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    
+    std::string result;
+    result.resize(file_size);
+    fread(&result[0], 1, file_size, f);
+    fclose(f);
+    
+    return result;
 }
 
 void animation_show_current_sources(void)

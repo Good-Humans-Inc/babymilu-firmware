@@ -3,12 +3,14 @@
 
 #include "board.h"
 #include "ble_server.h"  // BLE server enabled
+#include "esp_http_server.h"
 
 class WifiBoard : public Board {
 protected:
     bool wifi_config_mode_ = false;
     bool ble_initialized_ = false;  // BLE server enabled
     std::string temp_ssid_;  // Temporary storage for SSID during BLE configuration
+    httpd_handle_t file_server_ = nullptr;  // HTTP server for file uploads
     void EnterWifiConfigMode();
     void InitializeBleServer();  // BLE server enabled
     void ParseWifiCredentials(const char* data);  // BLE server enabled
@@ -33,6 +35,10 @@ public:
     virtual void ClearWifiConfiguration();
     virtual AudioCodec* GetAudioCodec() override { return nullptr; }
     virtual std::string GetDeviceStatusJson() override;
+    
+    // File upload server methods
+    void StartFileUploadServer();
+    void StopFileUploadServer();
 };
 
 #endif // WIFI_BOARD_H

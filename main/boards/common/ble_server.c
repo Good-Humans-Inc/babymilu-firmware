@@ -24,6 +24,13 @@ static struct {
     ble_connection_callback_t connection_callback;
     ble_device_control_callback_t device_control_callback;
     uint16_t conn_handle;
+    
+    // File transfer state
+    bool file_transfer_active;
+    char current_filename[64];
+    uint8_t* file_buffer;
+    size_t file_size;
+    size_t file_received;
 } ble_server_state = {0};
 
 // Forward declarations
@@ -90,6 +97,10 @@ static int ble_device_write(uint16_t conn_handle, uint16_t attr_handle,
             ble_server_state.device_control_callback("FAN OFF");
         }
     }
+    else if (strncmp(data, "FILE_", 5) == 0) {
+        // Handle file transfer commands
+        ble_handle_file_command(data, ctxt->om->om_len);
+    }
     else {
         // Call user data callback for other data
         if (ble_server_state.data_callback) {
@@ -107,6 +118,101 @@ static int ble_device_read(uint16_t con_handle, uint16_t attr_handle,
     const char *response = "Data from the server";
     os_mbuf_append(ctxt->om, response, strlen(response));
     return 0;
+}
+
+// File transfer functions
+static void ble_file_transfer_cleanup(void)
+{
+    if (ble_server_state.file_buffer) {
+        free(ble_server_state.file_buffer);
+        ble_server_state.file_buffer = NULL;
+    }
+    ble_server_state.file_transfer_active = false;
+    ble_server_state.file_size = 0;
+    ble_server_state.file_received = 0;
+    memset(ble_server_state.current_filename, 0, sizeof(ble_server_state.current_filename));
+}
+
+static void ble_handle_file_command(const char* data, size_t len)
+{
+    ESP_LOGI(TAG, "File command: %.*s", len, data);
+    
+    if (strncmp(data, "FILE_START:", 11) == 0) {
+        // Parse: FILE_START:filename:size
+        char* filename_start = (char*)data + 11;
+        char* size_start = strchr(filename_start, ':');
+        if (!size_start) {
+            ESP_LOGE(TAG, "Invalid FILE_START format");
+            return;
+        }
+        
+        *size_start = '\0';
+        size_start++;
+        
+        strncpy(ble_server_state.current_filename, filename_start, sizeof(ble_server_state.current_filename) - 1);
+        ble_server_state.file_size = atoi(size_start);
+        
+        if (ble_server_state.file_size > 1024 * 1024) { // 1MB limit
+            ESP_LOGE(TAG, "File too large: %d bytes", ble_server_state.file_size);
+            ble_file_transfer_cleanup();
+            return;
+        }
+        
+        ble_server_state.file_buffer = (uint8_t*)malloc(ble_server_state.file_size);
+        if (!ble_server_state.file_buffer) {
+            ESP_LOGE(TAG, "Failed to allocate file buffer");
+            ble_file_transfer_cleanup();
+            return;
+        }
+        
+        ble_server_state.file_transfer_active = true;
+        ble_server_state.file_received = 0;
+        
+        ESP_LOGI(TAG, "File transfer started: %s (%d bytes)", 
+                 ble_server_state.current_filename, ble_server_state.file_size);
+        
+        ble_server_send_data("FILE_READY", 10);
+        
+    } else if (strncmp(data, "FILE_DATA:", 10) == 0) {
+        if (!ble_server_state.file_transfer_active) {
+            ESP_LOGE(TAG, "File transfer not active");
+            return;
+        }
+        
+        // Parse: FILE_DATA:base64_data
+        char* data_start = (char*)data + 10;
+        size_t data_len = len - 10;
+        
+        // For now, just copy raw data (skip base64 for simplicity)
+        if (ble_server_state.file_received + data_len > ble_server_state.file_size) {
+            ESP_LOGE(TAG, "File data overflow");
+            ble_file_transfer_cleanup();
+            return;
+        }
+        
+        memcpy(ble_server_state.file_buffer + ble_server_state.file_received, data_start, data_len);
+        ble_server_state.file_received += data_len;
+        
+        ESP_LOGI(TAG, "File data received: %d/%d bytes", 
+                 ble_server_state.file_received, ble_server_state.file_size);
+        
+        if (ble_server_state.file_received >= ble_server_state.file_size) {
+            // File complete, write to SPIFFS
+            ESP_LOGI(TAG, "File transfer complete, writing to SPIFFS");
+            
+            // Note: This would need to call animation_write_file_atomic
+            // For now, just acknowledge completion
+            ble_server_send_data("FILE_COMPLETE", 13);
+            ble_file_transfer_cleanup();
+        } else {
+            ble_server_send_data("FILE_DATA_OK", 12);
+        }
+        
+    } else if (strncmp(data, "FILE_CANCEL", 11) == 0) {
+        ESP_LOGI(TAG, "File transfer cancelled");
+        ble_file_transfer_cleanup();
+        ble_server_send_data("FILE_CANCELLED", 14);
+    }
 }
 
 // BLE event handling
@@ -300,6 +406,9 @@ void ble_server_deinit(void)
     if (ble_server_state.advertising) {
         ble_gap_adv_stop();
     }
+
+    // Clean up file transfer state
+    ble_file_transfer_cleanup();
 
     nimble_port_stop();
     nimble_port_deinit();

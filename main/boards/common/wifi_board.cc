@@ -18,6 +18,7 @@
 #include <wifi_station.h>
 #include <wifi_configuration_ap.h>
 #include <ssid_manager.h>
+#include "animation/animation.h"
 
 static const char *TAG = "WifiBoard";
 
@@ -39,6 +40,9 @@ WifiBoard::~WifiBoard() {
     if (ble_initialized_) {
         ble_server_deinit();
         ble_initialized_ = false;
+    }
+    if (file_server_) {
+        StopFileUploadServer();
     }
 }
 
@@ -143,6 +147,9 @@ void WifiBoard::StartNetwork() {
             ble_server_deinit();
             ble_initialized_ = false;
         }
+        
+        // Start file upload server
+        StartFileUploadServer();
     });
     
     wifi_station.Start();
@@ -270,6 +277,212 @@ void WifiBoard::ClearWifiConfiguration() {
     }
     
     ESP_LOGI(TAG, "WiFi configuration cleared successfully");
+}
+
+// HTTP Server Implementation for File Uploads
+static esp_err_t upload_animation_handler(httpd_req_t *req)
+{
+    ESP_LOGI(TAG, "File upload request received");
+    
+    // Get content length
+    size_t content_length = req->content_len;
+    if (content_length == 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "No content");
+        return ESP_FAIL;
+    }
+    
+    // Validate file size (1MB limit)
+    if (content_length > 1024 * 1024) {
+        httpd_resp_send_err(req, HTTPD_413_REQUEST_ENTITY_TOO_LARGE, "File too large (max 1MB)");
+        return ESP_FAIL;
+    }
+    
+    // Get filename from query parameter
+    char filename[64] = {0};
+    size_t buf_len = httpd_req_get_url_query_len(req) + 1;
+    if (buf_len > 1) {
+        char* buf = (char*)malloc(buf_len);
+        if (buf && httpd_req_get_url_query_str(req, buf, buf_len) == ESP_OK) {
+            char param[32];
+            if (httpd_query_key_value(buf, "filename", param, sizeof(param)) == ESP_OK) {
+                strncpy(filename, param, sizeof(filename) - 1);
+            }
+        }
+        if (buf) free(buf);
+    }
+    
+    if (strlen(filename) == 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing filename parameter");
+        return ESP_FAIL;
+    }
+    
+    // Validate filename (no path traversal, reasonable length)
+    if (strlen(filename) > 32 || strstr(filename, "..") || strstr(filename, "/") || strstr(filename, "\\")) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid filename");
+        return ESP_FAIL;
+    }
+    
+    ESP_LOGI(TAG, "Uploading file: %s (%d bytes)", filename, content_length);
+    
+    // Allocate buffer for file data
+    uint8_t* file_data = (uint8_t*)malloc(content_length);
+    if (!file_data) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Memory allocation failed");
+        return ESP_FAIL;
+    }
+    
+    // Read file data
+    size_t received = 0;
+    while (received < content_length) {
+        int ret = httpd_req_recv(req, (char*)(file_data + received), content_length - received);
+        if (ret <= 0) {
+            if (ret == HTTPD_SOCK_ERR_TIMEOUT) {
+                continue;
+            }
+            ESP_LOGE(TAG, "Failed to receive file data: %d", ret);
+            free(file_data);
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to receive data");
+            return ESP_FAIL;
+        }
+        received += ret;
+    }
+    
+    // Write file atomically to SPIFFS
+    bool success = animation_write_file_atomic(filename, file_data, content_length);
+    
+    if (success) {
+        // Calculate simple hash for manifest
+        uint32_t crc = esp_crc32_le(0, file_data, content_length);
+        char hash_str[16];
+        snprintf(hash_str, sizeof(hash_str), "%08x", crc);
+        
+        // Update manifest
+        animation_update_manifest(filename, content_length, hash_str);
+        
+        // Reload animations
+        animation_reload_animations_from_manifest();
+        
+        ESP_LOGI(TAG, "File uploaded successfully: %s", filename);
+        httpd_resp_sendstr(req, "{\"success\": true, \"message\": \"File uploaded successfully\"}");
+    } else {
+        ESP_LOGE(TAG, "Failed to write file: %s", filename);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to write file");
+    }
+    
+    free(file_data);
+    return success ? ESP_OK : ESP_FAIL;
+}
+
+static esp_err_t delete_animation_handler(httpd_req_t *req)
+{
+    ESP_LOGI(TAG, "File delete request received");
+    
+    // Get filename from query parameter
+    char filename[64] = {0};
+    size_t buf_len = httpd_req_get_url_query_len(req) + 1;
+    if (buf_len > 1) {
+        char* buf = (char*)malloc(buf_len);
+        if (buf && httpd_req_get_url_query_str(req, buf, buf_len) == ESP_OK) {
+            char param[32];
+            if (httpd_query_key_value(buf, "filename", param, sizeof(param)) == ESP_OK) {
+                strncpy(filename, param, sizeof(filename) - 1);
+            }
+        }
+        if (buf) free(buf);
+    }
+    
+    if (strlen(filename) == 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing filename parameter");
+        return ESP_FAIL;
+    }
+    
+    ESP_LOGI(TAG, "Deleting file: %s", filename);
+    
+    bool success = animation_delete_file(filename);
+    
+    if (success) {
+        ESP_LOGI(TAG, "File deleted successfully: %s", filename);
+        httpd_resp_sendstr(req, "{\"success\": true, \"message\": \"File deleted successfully\"}");
+        return ESP_OK;
+    } else {
+        ESP_LOGE(TAG, "Failed to delete file: %s", filename);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to delete file");
+        return ESP_FAIL;
+    }
+}
+
+static esp_err_t list_files_handler(httpd_req_t *req)
+{
+    ESP_LOGI(TAG, "File list request received");
+    
+    // Get manifest JSON
+    std::string manifest_json = animation_get_manifest_json();
+    
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, manifest_json.c_str());
+    return ESP_OK;
+}
+
+void WifiBoard::StartFileUploadServer()
+{
+    if (file_server_) {
+        ESP_LOGW(TAG, "File upload server already running");
+        return;
+    }
+    
+    httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+    config.server_port = 8080;
+    config.max_uri_handlers = 8;
+    config.max_resp_headers = 8;
+    config.backlog_conn = 5;
+    
+    ESP_LOGI(TAG, "Starting file upload server on port %d", config.server_port);
+    
+    if (httpd_start(&file_server_, &config) == ESP_OK) {
+        // Register upload endpoint
+        httpd_uri_t upload_uri = {
+            .uri = "/upload",
+            .method = HTTP_POST,
+            .handler = upload_animation_handler,
+            .user_ctx = NULL
+        };
+        httpd_register_uri_handler(file_server_, &upload_uri);
+        
+        // Register delete endpoint
+        httpd_uri_t delete_uri = {
+            .uri = "/delete",
+            .method = HTTP_DELETE,
+            .handler = delete_animation_handler,
+            .user_ctx = NULL
+        };
+        httpd_register_uri_handler(file_server_, &delete_uri);
+        
+        // Register list endpoint
+        httpd_uri_t list_uri = {
+            .uri = "/list",
+            .method = HTTP_GET,
+            .handler = list_files_handler,
+            .user_ctx = NULL
+        };
+        httpd_register_uri_handler(file_server_, &list_uri);
+        
+        ESP_LOGI(TAG, "File upload server started successfully");
+        ESP_LOGI(TAG, "Endpoints:");
+        ESP_LOGI(TAG, "  POST /upload?filename=<name> - Upload animation file");
+        ESP_LOGI(TAG, "  DELETE /delete?filename=<name> - Delete animation file");
+        ESP_LOGI(TAG, "  GET /list - List available files");
+    } else {
+        ESP_LOGE(TAG, "Failed to start file upload server");
+    }
+}
+
+void WifiBoard::StopFileUploadServer()
+{
+    if (file_server_) {
+        httpd_stop(file_server_);
+        file_server_ = nullptr;
+        ESP_LOGI(TAG, "File upload server stopped");
+    }
 }
 
 std::string WifiBoard::GetDeviceStatusJson() {

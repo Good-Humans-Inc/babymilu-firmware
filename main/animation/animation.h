@@ -34,3 +34,13 @@ Animation_t* animation_get_normal_animation(void);
 void animation_load_spiffs_animations(void);
 void animation_show_current_sources(void);
 void test_spiffs_debug(void);
+
+// Runtime file management functions
+bool animation_write_file_atomic(const char* filename, const uint8_t* data, size_t size);
+bool animation_delete_file(const char* filename);
+bool animation_file_exists(const char* filename);
+
+// Manifest management functions
+bool animation_update_manifest(const char* filename, size_t size, const char* hash);
+bool animation_reload_animations_from_manifest(void);
+std::string animation_get_manifest_json(void);
