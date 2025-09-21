@@ -60,6 +60,9 @@ private:
     bool DownloadAnimationFile(const std::string& url, const std::string& filename);
     bool SaveAnimationToSpiffs(const std::string& filename, const std::string& data);
     
+    // HTTPS testing
+    bool TestHttpsDownload();
+    
     // Configuration management
     void LoadConfiguration();
     void SaveConfiguration();

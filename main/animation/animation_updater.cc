@@ -11,7 +11,9 @@
 #define TAG "AnimationUpdater"
 
 // Default server URL - change this to your test server
-#define DEFAULT_SERVER_URL "http://192.168.5.15:8081/api/animations"
+// #define DEFAULT_SERVER_URL "http://192.168.5.15:8081/api/animations"
+// Updated for HTTPS testing
+#define DEFAULT_SERVER_URL "https://github.com/Jackson-hangxuan/postman_test/raw/refs/heads/main"
 
 AnimationUpdater& AnimationUpdater::GetInstance() {
     static AnimationUpdater instance;
@@ -128,7 +130,11 @@ void AnimationUpdater::CheckForUpdates() {
     }
     
     ESP_LOGI(TAG, "Manual check for animation updates");
-    CheckServerForUpdates();
+    // COMMENTED OUT: Original HTTP server checking
+    // CheckServerForUpdates();
+    
+    // Use HTTPS testing instead
+    TestHttpsDownload();
 }
 
 void AnimationUpdater::ResetFirstDownloadSuccess() {
@@ -170,11 +176,20 @@ void AnimationUpdater::UpdateLoop() {
     vTaskDelay(pdMS_TO_TICKS(5000)); // 5 seconds
     
     while (is_running_.load()) {
+        // COMMENTED OUT: HTTP server checking for HTTPS testing
+        // if (enabled_.load() && !first_download_success_.load()) {
+        //     CheckServerForUpdates();
+        // } else if (first_download_success_.load()) {
+        //     ESP_LOGI(TAG, "First download successful, skipping update checks");
+        //     // Continue the loop but skip the actual update check
+        // }
+        
+        // HTTPS TESTING: Direct download test (only if not already successful)
         if (enabled_.load() && !first_download_success_.load()) {
-            CheckServerForUpdates();
+            ESP_LOGI(TAG, "Testing HTTPS download...");
+            TestHttpsDownload();
         } else if (first_download_success_.load()) {
-            ESP_LOGI(TAG, "First download successful, skipping update checks");
-            // Continue the loop but skip the actual update check
+            ESP_LOGI(TAG, "HTTPS download already successful, skipping repeated downloads");
         }
         
         // Wait for the specified interval
@@ -185,6 +200,14 @@ void AnimationUpdater::UpdateLoop() {
     // Don't delete the task here - let the Stop() method handle it
 }
 
+// COMMENTED OUT: Original HTTP server checking logic for HTTPS testing
+// Stub implementation to satisfy linker
+bool AnimationUpdater::CheckServerForUpdates() {
+    ESP_LOGI(TAG, "CheckServerForUpdates() called - using HTTPS testing instead");
+    return TestHttpsDownload();
+}
+
+/*
 bool AnimationUpdater::CheckServerForUpdates() {
     check_count_.fetch_add(1);
     last_check_time_.store(esp_timer_get_time() / 1000); // Convert to milliseconds
@@ -357,6 +380,30 @@ bool AnimationUpdater::CheckServerForUpdates() {
         return false;
     }
 }
+*/
+
+// NEW: HTTPS testing method
+bool AnimationUpdater::TestHttpsDownload() {
+    ESP_LOGI(TAG, "Testing HTTPS download...");
+    
+    // Test with the Gitee raw URL for normal1.bin (direct access, no redirects, better China performance)
+    std::string test_url = "https://gitee.com/xie-hangxuan/test/raw/master/normal1.bin";
+    std::string test_filename = "normal1.bin";
+    
+    ESP_LOGI(TAG, "Attempting to download from: %s", test_url.c_str());
+    
+    bool success = DownloadAnimationFile(test_url, test_filename);
+    
+    if (success) {
+        ESP_LOGI(TAG, "HTTPS download test successful!");
+        first_download_success_.store(true);
+        ReloadAnimations();
+    } else {
+        ESP_LOGE(TAG, "HTTPS download test failed!");
+    }
+    
+    return success;
+}
 
 bool AnimationUpdater::DownloadAnimationFile(const std::string& url, const std::string& filename) {
     try {
@@ -371,25 +418,45 @@ bool AnimationUpdater::DownloadAnimationFile(const std::string& url, const std::
         // Set headers for download
         http->SetHeader("User-Agent", "Xiaozhi-Animation-Updater/1.0");
         http->SetHeader("Accept", "application/octet-stream");
+        http->SetHeader("Accept-Encoding", "identity"); // Disable compression
         http->SetTimeout(60000); // 60 second timeout for downloads
         
-        ESP_LOGD(TAG, "Downloading from: %s", url.c_str());
+        ESP_LOGI(TAG, "Downloading from: %s", url.c_str());
+        ESP_LOGI(TAG, "HTTP client created, attempting connection...");
         
         if (!http->Open("GET", url)) {
             ESP_LOGE(TAG, "Failed to open download connection");
             return false;
         }
         
+        ESP_LOGI(TAG, "HTTP connection opened successfully");
+        
         int status_code = http->GetStatusCode();
+        ESP_LOGI(TAG, "HTTP Status Code: %d", status_code);
+        
         if (status_code != 200) {
             ESP_LOGE(TAG, "Download failed with status code: %d", status_code);
             return false;
         }
         
         size_t content_length = http->GetBodyLength();
+        ESP_LOGI(TAG, "Content-Length: %zu", content_length);
+        
         if (content_length == 0) {
-            ESP_LOGE(TAG, "Empty file received");
-            return false;
+            ESP_LOGE(TAG, "Empty file received - Content-Length is 0");
+            
+            // Try to read anyway in case content-length is not set
+            ESP_LOGI(TAG, "Attempting to read despite zero content-length...");
+            std::string test_data = http->ReadAll();
+            ESP_LOGI(TAG, "ReadAll() returned %zu bytes", test_data.length());
+            
+            if (test_data.empty()) {
+                ESP_LOGE(TAG, "No data received from server");
+                return false;
+            } else {
+                ESP_LOGI(TAG, "Received data despite zero content-length, proceeding...");
+                content_length = test_data.length();
+            }
         }
         
         ESP_LOGI(TAG, "Downloading %s (%zu bytes)", filename.c_str(), content_length);
