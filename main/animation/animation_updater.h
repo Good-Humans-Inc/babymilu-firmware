@@ -62,6 +62,9 @@ private:
     
     // HTTPS testing
     bool TestHttpsDownload();
+    bool TestHttpsConnection(const std::string& url);
+    std::string GetDownloadUrlFromResponse(const std::string& url);
+    std::string ExtractFilenameFromUrl(const std::string& url);
     
     // Configuration management
     void LoadConfiguration();

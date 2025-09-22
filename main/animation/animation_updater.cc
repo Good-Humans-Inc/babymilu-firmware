@@ -382,17 +382,31 @@ bool AnimationUpdater::CheckServerForUpdates() {
 }
 */
 
-// NEW: HTTPS testing method
+// NEW: HTTPS testing method - NOW WITH URL PARSING AND DOWNLOAD
 bool AnimationUpdater::TestHttpsDownload() {
-    ESP_LOGI(TAG, "Testing HTTPS download...");
+    ESP_LOGI(TAG, "Testing HTTPS connection and downloading file...");
     
-    // Test with the Gitee raw URL for normal1.bin (direct access, no redirects, better China performance)
-    std::string test_url = "https://gitee.com/xie-hangxuan/test/raw/master/normal1.bin";
-    std::string test_filename = "normal1.bin";
+    // Test with the provided HTTPS endpoint
+    std::string test_url = "https://1379890832-bqi413zoc2.ap-shanghai.tencentscf.com";
     
-    ESP_LOGI(TAG, "Attempting to download from: %s", test_url.c_str());
+    ESP_LOGI(TAG, "Attempting to connect to: %s", test_url.c_str());
     
-    bool success = DownloadAnimationFile(test_url, test_filename);
+    // Get the response and parse the download URL
+    std::string download_url = GetDownloadUrlFromResponse(test_url);
+    
+    if (download_url.empty()) {
+        ESP_LOGE(TAG, "Failed to get download URL from response");
+        return false;
+    }
+    
+    ESP_LOGI(TAG, "Got download URL: %s", download_url.c_str());
+    
+    // Extract filename from URL
+    std::string filename = ExtractFilenameFromUrl(download_url);
+    ESP_LOGI(TAG, "Extracted filename: %s", filename.c_str());
+    
+    // Download the actual file
+    bool success = DownloadAnimationFile(download_url, filename);
     
     if (success) {
         ESP_LOGI(TAG, "HTTPS download test successful!");
@@ -403,6 +417,151 @@ bool AnimationUpdater::TestHttpsDownload() {
     }
     
     return success;
+}
+
+// NEW: HTTPS connection testing method (no file download)
+bool AnimationUpdater::TestHttpsConnection(const std::string& url) {
+    try {
+        auto& board = Board::GetInstance();
+        auto http = std::unique_ptr<Http>(board.CreateHttp());
+        
+        if (!http) {
+            ESP_LOGE(TAG, "Failed to create HTTP client for connection test");
+            return false;
+        }
+        
+        // Set headers for connection test
+        http->SetHeader("User-Agent", "Xiaozhi-Animation-Test/1.0");
+        http->SetHeader("Accept", "*/*");
+        http->SetHeader("Accept-Encoding", "identity"); // Disable compression
+        http->SetTimeout(30000); // 30 second timeout for connection test
+        
+        ESP_LOGI(TAG, "Testing connection to: %s", url.c_str());
+        ESP_LOGI(TAG, "HTTP client created, attempting connection...");
+        
+        if (!http->Open("GET", url)) {
+            ESP_LOGE(TAG, "Failed to open HTTPS connection");
+            return false;
+        }
+        
+        ESP_LOGI(TAG, "HTTPS connection opened successfully");
+        
+        int status_code = http->GetStatusCode();
+        ESP_LOGI(TAG, "HTTP Status Code: %d", status_code);
+        
+        // Log response headers
+        size_t content_length = http->GetBodyLength();
+        ESP_LOGI(TAG, "Content-Length: %zu", content_length);
+        
+        // Try to read a small amount of response data to test the connection
+        char buffer[512];
+        int bytes_read = http->Read(buffer, sizeof(buffer) - 1);
+        
+        if (bytes_read > 0) {
+            buffer[bytes_read] = '\0'; // Null terminate for logging
+            ESP_LOGI(TAG, "Response data (first %d bytes): %s", bytes_read, buffer);
+        } else {
+            ESP_LOGI(TAG, "No response data received (bytes_read: %d)", bytes_read);
+        }
+        
+        // Try to read all response data for complete testing
+        std::string full_response = http->ReadAll();
+        ESP_LOGI(TAG, "Full response length: %zu bytes", full_response.length());
+        
+        if (!full_response.empty()) {
+            // Log first 200 characters of response
+            size_t preview_length = std::min(static_cast<size_t>(200), full_response.length());
+            std::string preview = full_response.substr(0, preview_length);
+            ESP_LOGI(TAG, "Response preview: %s", preview.c_str());
+        }
+        
+        http->Close();
+        
+        // Consider connection successful if we got any response (even error codes)
+        if (status_code > 0) {
+            ESP_LOGI(TAG, "HTTPS connection test completed successfully");
+            return true;
+        } else {
+            ESP_LOGE(TAG, "HTTPS connection test failed - no status code received");
+            return false;
+        }
+        
+    } catch (const std::exception& e) {
+        ESP_LOGE(TAG, "Exception in TestHttpsConnection: %s", e.what());
+        return false;
+    }
+}
+
+// Helper method to get download URL from HTTPS response
+std::string AnimationUpdater::GetDownloadUrlFromResponse(const std::string& url) {
+    try {
+        auto& board = Board::GetInstance();
+        auto http = std::unique_ptr<Http>(board.CreateHttp());
+        
+        if (!http) {
+            ESP_LOGE(TAG, "Failed to create HTTP client for URL parsing");
+            return "";
+        }
+        
+        // Set headers for connection test
+        http->SetHeader("User-Agent", "Xiaozhi-Animation-Test/1.0");
+        http->SetHeader("Accept", "*/*");
+        http->SetHeader("Accept-Encoding", "identity"); // Disable compression
+        http->SetTimeout(30000); // 30 second timeout for connection test
+        
+        ESP_LOGI(TAG, "Getting response from: %s", url.c_str());
+        
+        if (!http->Open("GET", url)) {
+            ESP_LOGE(TAG, "Failed to open HTTPS connection for URL parsing");
+            return "";
+        }
+        
+        int status_code = http->GetStatusCode();
+        ESP_LOGI(TAG, "HTTP Status Code: %d", status_code);
+        
+        if (status_code != 200) {
+            ESP_LOGE(TAG, "Failed to get response, status code: %d", status_code);
+            return "";
+        }
+        
+        // Read the response data
+        std::string response = http->ReadAll();
+        http->Close();
+        
+        ESP_LOGI(TAG, "Response received: %s", response.c_str());
+        
+        // The response should contain the download URL
+        // Trim any whitespace
+        response.erase(0, response.find_first_not_of(" \t\n\r"));
+        response.erase(response.find_last_not_of(" \t\n\r") + 1);
+        
+        return response;
+        
+    } catch (const std::exception& e) {
+        ESP_LOGE(TAG, "Exception in GetDownloadUrlFromResponse: %s", e.what());
+        return "";
+    }
+}
+
+// Helper method to extract filename from URL
+std::string AnimationUpdater::ExtractFilenameFromUrl(const std::string& url) {
+    // Find the last '/' in the URL
+    size_t last_slash = url.find_last_of('/');
+    if (last_slash == std::string::npos) {
+        ESP_LOGW(TAG, "No slash found in URL, using default filename");
+        return "downloaded_animation.bin";
+    }
+    
+    // Extract everything after the last slash
+    std::string filename = url.substr(last_slash + 1);
+    
+    // If filename is empty, use default
+    if (filename.empty()) {
+        ESP_LOGW(TAG, "Empty filename extracted, using default");
+        return "downloaded_animation.bin";
+    }
+    
+    return filename;
 }
 
 bool AnimationUpdater::DownloadAnimationFile(const std::string& url, const std::string& filename) {
