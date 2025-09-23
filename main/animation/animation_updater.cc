@@ -389,6 +389,10 @@ bool AnimationUpdater::TestHttpsDownload() {
     // Test with the provided HTTPS endpoint
     std::string test_url = "https://1379890832-bqi413zoc2.ap-shanghai.tencentscf.com";
     
+    // Add device_id to the URL for Flask program handling
+    std::string device_id = SystemInfo::GetMacAddress();
+    test_url += "?device_id=" + device_id;
+    
     ESP_LOGI(TAG, "Attempting to connect to: %s", test_url.c_str());
     
     // Get the response and parse the download URL
