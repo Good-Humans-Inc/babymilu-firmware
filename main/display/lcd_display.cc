@@ -285,10 +285,13 @@ LcdDisplay::~LcdDisplay()
     {
         lv_obj_del(content_);
     }
+    // Status bar commented out for full image scaling
+    /*
     if (status_bar_ != nullptr)
     {
         lv_obj_del(status_bar_);
     }
+    */
     if (side_bar_ != nullptr)
     {
         lv_obj_del(side_bar_);
@@ -342,19 +345,21 @@ void LcdDisplay::SetupUI()
     lv_obj_set_style_bg_color(container_, current_theme_.background, 0);
     lv_obj_set_style_border_color(container_, current_theme_.border, 0);
 
-    /* Status bar */
+    /* Status bar - COMMENTED OUT FOR FULL IMAGE SCALING */
+    /*
     status_bar_ = lv_obj_create(container_);
     lv_obj_set_size(status_bar_, LV_HOR_RES, LV_SIZE_CONTENT);
     lv_obj_set_style_radius(status_bar_, 0, 0);
     lv_obj_set_style_bg_color(status_bar_, current_theme_.background, 0);
     lv_obj_set_style_text_color(status_bar_, current_theme_.text, 0);
+    */
 
     /* Content - Chat area */
     content_ = lv_obj_create(container_);
     lv_obj_set_style_radius(content_, 0, 0);
     lv_obj_set_width(content_, LV_HOR_RES);
     lv_obj_set_flex_grow(content_, 1);
-    lv_obj_set_style_pad_all(content_, 10, 0);
+    lv_obj_set_style_pad_all(content_, 0, 0);  // REMOVE ALL PADDING FOR FULL SCREEN
     lv_obj_set_style_bg_color(content_, current_theme_.chat_background, 0); // Background for chat area
     lv_obj_set_style_border_color(content_, current_theme_.border, 0);      // Border color for chat area
 
@@ -364,13 +369,14 @@ void LcdDisplay::SetupUI()
 
     // Create a flex container for chat messages
     lv_obj_set_flex_flow(content_, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(content_, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
-    lv_obj_set_style_pad_row(content_, 10, 0); // Space between messages
+    lv_obj_set_flex_align(content_, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER); // CENTER ALIGNMENT FOR FULL SCREEN
+    lv_obj_set_style_pad_row(content_, 0, 0); // Remove space between messages for full screen
 
     // We'll create chat messages dynamically in SetChatMessage
     chat_message_label_ = nullptr;
 
-    /* Status bar */
+    /* Status bar elements - COMMENTED OUT FOR FULL IMAGE SCALING */
+    /*
     lv_obj_set_flex_flow(status_bar_, LV_FLEX_FLOW_ROW);
     lv_obj_set_style_pad_all(status_bar_, 0, 0);
     lv_obj_set_style_border_width(status_bar_, 0, 0);
@@ -420,7 +426,10 @@ void LcdDisplay::SetupUI()
     lv_obj_set_style_text_font(battery_label_, fonts_.icon_font, 0);
     lv_obj_set_style_text_color(battery_label_, current_theme_.text, 0);
     lv_obj_set_style_margin_left(battery_label_, 5, 0); // 添加左边距，与前面的元素分隔
+    */
 
+    // Low battery popup - COMMENTED OUT FOR FULL SCREEN DISPLAY
+    /*
     low_battery_popup_ = lv_obj_create(screen);
     lv_obj_set_scrollbar_mode(low_battery_popup_, LV_SCROLLBAR_MODE_OFF);
     lv_obj_set_size(low_battery_popup_, LV_HOR_RES * 0.9, fonts_.text_font->line_height * 2);
@@ -432,6 +441,7 @@ void LcdDisplay::SetupUI()
     lv_obj_set_style_text_color(low_battery_label_, lv_color_white(), 0);
     lv_obj_center(low_battery_label_);
     lv_obj_add_flag(low_battery_popup_, LV_OBJ_FLAG_HIDDEN);
+    */
 }
 #if CONFIG_IDF_TARGET_ESP32P4
 #define MAX_MESSAGES 40
@@ -711,13 +721,60 @@ void LcdDisplay::SetPreviewImage(const lv_img_dsc_t *img_dsc)
         lv_coord_t img_width = copied_img_dsc->header.w;
         lv_coord_t img_height = copied_img_dsc->header.h;
 
-        lv_coord_t zoom_w = (max_width * 256) / img_width;
-        lv_coord_t zoom_h = (max_height * 256) / img_height;
+        // Safety checks to prevent division by zero
+        if (img_width <= 0 || img_height <= 0) {
+            ESP_LOGE(TAG, "Invalid image dimensions in SetPreviewImage: %dx%d", img_width, img_height);
+            heap_caps_free(copied_data);
+            heap_caps_free(copied_img_dsc);
+            lv_obj_del(img_bubble);
+            return;
+        }
+
+        lv_coord_t zoom_w = 0;
+        lv_coord_t zoom_h = 0;
+        
+        // Safe division with overflow protection
+        if (img_width > 0 && max_width > 0) {
+            int64_t zoom_w_64 = ((int64_t)max_width * 256) / img_width;
+            if (zoom_w_64 > INT32_MAX) {
+                zoom_w = INT32_MAX;
+            } else if (zoom_w_64 < INT32_MIN) {
+                zoom_w = INT32_MIN;
+            } else {
+                zoom_w = (lv_coord_t)zoom_w_64;
+            }
+        } else {
+            ESP_LOGE(TAG, "Division by zero prevented in SetPreviewImage: img_width=%d, max_width=%d", img_width, max_width);
+            heap_caps_free(copied_data);
+            heap_caps_free(copied_img_dsc);
+            lv_obj_del(img_bubble);
+            return;
+        }
+        
+        if (img_height > 0 && max_height > 0) {
+            int64_t zoom_h_64 = ((int64_t)max_height * 256) / img_height;
+            if (zoom_h_64 > INT32_MAX) {
+                zoom_h = INT32_MAX;
+            } else if (zoom_h_64 < INT32_MIN) {
+                zoom_h = INT32_MIN;
+            } else {
+                zoom_h = (lv_coord_t)zoom_h_64;
+            }
+        } else {
+            ESP_LOGE(TAG, "Division by zero prevented in SetPreviewImage: img_height=%d, max_height=%d", img_height, max_height);
+            heap_caps_free(copied_data);
+            heap_caps_free(copied_img_dsc);
+            lv_obj_del(img_bubble);
+            return;
+        }
+        
         lv_coord_t zoom = (zoom_w < zoom_h) ? zoom_w : zoom_h;
 
-        // Ensure zoom doesn't exceed 256 (100%)
+        // Ensure zoom doesn't exceed 256 (100%) and is valid
         if (zoom > 256)
             zoom = 256;
+        if (zoom <= 0)
+            zoom = 256;  // Fallback to 100% if invalid
 
         // Set image properties
         lv_image_set_src(preview_image, copied_img_dsc);
@@ -773,12 +830,14 @@ void LcdDisplay::SetupUI()
     lv_obj_set_style_bg_color(container_, current_theme_.background, 0);
     lv_obj_set_style_border_color(container_, current_theme_.border, 0);
 
-    /* Status bar */
+    /* Status bar - COMMENTED OUT FOR FULL IMAGE SCALING */
+    /*
     status_bar_ = lv_obj_create(container_);
     lv_obj_set_size(status_bar_, LV_HOR_RES, fonts_.text_font->line_height);
     lv_obj_set_style_radius(status_bar_, 0, 0);
     lv_obj_set_style_bg_color(status_bar_, current_theme_.background, 0);
     lv_obj_set_style_text_color(status_bar_, current_theme_.text, 0);
+    */
 
     /* Content */
     content_ = lv_obj_create(container_);
@@ -786,13 +845,15 @@ void LcdDisplay::SetupUI()
     lv_obj_set_style_radius(content_, 0, 0);
     lv_obj_set_width(content_, LV_HOR_RES);
     lv_obj_set_flex_grow(content_, 1);
-    lv_obj_set_style_pad_all(content_, 5, 0);
+    lv_obj_set_style_pad_all(content_, 0, 0);  // Remove padding to maximize space
     lv_obj_set_style_bg_color(content_, current_theme_.chat_background, 0);
     lv_obj_set_style_border_color(content_, current_theme_.border, 0); // Border color for content
 
     lv_obj_set_flex_flow(content_, LV_FLEX_FLOW_COLUMN);                                                     // 垂直布局（从上到下）
-    lv_obj_set_flex_align(content_, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_SPACE_EVENLY); // 子对象居中对齐，等距分布
+    lv_obj_set_flex_align(content_, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER); // 子对象居中对齐，优先显示emotion
 
+    // UI elements commented out for full screen display
+    /*
     emotion_label_ = lv_img_create(content_);
 
     preview_image_ = lv_image_create(content_);
@@ -806,8 +867,10 @@ void LcdDisplay::SetupUI()
     lv_label_set_long_mode(chat_message_label_, LV_LABEL_LONG_WRAP);           // 设置为自动换行模式
     lv_obj_set_style_text_align(chat_message_label_, LV_TEXT_ALIGN_CENTER, 0); // 设置文本居中对齐
     lv_obj_set_style_text_color(chat_message_label_, current_theme_.text, 0);
+    */
 
-    /* Status bar */
+    /* Status bar elements - COMMENTED OUT FOR FULL IMAGE SCALING */
+    /*
     lv_obj_set_flex_flow(status_bar_, LV_FLEX_FLOW_ROW);
     lv_obj_set_style_pad_all(status_bar_, 0, 0);
     lv_obj_set_style_border_width(status_bar_, 0, 0);
@@ -842,7 +905,10 @@ void LcdDisplay::SetupUI()
     lv_label_set_text(battery_label_, "");
     lv_obj_set_style_text_font(battery_label_, fonts_.icon_font, 0);
     lv_obj_set_style_text_color(battery_label_, current_theme_.text, 0);
+    */
 
+    // Low battery popup - COMMENTED OUT FOR FULL SCREEN DISPLAY
+    /*
     low_battery_popup_ = lv_obj_create(screen);
     lv_obj_set_scrollbar_mode(low_battery_popup_, LV_SCROLLBAR_MODE_OFF);
     lv_obj_set_size(low_battery_popup_, LV_HOR_RES * 0.9, fonts_.text_font->line_height * 2);
@@ -854,6 +920,7 @@ void LcdDisplay::SetupUI()
     lv_obj_set_style_text_color(low_battery_label_, lv_color_white(), 0);
     lv_obj_center(low_battery_label_);
     lv_obj_add_flag(low_battery_popup_, LV_OBJ_FLAG_HIDDEN);
+    */
 }
 
 void LcdDisplay::SetPreviewImage(const lv_img_dsc_t *img_dsc)
@@ -866,25 +933,58 @@ void LcdDisplay::SetPreviewImage(const lv_img_dsc_t *img_dsc)
 
     if (img_dsc != nullptr)
     {
+        // Safety checks to prevent division by zero
+        lv_coord_t img_width = img_dsc->header.w;
+        if (img_width <= 0) {
+            ESP_LOGE(TAG, "Invalid image width in simple SetPreviewImage: %d", img_width);
+            return;
+        }
+        
+        // Safe division with overflow protection
+        lv_coord_t scale = 0;
+        if (img_width > 0 && width_ > 0) {
+            int64_t scale_64 = ((int64_t)128 * width_) / img_width;
+            if (scale_64 > INT32_MAX) {
+                scale = INT32_MAX;
+            } else if (scale_64 < INT32_MIN) {
+                scale = INT32_MIN;
+            } else {
+                scale = (lv_coord_t)scale_64;
+            }
+        } else {
+            ESP_LOGE(TAG, "Division by zero prevented in simple SetPreviewImage: img_width=%d, width_=%d", img_width, width_);
+            return;
+        }
+        
+        // Ensure scale is valid before setting
+        if (scale <= 0) {
+            ESP_LOGW(TAG, "Invalid scale value in simple SetPreviewImage: %d, using default", scale);
+            scale = 128;  // Default scale
+        }
+        
         // zoom factor 0.5
-        lv_image_set_scale(preview_image_, 128 * width_ / img_dsc->header.w);
+        lv_image_set_scale(preview_image_, scale);
         // 设置图片源并显示预览图片
         lv_image_set_src(preview_image_, img_dsc);
         lv_obj_clear_flag(preview_image_, LV_OBJ_FLAG_HIDDEN);
-        // 隐藏emotion_label_
+        // 隐藏emotion_label_ - Status bar is disabled, skip
+        /*
         if (emotion_label_ != nullptr)
         {
             lv_obj_add_flag(emotion_label_, LV_OBJ_FLAG_HIDDEN);
         }
+        */
     }
     else
     {
-        // 隐藏预览图片并显示emotion_label_
+        // 隐藏预览图片并显示emotion_label_ - Status bar is disabled, skip
         lv_obj_add_flag(preview_image_, LV_OBJ_FLAG_HIDDEN);
+        /*
         if (emotion_label_ != nullptr)
         {
             lv_obj_clear_flag(emotion_label_, LV_OBJ_FLAG_HIDDEN);
         }
+        */
     }
 }
 #endif
@@ -927,9 +1027,16 @@ void LcdDisplay::SetEmotion(const char *emotion)
                            { return e.text == emotion_view; });
 
     DisplayLockGuard lock(this);
+    
+    // Create emotion_label_ in content area if it doesn't exist (status bar disabled)
+    if (emotion_label_ == nullptr && content_ != nullptr) {
+        emotion_label_ = lv_img_create(content_);
+        lv_obj_align(emotion_label_, LV_ALIGN_CENTER, 0, 0);
+    }
+    
     if (emotion_label_ == nullptr)
     {
-        return;
+        return; // Still can't create, skip emotion setting
     }
 
     // 如果找到匹配的表情就显示对应图标，否则显示默认的neutral表情
@@ -943,38 +1050,166 @@ void LcdDisplay::SetEmotion(const char *emotion)
     }
 
 #if !CONFIG_USE_WECHAT_MESSAGE_STYLE
-    // 显示emotion_label_，隐藏preview_image_
+    // 显示emotion_label_，隐藏preview_image_ - Status bar is disabled, skip
+    /*
     lv_obj_clear_flag(emotion_label_, LV_OBJ_FLAG_HIDDEN);
     if (preview_image_ != nullptr)
     {
         lv_obj_add_flag(preview_image_, LV_OBJ_FLAG_HIDDEN);
     }
+    */
 #endif
 }
 
 void LcdDisplay::SetEmotionImg(const lv_image_dsc_t *img)
 {
     DisplayLockGuard lock(this);
+    
+    // Create emotion_label_ in content area if it doesn't exist (status bar disabled)
+    if (emotion_label_ == nullptr && content_ != nullptr) {
+        emotion_label_ = lv_img_create(content_);
+        lv_obj_align(emotion_label_, LV_ALIGN_CENTER, 0, 0);
+        // Remove any padding/margins for full screen display
+        lv_obj_set_style_pad_all(emotion_label_, 0, 0);
+        lv_obj_set_style_margin_all(emotion_label_, 0, 0);
+        lv_obj_set_style_border_width(emotion_label_, 0, 0);
+    }
+    
+    if (emotion_label_ == nullptr) {
+        return; // Still can't create, skip emotion image setting
+    }
+    
+    // Additional safety check for image data validity
+    if (img != nullptr && img->data == nullptr) {
+        ESP_LOGE(TAG, "Image data is null");
+        return;
+    }
+    
     lv_img_set_src(emotion_label_, img);
+    
+    // Scale animation to fit display better - 128x128 -> 412x412 FULL SCREEN SCALING
+    if (img != nullptr) {
+        // Safety checks to prevent division by zero
+        lv_coord_t img_width = img->header.w;
+        lv_coord_t img_height = img->header.h;
+        
+        // Prevent division by zero and invalid image dimensions
+        if (img_width <= 0 || img_height <= 0) {
+            ESP_LOGE(TAG, "Invalid image dimensions: %dx%d", img_width, img_height);
+            return;
+        }
+        
+        // Additional safety checks for reasonable image dimensions
+        if (img_width > 2048 || img_height > 2048) {
+            ESP_LOGE(TAG, "Image dimensions too large: %dx%d", img_width, img_height);
+            return;
+        }
+        
+        // For 128x128 image to become 408x408 SPD2010 ALIGNED: scale = 408/128 = 3.1875
+        // In LVGL scale units: 3.1875 * 256 = 816
+        // 408 is perfectly divisible by 4 (SPD2010 requirement): 408 ÷ 4 = 102
+        lv_coord_t target_width = 408;   // 4-pixel aligned for SPD2010 driver
+        lv_coord_t target_height = 408;  // 4-pixel aligned for SPD2010 driver
+        
+        // Additional safety check for target dimensions
+        if (target_width <= 0 || target_height <= 0) {
+            ESP_LOGE(TAG, "Invalid target dimensions: %dx%d", target_width, target_height);
+            return;
+        }
+        
+        // Calculate scale factors for both dimensions with additional safety
+        lv_coord_t scale_w = 0;
+        lv_coord_t scale_h = 0;
+        
+        // Safe division with overflow protection
+        if (img_width > 0 && target_width > 0) {
+            // Use 64-bit arithmetic to prevent overflow
+            int64_t scale_w_64 = ((int64_t)target_width * 256) / img_width;
+            if (scale_w_64 > INT32_MAX) {
+                scale_w = INT32_MAX;
+            } else if (scale_w_64 < INT32_MIN) {
+                scale_w = INT32_MIN;
+            } else {
+                scale_w = (lv_coord_t)scale_w_64;
+            }
+        } else {
+            ESP_LOGE(TAG, "Division by zero prevented: img_width=%d, target_width=%d", img_width, target_width);
+            return;
+        }
+        
+        if (img_height > 0 && target_height > 0) {
+            // Use 64-bit arithmetic to prevent overflow
+            int64_t scale_h_64 = ((int64_t)target_height * 256) / img_height;
+            if (scale_h_64 > INT32_MAX) {
+                scale_h = INT32_MAX;
+            } else if (scale_h_64 < INT32_MIN) {
+                scale_h = INT32_MIN;
+            } else {
+                scale_h = (lv_coord_t)scale_h_64;
+            }
+        } else {
+            ESP_LOGE(TAG, "Division by zero prevented: img_height=%d, target_height=%d", img_height, target_height);
+            return;
+        }
+        
+        // Use the smaller scale to ensure image fits within screen bounds
+        lv_coord_t scale = (scale_w < scale_h) ? scale_w : scale_h;
+        
+        // Debug logging
+        ESP_LOGI(TAG, "SPD2010 ALIGNED TEST 408x408: %dx%d -> %dx%d, scale_w=%d, scale_h=%d, final_scale=%d", 
+                 img_width, img_height, target_width, target_height, scale_w, scale_h, scale);
+        ESP_LOGI(TAG, "SCREEN SIZE: %dx%d, SCALED IMAGE: %dx%d, MARGIN: %dx%d pixels", 
+                 LV_HOR_RES, LV_VER_RES, target_width, target_height, 
+                 LV_HOR_RES - target_width, LV_VER_RES - target_height);
+        ESP_LOGI(TAG, "SPD2010 ALIGNMENT: target_width%%4=%d, target_height%%4=%d", 
+                 target_width % 4, target_height % 4);
+        
+        // Ensure scale is within safe bounds for full screen
+        if (scale > 1024) scale = 1024;  // Max 400% scale for full screen
+        if (scale < 64) scale = 64;       // Min 25% scale
+        if (scale <= 0) scale = 256;      // Fallback to 100% if calculation failed
+        
+        ESP_LOGI(TAG, "FINAL SPD2010 ALIGNED SCALE 408x408: %d (%.2fx) - Image has %d pixel margin on each side", 
+                 scale, (float)scale / 256.0f, (LV_HOR_RES - target_width) / 2);
+        
+        // Use older LVGL API methods for img objects with additional safety
+        if (scale > 0 && scale <= 1024) {  // Ensure scale is within valid LVGL range
+            lv_img_set_zoom(emotion_label_, scale);
+            lv_img_set_antialias(emotion_label_, true);  // Enable anti-aliasing for better quality
+        } else {
+            ESP_LOGW(TAG, "Scale value out of range, using default: %d", scale);
+            lv_img_set_zoom(emotion_label_, 256);  // Default 100% scale
+        }
+    }
 }
 
 void LcdDisplay::SetIcon(const char *icon)
 {
     DisplayLockGuard lock(this);
+    
+    // Create emotion_label_ in content area if it doesn't exist (status bar disabled)
+    if (emotion_label_ == nullptr && content_ != nullptr) {
+        emotion_label_ = lv_label_create(content_);
+        lv_obj_align(emotion_label_, LV_ALIGN_CENTER, 0, 0);
+    }
+    
     if (emotion_label_ == nullptr)
     {
-        return;
+        return; // Still can't create, skip icon setting
     }
+    
     lv_obj_set_style_text_font(emotion_label_, &font_awesome_30_4, 0);
     lv_label_set_text(emotion_label_, icon);
 
 #if !CONFIG_USE_WECHAT_MESSAGE_STYLE
-    // 显示emotion_label_，隐藏preview_image_
+    // 显示emotion_label_，隐藏preview_image_ - Status bar is disabled, skip
+    /*
     lv_obj_clear_flag(emotion_label_, LV_OBJ_FLAG_HIDDEN);
     if (preview_image_ != nullptr)
     {
         lv_obj_add_flag(preview_image_, LV_OBJ_FLAG_HIDDEN);
     }
+    */
 #endif
 }
 
@@ -1011,7 +1246,8 @@ void LcdDisplay::SetTheme(const std::string &theme_name)
         lv_obj_set_style_border_color(container_, current_theme_.border, 0);
     }
 
-    // Update status bar colors
+    // Update status bar colors - STATUS BAR IS DISABLED
+    /*
     if (status_bar_ != nullptr)
     {
         lv_obj_set_style_bg_color(status_bar_, current_theme_.background, 0);
@@ -1039,6 +1275,7 @@ void LcdDisplay::SetTheme(const std::string &theme_name)
             lv_obj_set_style_text_color(battery_label_, current_theme_.text, 0);
         }
     }
+    */
 
     // Update content area colors
     if (content_ != nullptr)

@@ -58,11 +58,16 @@ class CustomLcdDisplay : public SpiLcdDisplay {
                     }) {
     
             DisplayLockGuard lock(this);
+            // Status bar is disabled in base class, skip custom status bar setup
+            /*
             lv_obj_set_size(status_bar_, LV_HOR_RES, fonts_.text_font->line_height * 2 + 10);
             lv_obj_set_style_layout(status_bar_, LV_LAYOUT_NONE, 0);
             lv_obj_set_style_pad_top(status_bar_, 10, 0);
             lv_obj_set_style_pad_bottom(status_bar_, 1, 0);
+            */
 
+            // Status bar elements are disabled in base class, skip positioning
+            /*
             // 针对圆形屏幕调整位置
             //      network  battery  mute     //
             //               status            //
@@ -83,6 +88,7 @@ class CustomLcdDisplay : public SpiLcdDisplay {
             lv_obj_set_style_bg_color(low_battery_popup_, lv_color_hex(0xFF0000), 0);
             lv_obj_set_width(low_battery_label_, LV_HOR_RES * 0.75);
             lv_label_set_long_mode(low_battery_label_, LV_LABEL_LONG_SCROLL_CIRCULAR);
+            */
         }
 };
 
