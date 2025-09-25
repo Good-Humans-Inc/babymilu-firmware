@@ -1041,7 +1041,7 @@ Animation_t* animation_get_normal_animation(void)
 {
     // Check if SPIFFS normal animation is loaded and valid
     if (spiffs_normal.use_spiffs && spiffs_normal.imges && spiffs_normal.len > 0) {
-        ESP_LOGI("animation", "Using SPIFFS-based normal animation");
+        // ESP_LOGI("animation", "Using SPIFFS-based normal animation");
         return &spiffs_normal;
     } else {
         ESP_LOGI("animation", "Static normal animation not available - using SPIFFS fallback");
@@ -1059,7 +1059,7 @@ Animation_t* animation_get_embarrass_animation(void)
 {
     // Check if SPIFFS embarrass animation is loaded and valid
     if (spiffs_embarrass.use_spiffs && spiffs_embarrass.imges && spiffs_embarrass.len > 0) {
-        ESP_LOGI("animation", "Using SPIFFS-based embarrass animation");
+        // ESP_LOGI("animation", "Using SPIFFS-based embarrass animation");
         return &spiffs_embarrass;
     } else {
         ESP_LOGI("animation", "Static embarrass animation not available - using SPIFFS fallback");
@@ -1075,7 +1075,7 @@ Animation_t* animation_get_fire_animation(void)
 {
     // Check if SPIFFS fire animation is loaded and valid
     if (spiffs_fire.use_spiffs && spiffs_fire.imges && spiffs_fire.len > 0) {
-        ESP_LOGI("animation", "Using SPIFFS-based fire animation");
+        // ESP_LOGI("animation", "Using SPIFFS-based fire animation");
         return &spiffs_fire;
     } else {
         ESP_LOGI("animation", "Static fire animation not available - using SPIFFS fallback");
@@ -1091,7 +1091,7 @@ Animation_t* animation_get_happy_animation(void)
 {
     // Check if SPIFFS happy animation is loaded and valid
     if (spiffs_happy.use_spiffs && spiffs_happy.imges && spiffs_happy.len > 0) {
-        ESP_LOGI("animation", "Using SPIFFS-based happy animation");
+        // ESP_LOGI("animation", "Using SPIFFS-based happy animation");
         return &spiffs_happy;
     } else {
         ESP_LOGI("animation", "Static happy animation not available - using SPIFFS fallback");
@@ -1107,7 +1107,7 @@ Animation_t* animation_get_inspiration_animation(void)
 {
     // Check if SPIFFS inspiration animation is loaded and valid
     if (spiffs_inspiration.use_spiffs && spiffs_inspiration.imges && spiffs_inspiration.len > 0) {
-        ESP_LOGI("animation", "Using SPIFFS-based inspiration animation");
+        // ESP_LOGI("animation", "Using SPIFFS-based inspiration animation");
         return &spiffs_inspiration;
     } else {
         ESP_LOGI("animation", "Static inspiration animation not available - using SPIFFS fallback");
@@ -1123,7 +1123,7 @@ Animation_t* animation_get_question_animation(void)
 {
     // Check if SPIFFS question animation is loaded and valid
     if (spiffs_question.use_spiffs && spiffs_question.imges && spiffs_question.len > 0) {
-        ESP_LOGI("animation", "Using SPIFFS-based question animation");
+        // ESP_LOGI("animation", "Using SPIFFS-based question animation");
         return &spiffs_question;
     } else {
         ESP_LOGI("animation", "Static question animation not available - using SPIFFS fallback");
@@ -1139,7 +1139,7 @@ Animation_t* animation_get_shy_animation(void)
 {
     // Check if SPIFFS shy animation is loaded and valid
     if (spiffs_shy.use_spiffs && spiffs_shy.imges && spiffs_shy.len > 0) {
-        ESP_LOGI("animation", "Using SPIFFS-based shy animation");
+        // ESP_LOGI("animation", "Using SPIFFS-based shy animation");
         return &spiffs_shy;
     } else {
         ESP_LOGI("animation", "Static shy animation not available - using SPIFFS fallback");
@@ -1155,7 +1155,7 @@ Animation_t* animation_get_sleep_animation(void)
 {
     // Check if SPIFFS sleep animation is loaded and valid
     if (spiffs_sleep.use_spiffs && spiffs_sleep.imges && spiffs_sleep.len > 0) {
-        ESP_LOGI("animation", "Using SPIFFS-based sleep animation");
+        // ESP_LOGI("animation", "Using SPIFFS-based sleep animation");
         return &spiffs_sleep;
     } else {
         ESP_LOGI("animation", "Static sleep animation not available - using SPIFFS fallback");

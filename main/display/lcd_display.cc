@@ -1155,22 +1155,22 @@ void LcdDisplay::SetEmotionImg(const lv_image_dsc_t *img)
         // Use the smaller scale to ensure image fits within screen bounds
         lv_coord_t scale = (scale_w < scale_h) ? scale_w : scale_h;
         
-        // Debug logging
-        ESP_LOGI(TAG, "SPD2010 ALIGNED TEST 408x408: %dx%d -> %dx%d, scale_w=%d, scale_h=%d, final_scale=%d", 
-                 img_width, img_height, target_width, target_height, scale_w, scale_h, scale);
-        ESP_LOGI(TAG, "SCREEN SIZE: %dx%d, SCALED IMAGE: %dx%d, MARGIN: %dx%d pixels", 
-                 LV_HOR_RES, LV_VER_RES, target_width, target_height, 
-                 LV_HOR_RES - target_width, LV_VER_RES - target_height);
-        ESP_LOGI(TAG, "SPD2010 ALIGNMENT: target_width%%4=%d, target_height%%4=%d", 
-                 target_width % 4, target_height % 4);
+        // Debug logging - COMMENTED OUT
+        // ESP_LOGI(TAG, "SPD2010 ALIGNED TEST 408x408: %dx%d -> %dx%d, scale_w=%d, scale_h=%d, final_scale=%d", 
+        //          img_width, img_height, target_width, target_height, scale_w, scale_h, scale);
+        // ESP_LOGI(TAG, "SCREEN SIZE: %dx%d, SCALED IMAGE: %dx%d, MARGIN: %dx%d pixels", 
+        //          LV_HOR_RES, LV_VER_RES, target_width, target_height, 
+        //          LV_HOR_RES - target_width, LV_VER_RES - target_height);
+        // ESP_LOGI(TAG, "SPD2010 ALIGNMENT: target_width%%4=%d, target_height%%4=%d", 
+        //          target_width % 4, target_height % 4);
         
         // Ensure scale is within safe bounds for full screen
         if (scale > 1024) scale = 1024;  // Max 400% scale for full screen
         if (scale < 64) scale = 64;       // Min 25% scale
         if (scale <= 0) scale = 256;      // Fallback to 100% if calculation failed
         
-        ESP_LOGI(TAG, "FINAL SPD2010 ALIGNED SCALE 408x408: %d (%.2fx) - Image has %d pixel margin on each side", 
-                 scale, (float)scale / 256.0f, (LV_HOR_RES - target_width) / 2);
+        // ESP_LOGI(TAG, "FINAL SPD2010 ALIGNED SCALE 408x408: %d (%.2fx) - Image has %d pixel margin on each side", 
+        //          scale, (float)scale / 256.0f, (LV_HOR_RES - target_width) / 2);
         
         // Use older LVGL API methods for img objects with additional safety
         if (scale > 0 && scale <= 1024) {  // Ensure scale is within valid LVGL range

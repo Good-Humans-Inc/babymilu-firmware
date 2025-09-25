@@ -37,6 +37,12 @@ public:
     // Manual check for updates
     void CheckForUpdates();
     
+    // Manual download of animations_mega.bin (for testing/debugging)
+    bool DownloadMegaFileNow();
+    
+    // Force immediate update check (bypasses success flag)
+    bool ForceUpdateCheck();
+    
     // Reset the first download success flag (for testing/debugging)
     void ResetFirstDownloadSuccess();
     
@@ -65,6 +71,12 @@ private:
     bool TestHttpsConnection(const std::string& url);
     std::string GetDownloadUrlFromResponse(const std::string& url);
     std::string ExtractFilenameFromUrl(const std::string& url);
+    
+    // Mega file operations
+    bool DownloadMegaAnimationFile(const std::string& url);
+    bool SaveMegaAnimationToSpiffs(const std::string& data);
+    bool ValidateMegaAnimationFile(const std::string& data);
+    bool ValidateMegaAnimationFileFromDisk(const char* file_path);
     
     // Configuration management
     void LoadConfiguration();
