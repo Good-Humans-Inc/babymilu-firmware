@@ -629,6 +629,190 @@ bool animation_create_spiffs_animation(Animation_t* anim, const char* filenames[
     return true;
 }
 
+bool animation_create_spiffs_animation_from_merged(Animation_t* anim, const char* merged_filename, int count)
+{
+    ESP_LOGI("animation", "Creating SPIFFS animation from merged file %s with %d frames", merged_filename, count);
+    
+    if (!spiffs_initialized) {
+        ESP_LOGE("animation", "SPIFFS not initialized");
+        return false;
+    }
+    
+    char full_path[64];
+    snprintf(full_path, sizeof(full_path), "/spiffs/%s", merged_filename);
+    
+    FILE* f = fopen(full_path, "rb");
+    if (f == NULL) {
+        ESP_LOGE("animation", "Failed to open merged file %s", full_path);
+        return false;
+    }
+    
+    // Allocate memory for SPIFFS images
+    anim->spiffs_imgs = (lv_image_dsc_t**)malloc(count * sizeof(lv_image_dsc_t*));
+    if (anim->spiffs_imgs == NULL) {
+        ESP_LOGE("animation", "Failed to allocate memory for SPIFFS images");
+        fclose(f);
+        return false;
+    }
+    
+    // Initialize all image descriptors
+    for (int i = 0; i < count; i++) {
+        anim->spiffs_imgs[i] = (lv_image_dsc_t*)malloc(sizeof(lv_image_dsc_t));
+        if (anim->spiffs_imgs[i] == NULL) {
+            ESP_LOGE("animation", "Failed to allocate memory for image %d", i);
+            // Clean up previously allocated memory
+            for (int j = 0; j < i; j++) {
+                if (anim->spiffs_imgs[j]) {
+                    if (anim->spiffs_imgs[j]->data) free((void*)anim->spiffs_imgs[j]->data);
+                    free(anim->spiffs_imgs[j]);
+                }
+            }
+            free(anim->spiffs_imgs);
+            anim->spiffs_imgs = NULL;
+            fclose(f);
+            return false;
+        }
+        
+        // Initialize the image descriptor
+        anim->spiffs_imgs[i]->data = NULL;
+        anim->spiffs_imgs[i]->data_size = 0;
+    }
+    
+    // Read each frame from the merged file
+    for (int i = 0; i < count; i++) {
+        ESP_LOGI("animation", "Loading frame %d from merged file", i);
+        
+        // Read header (6 uint32_t values)
+        uint32_t header_data[6];
+        if (fread(header_data, sizeof(uint32_t), 6, f) != 6) {
+            ESP_LOGE("animation", "Failed to read header for frame %d", i);
+            // Clean up
+            for (int j = 0; j <= i; j++) {
+                if (anim->spiffs_imgs[j] && anim->spiffs_imgs[j]->data) {
+                    free((void*)anim->spiffs_imgs[j]->data);
+                }
+            }
+            for (int j = 0; j < count; j++) {
+                if (anim->spiffs_imgs[j]) {
+                    free(anim->spiffs_imgs[j]);
+                }
+            }
+            free(anim->spiffs_imgs);
+            anim->spiffs_imgs = NULL;
+            fclose(f);
+            return false;
+        }
+        
+        // Validate the magic number (0x4C56474C = "LVGL" in little endian)
+        if (header_data[0] != 0x4C56474C) {
+            ESP_LOGE("animation", "Invalid image magic for frame %d: 0x%x (expected 0x4C56474C)", i, header_data[0]);
+            // Clean up
+            for (int j = 0; j <= i; j++) {
+                if (anim->spiffs_imgs[j] && anim->spiffs_imgs[j]->data) {
+                    free((void*)anim->spiffs_imgs[j]->data);
+                }
+            }
+            for (int j = 0; j < count; j++) {
+                if (anim->spiffs_imgs[j]) {
+                    free(anim->spiffs_imgs[j]);
+                }
+            }
+            free(anim->spiffs_imgs);
+            anim->spiffs_imgs = NULL;
+            fclose(f);
+            return false;
+        }
+        
+        // Calculate data size from image dimensions
+        uint32_t width = header_data[3];
+        uint32_t height = header_data[4];
+        uint32_t stride = header_data[5];
+        size_t data_size = height * stride;
+        
+        // Set up the LVGL image descriptor
+        anim->spiffs_imgs[i]->header.magic = LV_IMAGE_HEADER_MAGIC;
+        anim->spiffs_imgs[i]->header.cf = (lv_color_format_t)header_data[1];  // color_format
+        anim->spiffs_imgs[i]->header.flags = (uint32_t)header_data[2];        // flags
+        anim->spiffs_imgs[i]->header.w = width;                               // width
+        anim->spiffs_imgs[i]->header.h = height;                              // height
+        anim->spiffs_imgs[i]->header.stride = stride;                         // stride
+        anim->spiffs_imgs[i]->data_size = data_size;
+        
+        // Allocate memory for pixel data
+        anim->spiffs_imgs[i]->data = (const uint8_t*)malloc(data_size);
+        if (anim->spiffs_imgs[i]->data == NULL) {
+            ESP_LOGE("animation", "Failed to allocate memory for frame %d data (%d bytes)", i, data_size);
+            // Clean up
+            for (int j = 0; j <= i; j++) {
+                if (anim->spiffs_imgs[j] && anim->spiffs_imgs[j]->data) {
+                    free((void*)anim->spiffs_imgs[j]->data);
+                }
+            }
+            for (int j = 0; j < count; j++) {
+                if (anim->spiffs_imgs[j]) {
+                    free(anim->spiffs_imgs[j]);
+                }
+            }
+            free(anim->spiffs_imgs);
+            anim->spiffs_imgs = NULL;
+            fclose(f);
+            return false;
+        }
+        
+        // Read pixel data
+        if (fread((void*)anim->spiffs_imgs[i]->data, 1, data_size, f) != data_size) {
+            ESP_LOGE("animation", "Failed to read pixel data for frame %d", i);
+            // Clean up
+            for (int j = 0; j <= i; j++) {
+                if (anim->spiffs_imgs[j] && anim->spiffs_imgs[j]->data) {
+                    free((void*)anim->spiffs_imgs[j]->data);
+                }
+            }
+            for (int j = 0; j < count; j++) {
+                if (anim->spiffs_imgs[j]) {
+                    free(anim->spiffs_imgs[j]);
+                }
+            }
+            free(anim->spiffs_imgs);
+            anim->spiffs_imgs = NULL;
+            fclose(f);
+            return false;
+        }
+        
+        ESP_LOGI("animation", "Successfully loaded frame %d: %dx%d, %d bytes", i, width, height, data_size);
+    }
+    
+    fclose(f);
+    
+    // Set up animation structure
+    anim->imges = (const lv_image_dsc_t**)anim->spiffs_imgs;
+    anim->use_spiffs = true;
+    anim->len = count;
+    
+    // Create animation sequence (0, 1, 2, ...)
+    anim->animations = (int*)malloc(count * sizeof(int));
+    if (anim->animations == NULL) {
+        ESP_LOGE("animation", "Failed to allocate memory for animation sequence");
+        // Clean up images
+        for (int i = 0; i < count; i++) {
+            if (anim->spiffs_imgs[i]) {
+                if (anim->spiffs_imgs[i]->data) free((void*)anim->spiffs_imgs[i]->data);
+                free(anim->spiffs_imgs[i]);
+            }
+        }
+        free(anim->spiffs_imgs);
+        anim->spiffs_imgs = NULL;
+        return false;
+    }
+    
+    for (int i = 0; i < count; i++) {
+        anim->animations[i] = i;
+    }
+    
+    ESP_LOGI("animation", "Successfully created SPIFFS animation from merged file with %d frames", count);
+    return true;
+}
+
 bool animation_load_normal_from_spiffs(void)
 {
     if (!spiffs_initialized) {
@@ -639,14 +823,22 @@ bool animation_load_normal_from_spiffs(void)
     // Clean up existing SPIFFS normal animation if any
     animation_cleanup_spiffs_animation(&spiffs_normal);
     
-    // Load normal animation from SPIFFS
+    // First try to load from merged file
+    ESP_LOGI("animation", "Attempting to load normal animation from merged file...");
+    if (animation_create_spiffs_animation_from_merged(&spiffs_normal, "normal_all.bin", 3)) {
+        ESP_LOGI("animation", "✅ Successfully loaded normal animation from merged file");
+        return true;
+    }
+    
+    // Fall back to individual files
+    ESP_LOGI("animation", "Merged file not found, trying individual files...");
     const char* normal_frames[] = {"normal1.bin", "normal2.bin", "normal3.bin"};
     
     if (animation_create_spiffs_animation(&spiffs_normal, normal_frames, 3)) {
-        ESP_LOGI("animation", "✅ Successfully loaded normal animation from SPIFFS");
+        ESP_LOGI("animation", "✅ Successfully loaded normal animation from individual SPIFFS files");
         return true;
     } else {
-        ESP_LOGE("animation", "❌ Failed to load normal animation from SPIFFS");
+        ESP_LOGE("animation", "❌ Failed to load normal animation from SPIFFS (both merged and individual files)");
         return false;
     }
 }
