@@ -49,3 +49,4 @@ Animation_t* animation_get_sleep_animation(void);
 void animation_load_spiffs_animations(void);
 void animation_show_current_sources(void);
 void test_spiffs_debug(void);
+bool animation_is_using_merged_files(void);

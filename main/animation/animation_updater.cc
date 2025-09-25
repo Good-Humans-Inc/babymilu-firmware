@@ -130,6 +130,13 @@ void AnimationUpdater::CheckForUpdates() {
     }
     
     ESP_LOGI(TAG, "Manual check for animation updates");
+    
+    // Check if we're using merged files first
+    if (animation_is_using_merged_files()) {
+        ESP_LOGI(TAG, "Merged animation files detected, skipping manual HTTP check");
+        return;
+    }
+    
     // COMMENTED OUT: Original HTTP server checking
     // CheckServerForUpdates();
     
@@ -184,8 +191,17 @@ void AnimationUpdater::UpdateLoop() {
         //     // Continue the loop but skip the actual update check
         // }
         
-        // HTTPS TESTING: Direct download test (only if not already successful)
-        if (enabled_.load() && !first_download_success_.load()) {
+        // Check if we're using merged files first
+        if (animation_is_using_merged_files()) {
+            ESP_LOGI(TAG, "Merged animation files detected, skipping HTTP downloads");
+            // Still mark as successful to avoid repeated checks
+            if (!first_download_success_.load()) {
+                first_download_success_.store(true);
+                ESP_LOGI(TAG, "Merged files available, marking download as successful");
+            }
+        }
+        // HTTPS TESTING: Direct download test (only if not already successful and no merged files)
+        else if (enabled_.load() && !first_download_success_.load()) {
             ESP_LOGI(TAG, "Testing HTTPS download...");
             TestHttpsDownload();
         } else if (first_download_success_.load()) {

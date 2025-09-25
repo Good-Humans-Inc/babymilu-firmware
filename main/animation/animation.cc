@@ -1172,3 +1172,38 @@ void animation_show_current_sources(void)
     }
     ESP_LOGI("animation", "=================================");
 }
+
+bool animation_is_using_merged_files(void)
+{
+    if (!spiffs_initialized) {
+        ESP_LOGD("animation", "SPIFFS not initialized");
+        return false;
+    }
+    
+    // Check for any merged animation files
+    const char* merged_files[] = {
+        "normal_all.bin",
+        "happy_all.bin", 
+        "fire_all.bin",
+        "embarrass_all.bin",
+        "inspiration_all.bin",
+        "question_all.bin",
+        "shy_all.bin",
+        "sleep_all.bin"
+    };
+    
+    for (int i = 0; i < 8; i++) {
+        char merged_path[64];
+        snprintf(merged_path, sizeof(merged_path), "/spiffs/%s", merged_files[i]);
+        
+        FILE* f = fopen(merged_path, "rb");
+        if (f != NULL) {
+            fclose(f);
+            ESP_LOGD("animation", "Merged files detected (%s exists)", merged_files[i]);
+            return true;
+        }
+    }
+    
+    ESP_LOGD("animation", "No merged files detected");
+    return false;
+}
