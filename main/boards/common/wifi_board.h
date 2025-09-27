@@ -10,6 +10,7 @@ protected:
     bool ble_initialized_ = false;  // BLE server enabled
     std::string temp_ssid_;  // Temporary storage for SSID during BLE configuration
     void EnterWifiConfigMode();
+    void EnterWifiConfigModeViaBLE();  // Enter BLE config mode after WiFi disconnect
     void InitializeBleServer();  // BLE server enabled
     void ParseWifiCredentials(const char* data);  // BLE server enabled
     virtual std::string GetBoardJson() override;

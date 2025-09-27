@@ -74,6 +74,37 @@ void WifiBoard::EnterWifiConfigMode() {
     }
 }
 
+void WifiBoard::EnterWifiConfigModeViaBLE() {
+    ESP_LOGI(TAG, "WiFi disconnected, entering BLE configuration mode");
+    
+    // Stop WiFi station
+    auto& wifi_station = WifiStation::GetInstance();
+    wifi_station.Stop();
+    
+    // Set config mode
+    wifi_config_mode_ = true;
+    
+    // Initialize BLE server if not already done
+    if (!ble_initialized_) {
+        InitializeBleServer();
+    }
+    
+    auto& application = Application::GetInstance();
+    application.SetDeviceState(kDeviceStateWifiConfiguring);
+    
+    // Display BLE configuration instructions for reconnection
+    std::string hint = "WiFi disconnected. Connect to BLE device 'Xiaozhi-WiFi' to reconfigure WiFi";
+    application.Alert("WiFi Reconfiguration", hint.c_str(), "", Lang::Sounds::P3_WIFICONFIG);
+    
+    // Wait for BLE configuration
+    while (wifi_config_mode_) {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+    
+    // After BLE configuration, restart network with new credentials
+    StartNetwork();
+}
+
 
 
 void WifiBoard::StartNetwork() {
@@ -143,6 +174,12 @@ void WifiBoard::StartNetwork() {
             ble_server_deinit();
             ble_initialized_ = false;
         }
+    });
+    
+    // Set up disconnect callback to enter BLE configuration mode
+    wifi_station.OnDisconnected([this]() {
+        ESP_LOGI(TAG, "WiFi disconnected, entering BLE configuration mode");
+        EnterWifiConfigModeViaBLE();
     });
     
     wifi_station.Start();
@@ -454,6 +491,16 @@ void WifiBoard::ParseWifiCredentials(const char* data) {
             ble_server_send_data("Restarting to connect...", 25);
             // Small delay to ensure BLE message is sent
             vTaskDelay(pdMS_TO_TICKS(500));
+            
+            // Properly deinitialize BLE before restart to prevent memory conflicts
+            if (ble_initialized_) {
+                ESP_LOGI(TAG, "Deinitializing BLE before restart");
+                ble_server_stop_advertising();
+                ble_server_deinit();
+                ble_initialized_ = false;
+                vTaskDelay(pdMS_TO_TICKS(1000)); // Give BLE more time to fully deinitialize
+            }
+            
             // Restart the entire application to use new credentials
             esp_restart();
         } else {
@@ -482,6 +529,16 @@ void WifiBoard::ParseWifiCredentials(const char* data) {
             ble_server_send_data("Restarting to connect...", 25);
             // Small delay to ensure BLE message is sent
             vTaskDelay(pdMS_TO_TICKS(500));
+            
+            // Properly deinitialize BLE before restart to prevent memory conflicts
+            if (ble_initialized_) {
+                ESP_LOGI(TAG, "Deinitializing BLE before restart");
+                ble_server_stop_advertising();
+                ble_server_deinit();
+                ble_initialized_ = false;
+                vTaskDelay(pdMS_TO_TICKS(1000)); // Give BLE more time to fully deinitialize
+            }
+            
             // Restart the entire application to use new credentials
             esp_restart();
         } else {

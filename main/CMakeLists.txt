@@ -23,6 +23,8 @@ set(SOURCES "audio_codecs/audio_codec.cc"
             "settings.cc"
             "background_task.cc"
             "animation/animation_updater.cc"
+            "sd_card.cc"
+            "sd_card_startup.cc"
             "main.cc"
             )
 

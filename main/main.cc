@@ -8,6 +8,7 @@
 #include "application.h"
 #include "system_info.h"
 #include "animation.h"
+// #include "sd_card_startup.h"
 
 #define TAG "main"
 
@@ -27,6 +28,22 @@ extern "C" void app_main(void)
 
     // Initialize SPIFFS for animation storage
     animation_init_spiffs();
+
+    // Process SD card startup (read hello.txt and eject) - DISABLED
+    // ESP_LOGI(TAG, "Processing SD card startup...");
+    // ret = SdCardStartup::ProcessStartup();
+    // if (ret == ESP_OK) {
+    //     const std::string& hello_content = SdCardStartup::GetHelloContent();
+    //     if (!hello_content.empty()) {
+    //         ESP_LOGI(TAG, "SD card file read successfully (%zu bytes)", hello_content.size());
+    //         ESP_LOGI(TAG, "Content length: %zu", hello_content.length());
+    //     } else {
+    //         ESP_LOGI(TAG, "SD card processed but content is empty");
+    //     }
+    // } else {
+    //     ESP_LOGW(TAG, "SD card startup failed: %s", esp_err_to_name(ret));
+    //     ESP_LOGW(TAG, "Continuing without SD card functionality");
+    // }
 
     // Launch the application
     Application::GetInstance().Start();

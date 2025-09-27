@@ -297,12 +297,31 @@ void ble_server_deinit(void)
         return;
     }
 
+    ESP_LOGI(TAG, "Starting BLE server deinitialization");
+    
+    // Stop advertising first
     if (ble_server_state.advertising) {
         ble_gap_adv_stop();
+        ble_server_state.advertising = false;
     }
-
+    
+    // Disconnect if connected
+    if (ble_server_state.connected) {
+        ble_gap_terminate(ble_server_state.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+        ble_server_state.connected = false;
+    }
+    
+    // Stop nimBLE port (this is asynchronous)
     nimble_port_stop();
+    
+    // Wait for nimBLE to fully stop
+    vTaskDelay(pdMS_TO_TICKS(500));
+    
+    // Deinitialize nimBLE port
     nimble_port_deinit();
+    
+    // Additional cleanup
+    esp_nimble_hci_deinit();
     
     memset(&ble_server_state, 0, sizeof(ble_server_state));
     ESP_LOGI(TAG, "BLE Server deinitialized");

@@ -12,6 +12,7 @@
 #include "mcp_server.h"
 #include "audio_debugger.h"
 #include "animation/animation_updater.h"
+#include "ssid_manager.h"
 
 #if CONFIG_USE_AUDIO_PROCESSOR
 #include "afe_audio_processor.h"
@@ -509,6 +510,16 @@ void Application::Start()
     /* Start the clock timer to update the status bar */
     esp_timer_start_periodic(clock_timer_handle_, 1000000);
 
+    /* Check if we should clear WiFi configuration to force nimBLE setup */
+    // Only clear WiFi if no credentials exist (first boot or manual clearing)
+    auto& ssid_manager = SsidManager::GetInstance();
+    auto ssid_list = ssid_manager.GetSsidList();
+    if (ssid_list.empty()) {
+        ESP_LOGI(TAG, "No WiFi credentials found, nimBLE will start for configuration");
+    } else {
+        ESP_LOGI(TAG, "WiFi credentials found (%d networks), proceeding with normal startup", ssid_list.size());
+    }
+
     /* Wait for the network to be ready */
     board.StartNetwork();
 
@@ -516,8 +527,8 @@ void Application::Start()
     display->UpdateStatusBar(true);
 
     // Initialize and start the animation updater
-    AnimationUpdater::GetInstance().Initialize();
-    AnimationUpdater::GetInstance().Start();
+    // AnimationUpdater::GetInstance().Initialize();
+    // AnimationUpdater::GetInstance().Start();
 
     // Check for new firmware version or get the MQTT broker address
     CheckNewVersion();
@@ -1200,6 +1211,18 @@ void Application::UpdateIotStates()
         protocol_->SendIotStates(states);
     }
 #endif
+}
+
+void Application::ClearWifiConfiguration()
+{
+    ESP_LOGI(TAG, "Clearing WiFi configuration from application");
+    auto& board = Board::GetInstance();
+    board.ClearWifiConfiguration();
+    
+    // After clearing WiFi, restart to enter BLE configuration mode
+    ESP_LOGI(TAG, "WiFi cleared, restarting to enter BLE configuration mode");
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    esp_restart();
 }
 
 void Application::Reboot()
