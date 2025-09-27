@@ -185,7 +185,7 @@ void WifiBoard::StartNetwork() {
     wifi_station.Start();
 
     // Try to connect to WiFi, if failed, use BLE for configuration
-    if (!wifi_station.WaitForConnected(60 * 1000)) {
+    if (!wifi_station.WaitForConnected(15 * 1000)) {
         wifi_station.Stop();
         wifi_config_mode_ = true;
         ESP_LOGI(TAG, "WiFi connection failed, using BLE for configuration");
@@ -492,17 +492,25 @@ void WifiBoard::ParseWifiCredentials(const char* data) {
             // Small delay to ensure BLE message is sent
             vTaskDelay(pdMS_TO_TICKS(500));
             
-            // Properly deinitialize BLE before restart to prevent memory conflicts
+            // Stop BLE server before restarting network
             if (ble_initialized_) {
-                ESP_LOGI(TAG, "Deinitializing BLE before restart");
+                ESP_LOGI(TAG, "Stopping BLE server before network restart");
                 ble_server_stop_advertising();
                 ble_server_deinit();
                 ble_initialized_ = false;
-                vTaskDelay(pdMS_TO_TICKS(1000)); // Give BLE more time to fully deinitialize
+                vTaskDelay(pdMS_TO_TICKS(500)); // Give BLE time to fully deinitialize
             }
             
-            // Restart the entire application to use new credentials
-            esp_restart();
+            // Stop WiFi station to ensure clean restart
+            auto& wifi_station = WifiStation::GetInstance();
+            wifi_station.Stop();
+            vTaskDelay(pdMS_TO_TICKS(1000)); // Give WiFi time to fully stop
+            
+            // Exit config mode and restart network with new credentials
+            wifi_config_mode_ = false;
+            
+            // Restart network with new credentials (no full system restart)
+            StartNetwork();
         } else {
             ble_server_send_data("Error: No SSID received first", 32);
         }
@@ -530,17 +538,25 @@ void WifiBoard::ParseWifiCredentials(const char* data) {
             // Small delay to ensure BLE message is sent
             vTaskDelay(pdMS_TO_TICKS(500));
             
-            // Properly deinitialize BLE before restart to prevent memory conflicts
+            // Stop BLE server before restarting network
             if (ble_initialized_) {
-                ESP_LOGI(TAG, "Deinitializing BLE before restart");
+                ESP_LOGI(TAG, "Stopping BLE server before network restart");
                 ble_server_stop_advertising();
                 ble_server_deinit();
                 ble_initialized_ = false;
-                vTaskDelay(pdMS_TO_TICKS(1000)); // Give BLE more time to fully deinitialize
+                vTaskDelay(pdMS_TO_TICKS(500)); // Give BLE time to fully deinitialize
             }
             
-            // Restart the entire application to use new credentials
-            esp_restart();
+            // Stop WiFi station to ensure clean restart
+            auto& wifi_station = WifiStation::GetInstance();
+            wifi_station.Stop();
+            vTaskDelay(pdMS_TO_TICKS(1000)); // Give WiFi time to fully stop
+            
+            // Exit config mode and restart network with new credentials
+            wifi_config_mode_ = false;
+            
+            // Restart network with new credentials (no full system restart)
+            StartNetwork();
         } else {
             ble_server_send_data("Error: Invalid format", 20);
         }

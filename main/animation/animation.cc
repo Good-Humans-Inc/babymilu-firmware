@@ -343,7 +343,8 @@ void test_spiffs_debug(void)
         ESP_LOGE("animation", "Failed to open /spiffs directory");
     }
     
-    // Test opening specific files
+    // Test opening specific files - COMMENTED OUT TO REDUCE LOG SPAM
+    /*
     const char* test_files[] = {
         "normal1.bin", "normal2.bin", "normal3.bin", 
         "embarrass1.bin", "embarrass2.bin", "embarrass3.bin", 
@@ -370,6 +371,7 @@ void test_spiffs_debug(void)
             ESP_LOGE("animation", "❌ Failed to open %s", test_files[i]);
         }
     }
+    */
     
     ESP_LOGI("animation", "=== SPIFFS Debug Test Complete ===");
 }
