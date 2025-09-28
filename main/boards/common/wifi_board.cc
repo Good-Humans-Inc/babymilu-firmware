@@ -142,9 +142,9 @@ void WifiBoard::StartNetwork() {
             vTaskDelay(pdMS_TO_TICKS(1000));
         }
         
-        // After BLE configuration, restart network with new credentials
-        StartNetwork();
-        return;
+        // After BLE configuration, restart the system for clean WiFi startup
+        ESP_LOGI(TAG, "BLE configuration complete, restarting system for clean WiFi startup");
+        esp_restart();
     }
 
     // Start WiFi station with existing credentials
@@ -490,27 +490,12 @@ void WifiBoard::ParseWifiCredentials(const char* data) {
             // Send confirmation to BLE client
             ble_server_send_data("Restarting to connect...", 25);
             // Small delay to ensure BLE message is sent
-            vTaskDelay(pdMS_TO_TICKS(500));
+            vTaskDelay(pdMS_TO_TICKS(1000));
             
-            // Stop BLE server before restarting network
-            if (ble_initialized_) {
-                ESP_LOGI(TAG, "Stopping BLE server before network restart");
-                ble_server_stop_advertising();
-                ble_server_deinit();
-                ble_initialized_ = false;
-                vTaskDelay(pdMS_TO_TICKS(500)); // Give BLE time to fully deinitialize
-            }
-            
-            // Stop WiFi station to ensure clean restart
-            auto& wifi_station = WifiStation::GetInstance();
-            wifi_station.Stop();
-            vTaskDelay(pdMS_TO_TICKS(1000)); // Give WiFi time to fully stop
-            
-            // Exit config mode and restart network with new credentials
-            wifi_config_mode_ = false;
-            
-            // Restart network with new credentials (no full system restart)
-            StartNetwork();
+            // Instead of trying to switch from BLE to WiFi (which causes memory issues),
+            // restart the system for a clean state
+            ESP_LOGI(TAG, "BLE configuration complete, restarting system for clean WiFi startup");
+            esp_restart();
         } else {
             ble_server_send_data("Error: No SSID received first", 32);
         }
@@ -544,7 +529,8 @@ void WifiBoard::ParseWifiCredentials(const char* data) {
                 ble_server_stop_advertising();
                 ble_server_deinit();
                 ble_initialized_ = false;
-                vTaskDelay(pdMS_TO_TICKS(500)); // Give BLE time to fully deinitialize
+                ESP_LOGI(TAG, "Waiting for BLE cleanup to complete before WiFi start...");
+                vTaskDelay(pdMS_TO_TICKS(7000)); // Wait 7 seconds for BLE to fully deinitialize
             }
             
             // Stop WiFi station to ensure clean restart

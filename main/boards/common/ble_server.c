@@ -314,14 +314,23 @@ void ble_server_deinit(void)
     // Stop nimBLE port (this is asynchronous)
     nimble_port_stop();
     
-    // Wait for nimBLE to fully stop
-    vTaskDelay(pdMS_TO_TICKS(500));
+    // Wait for nimBLE to fully stop - increased to 5+ seconds for proper cleanup
+    ESP_LOGI(TAG, "Waiting for nimBLE to fully stop...");
+    vTaskDelay(pdMS_TO_TICKS(2000));  // Wait 2 seconds first
+    
+    // Additional wait to ensure all BLE resources are released
+    ESP_LOGI(TAG, "Additional cleanup wait...");
+    vTaskDelay(pdMS_TO_TICKS(3000));  // Wait another 3 seconds (total 5+ seconds)
     
     // Deinitialize nimBLE port
     nimble_port_deinit();
     
     // Additional cleanup
     esp_nimble_hci_deinit();
+    
+    // Final wait to ensure all resources are released
+    ESP_LOGI(TAG, "Final cleanup wait...");
+    vTaskDelay(pdMS_TO_TICKS(1000));  // Additional 1 second (total 6+ seconds)
     
     memset(&ble_server_state, 0, sizeof(ble_server_state));
     ESP_LOGI(TAG, "BLE Server deinitialized");
