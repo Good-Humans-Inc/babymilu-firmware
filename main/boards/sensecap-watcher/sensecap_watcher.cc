@@ -308,7 +308,13 @@ private:
         spi_cfg.isr_cpu_id = ESP_INTR_CPU_AFFINITY_1;
         spi_cfg.max_transfer_sz = 4095;
    
-        ESP_ERROR_CHECK(spi_bus_initialize(SPI2_HOST, &spi_cfg, SPI_DMA_CH_AUTO));
+        // Check if SPI2_HOST is already initialized (e.g., by SD card)
+        esp_err_t ret = spi_bus_initialize(SPI2_HOST, &spi_cfg, SPI_DMA_CH_AUTO);
+        if (ret == ESP_ERR_INVALID_STATE) {
+            ESP_LOGW(TAG, "SPI2_HOST already initialized (likely by SD card), skipping initialization");
+        } else {
+            ESP_ERROR_CHECK(ret);
+        }
 
         ESP_LOGI(TAG, "Initialize QSPI bus");
 

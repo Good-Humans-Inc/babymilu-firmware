@@ -33,6 +33,8 @@ esp_err_t SdCard::Initialize()
 
     // Configure SPI bus using SenseCAP Watcher pins
     sdmmc_host_t host = SDSPI_HOST_DEFAULT();
+    host.slot = SPI2_HOST;  // Use SPI2_HOST
+    
     spi_bus_config_t bus_cfg = {
         .mosi_io_num = BSP_SPI2_HOST_MOSI,
         .miso_io_num = BSP_SPI2_HOST_MISO,

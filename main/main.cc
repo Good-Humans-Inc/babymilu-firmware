@@ -8,6 +8,7 @@
 #include "application.h"
 #include "system_info.h"
 #include "animation.h"
+#include "sd_card.h"
 // #include "sd_card_startup.h"
 
 #define TAG "main"
@@ -26,7 +27,17 @@ extern "C" void app_main(void)
     }
     ESP_ERROR_CHECK(ret);
 
-    // Initialize SPIFFS for animation storage
+    // Initialize SD card for animation storage
+    ESP_LOGI(TAG, "Initializing SD card for animations...");
+    ret = SdCard::Initialize();
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to initialize SD card: %s", esp_err_to_name(ret));
+        ESP_LOGW(TAG, "Will fall back to SPIFFS animations");
+    } else {
+        ESP_LOGI(TAG, "SD card initialized successfully");
+    }
+
+    // Initialize SPIFFS for animation storage (fallback)
     animation_init_spiffs();
 
     // Process SD card startup (read hello.txt and eject) - DISABLED
