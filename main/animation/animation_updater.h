@@ -64,7 +64,7 @@ private:
     // HTTP operations
     bool CheckServerForUpdates();
     bool DownloadAnimationFile(const std::string& url, const std::string& filename);
-    bool SaveAnimationToSpiffs(const std::string& filename, const std::string& data);
+    bool SaveAnimationToSpiffs(const std::string& filename, const std::string& data); // Note: Now saves to SD card
     
     // HTTPS testing
     bool TestHttpsDownload();
@@ -74,7 +74,7 @@ private:
     
     // Mega file operations
     bool DownloadMegaAnimationFile(const std::string& url);
-    bool SaveMegaAnimationToSpiffs(const std::string& data);
+    bool SaveMegaAnimationToSpiffs(const std::string& data); // Note: Now saves to SD card
     bool ValidateMegaAnimationFile(const std::string& data);
     bool ValidateMegaAnimationFileFromDisk(const char* file_path);
     

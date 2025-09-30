@@ -405,7 +405,7 @@ void animation_load_spiffs_animations(void)
     if (animation_load_all_from_sd_card()) {
         ESP_LOGI("animation", "🎉 Successfully loaded ALL animations from SD card!");
         ESP_LOGI("animation", "   - All 8 animation types loaded in one operation");
-        ESP_LOGI("animation", "   - Total of 28 frames loaded from animations_mega.bin on SD card");
+        ESP_LOGI("animation", "   - Total of 28 frames loaded from test.bin on SD card");
         ESP_LOGI("animation", "   - Ultimate optimization achieved!");
         return; // Success! No need to load individual animations
     }
@@ -1860,13 +1860,13 @@ bool animation_load_all_from_sd_card(void)
     }
     
     char mega_path[128];
-    snprintf(mega_path, sizeof(mega_path), "/sdcard/animations_mega.bin");
+    snprintf(mega_path, sizeof(mega_path), "/sdcard/test.bin");
     
     ESP_LOGI("animation", "Attempting to open mega file: %s", mega_path);
     FILE* f = fopen(mega_path, "rb");
     if (f == NULL) {
         ESP_LOGE("animation", "❌ Failed to open mega file: %s (errno: %d)", mega_path, errno);
-        ESP_LOGE("animation", "Make sure animations_mega.bin exists in the root of the SD card");
+        ESP_LOGE("animation", "Make sure test.bin exists in the root of the SD card");
         
         // Check if there are any files with similar names and try to use them
         ESP_LOGI("animation", "Checking for animation files on SD card...");

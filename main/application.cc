@@ -527,8 +527,8 @@ void Application::Start()
     display->UpdateStatusBar(true);
 
     // Initialize and start the animation updater
-    // AnimationUpdater::GetInstance().Initialize();
-    // AnimationUpdater::GetInstance().Start();
+    AnimationUpdater::GetInstance().Initialize();
+    AnimationUpdater::GetInstance().Start();
 
     // Check for new firmware version or get the MQTT broker address
     CheckNewVersion();

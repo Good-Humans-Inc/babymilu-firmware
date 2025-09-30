@@ -62,10 +62,10 @@ esp_err_t SdCard::Initialize()
     return ESP_ERR_NOT_SUPPORTED;
 #endif
 
-    // Mount SD card
+    // Mount SD card with more permissive settings
     const esp_vfs_fat_sdmmc_mount_config_t mount_config = {
-        .format_if_mount_failed = false,
-        .max_files = 5,
+        .format_if_mount_failed = true,  // Allow formatting if mount fails
+        .max_files = 10,                 // Increase max files
         .allocation_unit_size = 16 * 1024
     };
 
