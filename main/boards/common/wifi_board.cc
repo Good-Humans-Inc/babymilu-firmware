@@ -176,11 +176,8 @@ void WifiBoard::StartNetwork() {
         }
     });
     
-    // Set up disconnect callback to enter BLE configuration mode
-    wifi_station.OnDisconnected([this]() {
-        ESP_LOGI(TAG, "WiFi disconnected, entering BLE configuration mode");
-        EnterWifiConfigModeViaBLE();
-    });
+    // Note: OnDisconnected callback is not available in WifiStation class
+    // Disconnection handling is done internally by WifiStation with automatic reconnection
     
     wifi_station.Start();
 
