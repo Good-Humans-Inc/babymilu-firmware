@@ -90,6 +90,9 @@ private:
     bool ValidateAnimationFile(const std::string& data);
     void ReloadAnimations();
     
+    // SPIFFS management
+    bool IsSpiffsReady() const;
+    
     // Member variables
     std::atomic<bool> is_running_{false};
     std::atomic<bool> enabled_{true};
@@ -107,6 +110,7 @@ private:
     
     // Success tracking
     std::atomic<bool> first_download_success_{false};
+    std::atomic<uint32_t> spiffs_not_ready_count_{0};
     
     // Version management
     std::string current_version_{"1.0.0"}; // Default version

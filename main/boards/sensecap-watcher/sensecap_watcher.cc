@@ -11,7 +11,8 @@
 #include "iot/thing_manager.h"
 #include "power_save_timer.h"
 #include "sscma_camera.h"
-#include "sd_card.h"
+// COMMENTED OUT: SD card include - no longer needed for SPIFFS-only animations
+// #include "sd_card.h"
 #include "animation.h"
 
 #include <esp_log.h>
@@ -531,26 +532,23 @@ private:
         ESP_ERROR_CHECK(esp_console_start_repl(repl));
     }
 
-    void InitializeCamera() {
-
-        ESP_LOGI(TAG, "Initialize Camera");
-
-        // !!!NOTE: SD Card use same SPI bus as sscma client, so we need to disable SD card CS pin first
-        const gpio_config_t io_config = {
-            .pin_bit_mask = (1ULL << BSP_SD_SPI_CS),
-            .mode = GPIO_MODE_OUTPUT,
-            .pull_up_en = GPIO_PULLUP_ENABLE,
-            .pull_down_en = GPIO_PULLDOWN_DISABLE,
-            .intr_type = GPIO_INTR_DISABLE,
-        };
-        esp_err_t ret = gpio_config(&io_config);
-        if (ret != ESP_OK)
-            return;
-
-        gpio_set_level(BSP_SD_SPI_CS, 1);
-
-        camera_ = new SscmaCamera(io_exp_handle);
-    }
+    // COMMENTED OUT: Camera initialization function - no longer needed without SD card
+    // void InitializeCamera() {
+    //     ESP_LOGI(TAG, "Initialize Camera");
+    //     // !!!NOTE: SD Card use same SPI bus as sscma client, so we need to disable SD card CS pin first
+    //     const gpio_config_t io_config = {
+    //         .pin_bit_mask = (1ULL << BSP_SD_SPI_CS),
+    //         .mode = GPIO_MODE_OUTPUT,
+    //         .pull_up_en = GPIO_PULLUP_ENABLE,
+    //         .pull_down_en = GPIO_PULLDOWN_DISABLE,
+    //         .intr_type = GPIO_INTR_DISABLE,
+    //     };
+    //     esp_err_t ret = gpio_config(&io_config);
+    //     if (ret != ESP_OK)
+    //         return;
+    //     gpio_set_level(BSP_SD_SPI_CS, 1);
+    //     camera_ = new SscmaCamera(io_exp_handle);
+    // }
 
 public:
     SensecapWatcher() {
@@ -564,21 +562,28 @@ public:
         InitializeKnob();
         Initializespd2010Display();
         
-        // Initialize SD card BEFORE camera to avoid SPI bus conflict
-        ESP_LOGI(TAG, "Initializing SD card before camera...");
-        esp_err_t ret = SdCard::Initialize();
-        if (ret == ESP_OK) {
-            ESP_LOGI(TAG, "SD card initialized successfully before camera");
-            
-            // Initialize animations immediately after SD card is ready
-            ESP_LOGI(TAG, "Initializing animations after SD card...");
-            animation_init_spiffs();
-            ESP_LOGI(TAG, "Animations initialized successfully");
-        } else {
-            ESP_LOGW(TAG, "SD card initialization failed before camera: %s", esp_err_to_name(ret));
-        }
+        // COMMENTED OUT: Initialize SD card BEFORE camera to avoid SPI bus conflict
+        // ESP_LOGI(TAG, "Initializing SD card before camera...");
+        // esp_err_t ret = SdCard::Initialize();
+        // if (ret == ESP_OK) {
+        //     ESP_LOGI(TAG, "SD card initialized successfully before camera");
+        //     
+        //     // Initialize animations immediately after SD card is ready
+        //     ESP_LOGI(TAG, "Initializing animations after SD card...");
+        //     animation_init_spiffs();
+        //     ESP_LOGI(TAG, "Animations initialized successfully");
+        // } else {
+        //     ESP_LOGW(TAG, "SD card initialization failed before camera: %s", esp_err_to_name(ret));
+        // }
         
-        InitializeCamera();
+        // Initialize animations directly - no SD card needed
+        ESP_LOGI(TAG, "=== Initializing animations directly (SPIFFS-only) ===");
+        ESP_LOGI(TAG, "Calling animation_init_spiffs()...");
+        animation_init_spiffs();
+        ESP_LOGI(TAG, "=== Animations initialization completed ===");
+        
+        // COMMENTED OUT: Camera initialization - causing crashes without SD card
+        // InitializeCamera();
         InitializeIot();
         GetBacklight()->RestoreBrightness();
     }

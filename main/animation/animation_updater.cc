@@ -209,6 +209,8 @@ std::string AnimationUpdater::GetStatusJson() const {
     cJSON_AddNumberToObject(json, "last_check_time", last_check_time_.load());
     cJSON_AddNumberToObject(json, "last_update_time", last_update_time_.load());
     cJSON_AddBoolToObject(json, "first_download_success", first_download_success_.load());
+    cJSON_AddNumberToObject(json, "spiffs_not_ready_count", spiffs_not_ready_count_.load());
+    cJSON_AddBoolToObject(json, "spiffs_ready", IsSpiffsReady());
     
     char* json_string = cJSON_PrintUnformatted(json);
     std::string result(json_string);
@@ -226,8 +228,17 @@ void AnimationUpdater::UpdateTask(void* parameter) {
 void AnimationUpdater::UpdateLoop() {
     ESP_LOGI(TAG, "Animation updater task started");
     
-    // Wait a bit before first check to let the system stabilize
-    vTaskDelay(pdMS_TO_TICKS(5000)); // 5 seconds
+    // Wait a bit before first check to let the system stabilize and SPIFFS to initialize
+    ESP_LOGI(TAG, "Waiting 15 seconds for system stabilization and SPIFFS initialization...");
+    vTaskDelay(pdMS_TO_TICKS(15000)); // 15 seconds - increased to ensure SPIFFS is ready
+    
+    ESP_LOGI(TAG, "Initial wait completed, checking SPIFFS status...");
+    if (IsSpiffsReady()) {
+        ESP_LOGI(TAG, "✅ SPIFFS is ready for animation downloads");
+    } else {
+        ESP_LOGW(TAG, "⚠️ SPIFFS not ready yet, will retry on each interval");
+        ESP_LOGW(TAG, "Note: SPIFFS may be working but mount point verification is unreliable");
+    }
     
     while (is_running_.load()) {
         // COMMENTED OUT: HTTP server checking for HTTPS testing
@@ -241,8 +252,26 @@ void AnimationUpdater::UpdateLoop() {
         // HTTPS DOWNLOAD: Check for animations_mega.bin updates
         if (enabled_.load()) {
             if (!first_download_success_.load()) {
-                ESP_LOGI(TAG, "Attempting to download animations_mega.bin from HTTPS server...");
-                TestHttpsDownload();
+                // Check if SPIFFS is ready before attempting download
+                if (IsSpiffsReady()) {
+                    ESP_LOGI(TAG, "Attempting to download animations_mega.bin from HTTPS server...");
+                    TestHttpsDownload();
+                } else {
+                    uint32_t not_ready_count = spiffs_not_ready_count_.fetch_add(1) + 1;
+                    ESP_LOGD(TAG, "SPIFFS not ready yet (attempt #%u), skipping download attempt (will retry next interval)", not_ready_count);
+                    
+                    // After 5 attempts, try anyway since SPIFFS mount point verification is unreliable
+                    if (not_ready_count >= 5) {
+                        ESP_LOGW(TAG, "SPIFFS mount point check unreliable, attempting download anyway...");
+                        ESP_LOGI(TAG, "Attempting to download animations_mega.bin from HTTPS server...");
+                        TestHttpsDownload();
+                    }
+                    
+                    // Log a warning every 10 attempts
+                    if (not_ready_count % 10 == 0) {
+                        ESP_LOGW(TAG, "SPIFFS still not ready after %u attempts - mount point verification may be unreliable", not_ready_count);
+                    }
+                }
             } else {
                 // Skip download attempts after first successful download
                 ESP_LOGD(TAG, "First download already successful, skipping further download attempts");
@@ -287,7 +316,7 @@ bool AnimationUpdater::CheckServerForUpdates() {
         http->SetHeader("User-Agent", "Xiaozhi-Animation/1.0");
         http->SetHeader("Accept", "application/json");
         http->SetHeader("Content-Type", "application/json");
-        http->SetTimeout(30000); // 30 second timeout
+        http->SetTimeout(60000); // 60 second timeout
         
         // Build check URL
         std::string check_url = server_url_ + "/check?device_id=" + SystemInfo::GetMacAddress();
@@ -443,6 +472,15 @@ bool AnimationUpdater::CheckServerForUpdates() {
 bool AnimationUpdater::TestHttpsDownload() {
     ESP_LOGI(TAG, "Downloading animations_mega.bin from HTTPS server...");
     
+    // Check if SPIFFS is ready before attempting download
+    if (!IsSpiffsReady()) {
+        ESP_LOGW(TAG, "SPIFFS not ready - filesystem not accessible");
+        ESP_LOGW(TAG, "This is normal during startup. Will retry on next check interval.");
+        return false;
+    }
+    
+    ESP_LOGI(TAG, "SPIFFS is ready, proceeding with download");
+    
     // Test with the provided HTTPS endpoint
     std::string test_url = "https://1379890832-bqi413zoc2.ap-shanghai.tencentscf.com";
     
@@ -496,7 +534,7 @@ bool AnimationUpdater::TestHttpsConnection(const std::string& url) {
         http->SetHeader("User-Agent", "Xiaozhi-Animation-Test/1.0");
         http->SetHeader("Accept", "*/*");
         http->SetHeader("Accept-Encoding", "identity"); // Disable compression
-        http->SetTimeout(30000); // 30 second timeout for connection test
+        http->SetTimeout(60000); // 60 second timeout for connection test
         
         ESP_LOGI(TAG, "Testing connection to: %s", url.c_str());
         ESP_LOGI(TAG, "HTTP client created, attempting connection...");
@@ -569,7 +607,7 @@ std::string AnimationUpdater::GetDownloadUrlFromResponse(const std::string& url)
         http->SetHeader("User-Agent", "Xiaozhi-Animation-Test/1.0");
         http->SetHeader("Accept", "*/*");
         http->SetHeader("Accept-Encoding", "identity"); // Disable compression
-        http->SetTimeout(30000); // 30 second timeout for connection test
+        http->SetTimeout(60000); // 60 second timeout for connection test
         
         ESP_LOGI(TAG, "Getting response from: %s", url.c_str());
         
@@ -640,7 +678,7 @@ bool AnimationUpdater::DownloadAnimationFile(const std::string& url, const std::
         http->SetHeader("User-Agent", "Xiaozhi-Animation-Updater/1.0");
         http->SetHeader("Accept", "application/octet-stream");
         http->SetHeader("Accept-Encoding", "identity"); // Disable compression
-        http->SetTimeout(60000); // 60 second timeout for downloads
+        http->SetTimeout(240000); // 240 second timeout for downloads
         
         ESP_LOGI(TAG, "Downloading from: %s", url.c_str());
         ESP_LOGI(TAG, "HTTP client created, attempting connection...");
@@ -726,17 +764,21 @@ bool AnimationUpdater::DownloadAnimationFile(const std::string& url, const std::
 // NEW: Download animations_mega.bin specifically
 bool AnimationUpdater::DownloadMegaAnimationFile(const std::string& url) {
     try {
-        // Check if SD card is mounted
-        if (!SdCard::IsMounted()) {
-            ESP_LOGE(TAG, "SD card is not mounted. Please ensure SD card is properly inserted and formatted as FAT32.");
-            ESP_LOGE(TAG, "SD card should be initialized during system startup in main.cc");
+        // Check if SPIFFS is initialized and mounted
+        ESP_LOGI(TAG, "Checking SPIFFS status before download...");
+        
+        // First check if SPIFFS filesystem is accessible
+        if (!IsSpiffsReady()) {
+            ESP_LOGE(TAG, "SPIFFS filesystem not accessible");
+            ESP_LOGE(TAG, "SPIFFS may not be initialized yet. Please ensure animation_init_spiffs() is called before starting AnimationUpdater.");
             return false;
         }
-        ESP_LOGI(TAG, "SD card is mounted and ready for animations_mega.bin download");
         
-        // Debug: List SD card contents and test write access
-        ESP_LOGI(TAG, "Listing SD card contents...");
-        DIR* dir = opendir("/sdcard");
+        ESP_LOGI(TAG, "SPIFFS filesystem accessible, proceeding with download");
+        
+        // Debug: List SPIFFS contents and test write access
+        ESP_LOGI(TAG, "Listing SPIFFS contents...");
+        DIR* dir = opendir("/spiffs");
         if (dir) {
             struct dirent* entry;
             int file_count = 0;
@@ -747,60 +789,25 @@ bool AnimationUpdater::DownloadMegaAnimationFile(const std::string& url) {
                 }
             }
             closedir(dir);
-            ESP_LOGI(TAG, "Total files in SD card: %d", file_count);
+            ESP_LOGI(TAG, "Total files in SPIFFS: %d", file_count);
         } else {
-            ESP_LOGW(TAG, "Failed to open SD card directory for listing");
+            ESP_LOGW(TAG, "Failed to open SPIFFS directory for listing");
         }
         
         // Test write access by creating a small test file
-        ESP_LOGI(TAG, "Testing SD card write access...");
-        FILE* test_file = fopen("/sdcard/test_write.txt", "w");
+        ESP_LOGI(TAG, "Testing SPIFFS write access...");
+        FILE* test_file = fopen("/spiffs/test_write.txt", "w");
         if (test_file) {
             fprintf(test_file, "test");
             fclose(test_file);
-            ESP_LOGI(TAG, "SD card write test successful");
+            ESP_LOGI(TAG, "SPIFFS write test successful");
             // Clean up test file
-            unlink("/sdcard/test_write.txt");
+            unlink("/spiffs/test_write.txt");
         } else {
-            ESP_LOGE(TAG, "SD card write test failed: %s", strerror(errno));
-            ESP_LOGE(TAG, "SD card may need to be reformatted or remounted");
+            ESP_LOGE(TAG, "SPIFFS write test failed: %s", strerror(errno));
+            ESP_LOGE(TAG, "SPIFFS may need to be reformatted");
             ESP_LOGE(TAG, "Error code: %d (EINVAL=%d, EACCES=%d, ENOENT=%d)", errno, EINVAL, EACCES, ENOENT);
-            
-            // Try to remount SD card
-            ESP_LOGW(TAG, "Attempting to remount SD card...");
-            SdCard::Eject();
-            vTaskDelay(pdMS_TO_TICKS(1000)); // Wait 1 second
-            esp_err_t remount_ret = SdCard::Initialize();
-            if (remount_ret != ESP_OK) {
-                ESP_LOGE(TAG, "Failed to remount SD card: %s", esp_err_to_name(remount_ret));
-                return false;
-            }
-            ESP_LOGI(TAG, "SD card remounted successfully, retrying write test...");
-            
-            // Retry write test
-            test_file = fopen("/sdcard/test_write.txt", "w");
-            if (test_file) {
-                fprintf(test_file, "test");
-                fclose(test_file);
-                ESP_LOGI(TAG, "SD card write test successful after remount");
-                unlink("/sdcard/test_write.txt");
-            } else {
-                ESP_LOGE(TAG, "SD card write test still failing after remount: %s", strerror(errno));
-                
-                // Try alternative approach - write to a different filename
-                ESP_LOGW(TAG, "Trying alternative filename approach...");
-                test_file = fopen("/sdcard/test123.bin", "w");
-                if (test_file) {
-                    fprintf(test_file, "test");
-                    fclose(test_file);
-                    ESP_LOGI(TAG, "Alternative filename write successful");
-                    unlink("/sdcard/test123.bin");
-                } else {
-                    ESP_LOGE(TAG, "All SD card write attempts failed. SD card may be corrupted or write-protected.");
-                    ESP_LOGE(TAG, "Please check: 1) SD card is not write-protected, 2) SD card is properly formatted as FAT32, 3) SD card is not corrupted");
-                    return false;
-                }
-            }
+            return false;
         }
         
         auto& board = Board::GetInstance();
@@ -844,36 +851,36 @@ bool AnimationUpdater::DownloadMegaAnimationFile(const std::string& url) {
             ESP_LOGI(TAG, "Server did not provide Content-Length, will read until connection closes");
         }
         
-        ESP_LOGI(TAG, "Downloading animations_mega.bin (%u bytes) - streaming to SD card", (unsigned int)content_length);
+        ESP_LOGI(TAG, "Downloading animations_mega.bin (%u bytes) - streaming to SPIFFS", (unsigned int)content_length);
         
-        // Stream download directly to SD card file (no RAM buffering)
-        // Use shorter filename to avoid FAT32 long filename issues
-        const char* filename = "test.bin";
+        // Stream download directly to SPIFFS file (no RAM buffering)
+        const char* filename = "animations_mega.bin";
         char full_path[128];
-        snprintf(full_path, sizeof(full_path), "/sdcard/%s", filename);
+        snprintf(full_path, sizeof(full_path), "/spiffs/%s", filename);
         
         // Remove existing file if it exists
         if (access(full_path, F_OK) == 0) {
-            ESP_LOGI(TAG, "Removing existing test.bin...");
+            ESP_LOGI(TAG, "Removing existing animations_mega.bin...");
             if (unlink(full_path) != 0) {
                 ESP_LOGW(TAG, "Failed to remove existing file: %s", full_path);
             }
         }
         
-        // Check if SD card directory exists and is writable
-        struct stat st;
-        if (stat("/sdcard", &st) != 0) {
-            ESP_LOGE(TAG, "SD card mount point /sdcard does not exist");
+        // Check if SPIFFS directory is accessible and writable
+        DIR* test_dir = opendir("/spiffs");
+        if (test_dir == NULL) {
+            ESP_LOGE(TAG, "SPIFFS filesystem not accessible for writing");
             http->Close();
             return false;
         }
+        closedir(test_dir);
         
         // Open file for writing
         FILE* file = fopen(full_path, "wb");
         if (!file) {
             ESP_LOGE(TAG, "Failed to open file for writing: %s", full_path);
             ESP_LOGE(TAG, "Error: %s", strerror(errno));
-            ESP_LOGE(TAG, "Please check: 1) SD card is inserted, 2) SD card is formatted as FAT32, 3) SD card is not write-protected");
+            ESP_LOGE(TAG, "Please check: 1) SPIFFS is properly initialized, 2) animations partition is formatted, 3) SPIFFS has free space");
             http->Close();
             return false;
         }
@@ -930,16 +937,16 @@ bool AnimationUpdater::DownloadMegaAnimationFile(const std::string& url) {
             return false;
         }
         
-        ESP_LOGI(TAG, "Download completed, validating test.bin...");
+        ESP_LOGI(TAG, "Download completed, validating animations_mega.bin...");
         
         // Validate the downloaded mega file by reading it back
         if (!ValidateMegaAnimationFileFromDisk(full_path)) {
-            ESP_LOGE(TAG, "Downloaded test.bin failed validation");
+            ESP_LOGE(TAG, "Downloaded animations_mega.bin failed validation");
             unlink(full_path);
             return false;
         }
         
-        ESP_LOGI(TAG, "Successfully downloaded and saved test.bin (%u bytes)", (unsigned int)total_read);
+        ESP_LOGI(TAG, "Successfully downloaded and saved animations_mega.bin (%u bytes)", (unsigned int)total_read);
         return true;
         
     } catch (const std::exception& e) {
@@ -950,7 +957,7 @@ bool AnimationUpdater::DownloadMegaAnimationFile(const std::string& url) {
 
 bool AnimationUpdater::SaveAnimationToSpiffs(const std::string& filename, const std::string& data) {
     char full_path[128];
-    snprintf(full_path, sizeof(full_path), "/sdcard/%s", filename.c_str());
+    snprintf(full_path, sizeof(full_path), "/spiffs/%s", filename.c_str());
     
     FILE* file = fopen(full_path, "wb");
     if (!file) {
@@ -967,21 +974,21 @@ bool AnimationUpdater::SaveAnimationToSpiffs(const std::string& filename, const 
         return false;
     }
     
-    ESP_LOGI(TAG, "Saved animation file: %s (%zu bytes)", filename.c_str(), written);
+    ESP_LOGI(TAG, "Saved animation file to SPIFFS: %s (%zu bytes)", filename.c_str(), written);
     return true;
 }
 
-// NEW: Save animations_mega.bin to SD card
+// NEW: Save animations_mega.bin to SPIFFS
 bool AnimationUpdater::SaveMegaAnimationToSpiffs(const std::string& data) {
-    const char* filename = "test.bin";
+    const char* filename = "animations_mega.bin";
     char full_path[128];
-    snprintf(full_path, sizeof(full_path), "/sdcard/%s", filename);
+    snprintf(full_path, sizeof(full_path), "/spiffs/%s", filename);
     
-    ESP_LOGI(TAG, "Saving test.bin to SD card (%zu bytes)...", data.size());
+    ESP_LOGI(TAG, "Saving animations_mega.bin to SPIFFS (%zu bytes)...", data.size());
     
     // Remove existing file if it exists
     if (access(full_path, F_OK) == 0) {
-        ESP_LOGI(TAG, "Removing existing test.bin...");
+        ESP_LOGI(TAG, "Removing existing animations_mega.bin...");
         if (unlink(full_path) != 0) {
             ESP_LOGW(TAG, "Failed to remove existing file: %s", full_path);
         }
@@ -1002,7 +1009,7 @@ bool AnimationUpdater::SaveMegaAnimationToSpiffs(const std::string& data) {
         return false;
     }
     
-    ESP_LOGI(TAG, "✅ Successfully saved animations_mega.bin (%zu bytes)", written);
+    ESP_LOGI(TAG, "✅ Successfully saved animations_mega.bin to SPIFFS (%zu bytes)", written);
     
     // Verify the file was written correctly
     FILE* verify_file = fopen(full_path, "rb");
@@ -1184,9 +1191,9 @@ bool AnimationUpdater::ValidateMegaAnimationFileFromDisk(const char* file_path) 
 }
 
 void AnimationUpdater::ReloadAnimations() {
-    ESP_LOGI(TAG, "Reloading animations from SD card");
+    ESP_LOGI(TAG, "Reloading animations from SPIFFS");
     
-    // Reload SD card animations
+    // Reload SPIFFS animations
     animation_load_spiffs_animations();
     
     ESP_LOGI(TAG, "Animations reloaded successfully");
@@ -1198,7 +1205,7 @@ void AnimationUpdater::ReloadAnimations() {
 void AnimationUpdater::LoadConfiguration() {
     // Use hardcoded configuration for testing
     server_url_ = DEFAULT_SERVER_URL;
-    check_interval_seconds_ = 10;  // 10 seconds
+    check_interval_seconds_ = 5;  // 5 seconds for faster testing
     enabled_.store(true);  // Always enabled for testing
     
     // Load version from NVS storage
@@ -1233,4 +1240,28 @@ void AnimationUpdater::SetCurrentVersion(const std::string& version) {
     current_version_ = version;
     SaveConfiguration();  // Save to NVS storage
     ESP_LOGI(TAG, "Animation version updated to: %s", version.c_str());
+}
+
+// Helper method to check if SPIFFS is ready (with retry)
+bool AnimationUpdater::IsSpiffsReady() const {
+    // Instead of relying on stat("/spiffs"), try to actually access SPIFFS
+    // This is more reliable than mount point verification
+    
+    // Try to open the SPIFFS directory
+    DIR* dir = opendir("/spiffs");
+    if (dir != NULL) {
+        closedir(dir);
+        ESP_LOGD(TAG, "SPIFFS check: ✅ Ready (directory accessible)");
+        return true;
+    }
+    
+    // If directory access fails, try to stat a known file
+    struct stat st;
+    if (stat("/spiffs/animations_mega.bin", &st) == 0) {
+        ESP_LOGD(TAG, "SPIFFS check: ✅ Ready (file accessible)");
+        return true;
+    }
+    
+    ESP_LOGD(TAG, "SPIFFS check: ❌ Not ready (errno: %d - %s)", errno, strerror(errno));
+    return false;
 }

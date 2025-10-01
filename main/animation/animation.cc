@@ -14,6 +14,7 @@
 #include <type_traits>
 #include "esp_spiffs.h"
 #include "esp_log.h"
+#include "esp_partition.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -283,7 +284,26 @@ static bool spiffs_initialized = false;
 
 void animation_init_spiffs(void)
 {
-    if (spiffs_initialized) return;
+    ESP_LOGI("animation", "=== animation_init_spiffs() called ===");
+    
+    if (spiffs_initialized) {
+        ESP_LOGW("animation", "SPIFFS already initialized, skipping");
+        return;
+    }
+    
+    ESP_LOGI("animation", "Initializing SPIFFS with partition 'animations'...");
+    
+    // Check if animations partition exists
+    const esp_partition_t* partition = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_SPIFFS, "animations");
+    if (partition == NULL) {
+        ESP_LOGE("animation", "❌ animations partition not found!");
+        ESP_LOGE("animation", "Check partition table: partitions/v1/16m.csv should contain 'animations, data, spiffs, 0x100000, 5M,'");
+        return;
+    }
+    
+    ESP_LOGI("animation", "✅ animations partition found:");
+    ESP_LOGI("animation", "  Address: 0x%x", partition->address);
+    ESP_LOGI("animation", "  Size: %d bytes (%d MB)", partition->size, partition->size / (1024 * 1024));
     
     esp_vfs_spiffs_conf_t config = {
         .base_path = "/spiffs",
@@ -295,13 +315,39 @@ void animation_init_spiffs(void)
     esp_err_t ret = esp_vfs_spiffs_register(&config);
     if (ret != ESP_OK) {
         ESP_LOGE("animation", "Failed to initialize SPIFFS (%s)", esp_err_to_name(ret));
+        ESP_LOGE("animation", "Check: 1) animations partition exists, 2) partition size is correct, 3) no other SPIFFS conflicts");
         return;
     }
     
     spiffs_initialized = true;
-    ESP_LOGI("animation", "SPIFFS initialized successfully");
+    ESP_LOGI("animation", "✅ SPIFFS initialized successfully at /spiffs");
+    
+    // Verify SPIFFS is working by checking if we can access the filesystem (with retry)
+    ESP_LOGI("animation", "Verifying SPIFFS filesystem access...");
+    int retry_count = 0;
+    bool mount_verified = false;
+    
+    while (retry_count < 10 && !mount_verified) {
+        // Try to open the SPIFFS directory - this is more reliable than stat("/spiffs")
+        DIR* dir = opendir("/spiffs");
+        if (dir != NULL) {
+            closedir(dir);
+            mount_verified = true;
+            ESP_LOGI("animation", "✅ SPIFFS filesystem verified: /spiffs accessible (attempt %d)", retry_count + 1);
+        } else {
+            retry_count++;
+            ESP_LOGD("animation", "Filesystem not ready, retrying... (attempt %d/10)", retry_count);
+            vTaskDelay(pdMS_TO_TICKS(50)); // Wait 50ms between retries
+        }
+    }
+    
+    if (!mount_verified) {
+        ESP_LOGW("animation", "⚠️ SPIFFS filesystem verification failed after 10 attempts");
+        ESP_LOGW("animation", "This may be a timing issue, but SPIFFS should still work");
+    }
     
     // Try to load SPIFFS animations
+    ESP_LOGI("animation", "Loading SPIFFS animations...");
     animation_load_spiffs_animations();
 }
 
@@ -391,147 +437,140 @@ void animation_load_spiffs_animations(void)
     // Debug SPIFFS contents
     test_spiffs_debug();
     
-    // COMMENTED OUT: Load from SPIFFS - now using SD card instead
+    // Load from SPIFFS - restored from SD card implementation
     // First try to load ALL animations from mega file
-    // ESP_LOGI("animation", "Attempting to load ALL animations from mega file...");
-    // if (animation_load_all_from_mega_file()) {
-    //     ESP_LOGI("animation", "🎉 Successfully loaded ALL animations from mega file!");
-    //     ESP_LOGI("animation", "   - All 8 animation types loaded in one operation");
-    //     ESP_LOGI("animation", "   - Total of 28 frames loaded from animations_mega.bin");
-    //     ESP_LOGI("animation", "   - Ultimate optimization achieved!");
-    //     return; // Success! No need to load individual animations
-    // }
-    
-    // NEW: Try to load ALL animations from SD card
-    ESP_LOGI("animation", "Attempting to load ALL animations from SD card...");
-    
-    // Debug SD card status before attempting to load
-    SdCard::DebugStatus();
-    
-    if (animation_load_all_from_sd_card()) {
-        ESP_LOGI("animation", "🎉 Successfully loaded ALL animations from SD card!");
+    ESP_LOGI("animation", "Attempting to load ALL animations from mega file...");
+    if (animation_load_all_from_mega_file()) {
+        ESP_LOGI("animation", "🎉 Successfully loaded ALL animations from mega file!");
         ESP_LOGI("animation", "   - All 8 animation types loaded in one operation");
-        ESP_LOGI("animation", "   - Total of 28 frames loaded from test.bin on SD card");
+        ESP_LOGI("animation", "   - Total of 28 frames loaded from animations_mega.bin");
         ESP_LOGI("animation", "   - Ultimate optimization achieved!");
         return; // Success! No need to load individual animations
     }
     
-    // COMMENTED OUT: Fall back to individual animation loading from SPIFFS
-    // Fall back to individual animation loading
-    // ESP_LOGI("animation", "Mega file not found, loading individual animations...");
+    // COMMENTED OUT: Try to load ALL animations from SD card
+    // ESP_LOGI("animation", "Attempting to load ALL animations from SD card...");
+    // 
+    // // Debug SD card status before attempting to load
+    // SdCard::DebugStatus();
+    // 
+    // if (animation_load_all_from_sd_card()) {
+    //     ESP_LOGI("animation", "🎉 Successfully loaded ALL animations from SD card!");
+    //     ESP_LOGI("animation", "   - All 8 animation types loaded in one operation");
+    //     ESP_LOGI("animation", "   - Total of 28 frames loaded from test.bin on SD card");
+    //     ESP_LOGI("animation", "   - Ultimate optimization achieved!");
+    //     return; // Success! No need to load individual animations
+    // }
     
-    // // Try to load normal animation from SPIFFS
-    // ESP_LOGI("animation", "Attempting to load normal animation from SPIFFS...");
-    // bool normal_loaded = animation_load_normal_from_spiffs();
+    // Fall back to individual animation loading from SPIFFS
+    ESP_LOGI("animation", "Mega file not found, loading individual animations from SPIFFS...");
     
-    // // Try to load embarrass animation from SPIFFS
-    // ESP_LOGI("animation", "Attempting to load embarrass animation from SPIFFS...");
-    // bool embarrass_loaded = animation_load_embarrass_from_spiffs();
+    // Try to load normal animation from SPIFFS
+    ESP_LOGI("animation", "Attempting to load normal animation from SPIFFS...");
+    bool normal_loaded = animation_load_normal_from_spiffs();
     
-    // // Try to load fire animation from SPIFFS
-    // ESP_LOGI("animation", "Attempting to load fire animation from SPIFFS...");
-    // bool fire_loaded = animation_load_fire_from_spiffs();
+    // Try to load embarrass animation from SPIFFS
+    ESP_LOGI("animation", "Attempting to load embarrass animation from SPIFFS...");
+    bool embarrass_loaded = animation_load_embarrass_from_spiffs();
     
-    // // Try to load happy animation from SPIFFS
-    // ESP_LOGI("animation", "Attempting to load happy animation from SPIFFS...");
-    // bool happy_loaded = animation_load_happy_from_spiffs();
+    // Try to load fire animation from SPIFFS
+    ESP_LOGI("animation", "Attempting to load fire animation from SPIFFS...");
+    bool fire_loaded = animation_load_fire_from_spiffs();
     
-    // // Try to load inspiration animation from SPIFFS
-    // ESP_LOGI("animation", "Attempting to load inspiration animation from SPIFFS...");
-    // bool inspiration_loaded = animation_load_inspiration_from_spiffs();
+    // Try to load happy animation from SPIFFS
+    ESP_LOGI("animation", "Attempting to load happy animation from SPIFFS...");
+    bool happy_loaded = animation_load_happy_from_spiffs();
     
-    // // Try to load question animation from SPIFFS
-    // ESP_LOGI("animation", "Attempting to load question animation from SPIFFS...");
-    // bool question_loaded = animation_load_question_from_spiffs();
+    // Try to load inspiration animation from SPIFFS
+    ESP_LOGI("animation", "Attempting to load inspiration animation from SPIFFS...");
+    bool inspiration_loaded = animation_load_inspiration_from_spiffs();
     
-    // // Try to load shy animation from SPIFFS
-    // ESP_LOGI("animation", "Attempting to load shy animation from SPIFFS...");
-    // bool shy_loaded = animation_load_shy_from_spiffs();
+    // Try to load question animation from SPIFFS
+    ESP_LOGI("animation", "Attempting to load question animation from SPIFFS...");
+    bool question_loaded = animation_load_question_from_spiffs();
     
-    // // Try to load sleep animation from SPIFFS
-    // ESP_LOGI("animation", "Attempting to load sleep animation from SPIFFS...");
-    // bool sleep_loaded = animation_load_sleep_from_spiffs();
+    // Try to load shy animation from SPIFFS
+    ESP_LOGI("animation", "Attempting to load shy animation from SPIFFS...");
+    bool shy_loaded = animation_load_shy_from_spiffs();
     
-    // NEW: Fall back to individual animation loading from SD card
-    ESP_LOGI("animation", "Mega file not found on SD card, loading individual animations from SD card...");
+    // Try to load sleep animation from SPIFFS
+    ESP_LOGI("animation", "Attempting to load sleep animation from SPIFFS...");
+    bool sleep_loaded = animation_load_sleep_from_spiffs();
     
-    // Try to load normal animation from SD card
-    ESP_LOGI("animation", "Attempting to load normal animation from SD card...");
-    bool normal_loaded = animation_load_normal_from_sd_card();
-    
-    // Try to load embarrass animation from SD card
-    ESP_LOGI("animation", "Attempting to load embarrass animation from SD card...");
-    bool embarrass_loaded = animation_load_embarrass_from_sd_card();
-    
-    // Try to load fire animation from SD card
-    ESP_LOGI("animation", "Attempting to load fire animation from SD card...");
-    bool fire_loaded = animation_load_fire_from_sd_card();
-    
-    // Try to load happy animation from SD card
-    ESP_LOGI("animation", "Attempting to load happy animation from SD card...");
-    bool happy_loaded = animation_load_happy_from_sd_card();
-    
-    // Try to load inspiration animation from SD card
-    ESP_LOGI("animation", "Attempting to load inspiration animation from SD card...");
-    bool inspiration_loaded = animation_load_inspiration_from_sd_card();
-    
-    // Try to load question animation from SD card
-    ESP_LOGI("animation", "Attempting to load question animation from SD card...");
-    bool question_loaded = animation_load_question_from_sd_card();
-    
-    // Try to load shy animation from SD card
-    ESP_LOGI("animation", "Attempting to load shy animation from SD card...");
-    bool shy_loaded = animation_load_shy_from_sd_card();
-    
-    // Try to load sleep animation from SD card
-    ESP_LOGI("animation", "Attempting to load sleep animation from SD card...");
-    bool sleep_loaded = animation_load_sleep_from_sd_card();
+    // COMMENTED OUT: Fall back to individual animation loading from SD card
+    // ESP_LOGI("animation", "Mega file not found on SD card, loading individual animations from SD card...");
+    // 
+    // // Try to load normal animation from SD card
+    // ESP_LOGI("animation", "Attempting to load normal animation from SD card...");
+    // bool normal_loaded = animation_load_normal_from_sd_card();
+    // 
+    // // Try to load embarrass animation from SD card
+    // ESP_LOGI("animation", "Attempting to load embarrass animation from SD card...");
+    // bool embarrass_loaded = animation_load_embarrass_from_sd_card();
+    // 
+    // // Try to load fire animation from SD card
+    // ESP_LOGI("animation", "Attempting to load fire animation from SD card...");
+    // bool fire_loaded = animation_load_fire_from_sd_card();
+    // 
+    // // Try to load happy animation from SD card
+    // ESP_LOGI("animation", "Attempting to load happy animation from SD card...");
+    // bool happy_loaded = animation_load_happy_from_sd_card();
+    // 
+    // // Try to load inspiration animation from SD card
+    // ESP_LOGI("animation", "Attempting to load inspiration animation from SD card...");
+    // bool inspiration_loaded = animation_load_inspiration_from_sd_card();
+    // 
+    // // Try to load question animation from SD card
+    // ESP_LOGI("animation", "Attempting to load question animation from SD card...");
+    // bool question_loaded = animation_load_question_from_sd_card();
+    // 
+    // // Try to load shy animation from SD card
+    // ESP_LOGI("animation", "Attempting to load shy animation from SD card...");
+    // bool shy_loaded = animation_load_shy_from_sd_card();
+    // 
+    // // Try to load sleep animation from SD card
+    // ESP_LOGI("animation", "Attempting to load sleep animation from SD card...");
+    // bool sleep_loaded = animation_load_sleep_from_sd_card();
     
     if (normal_loaded || embarrass_loaded || fire_loaded || happy_loaded || inspiration_loaded || question_loaded || shy_loaded || sleep_loaded) {
-        ESP_LOGI("animation", "✅ SD card animations loaded successfully!");
+        ESP_LOGI("animation", "✅ SPIFFS animations loaded successfully!");
         if (normal_loaded) {
-            ESP_LOGI("animation", "   - Normal animation now uses SD card (normal1.bin, normal2.bin, normal3.bin)");
-            ESP_LOGI("animation", "   - Normal SD card animation has %d frames", spiffs_normal.len);
+            ESP_LOGI("animation", "   - Normal animation now uses SPIFFS (normal1.bin, normal2.bin, normal3.bin)");
+            ESP_LOGI("animation", "   - Normal SPIFFS animation has %d frames", spiffs_normal.len);
         }
         if (embarrass_loaded) {
-            ESP_LOGI("animation", "   - Embarrass animation now uses SD card (embarrass1.bin, embarrass2.bin, embarrass3.bin)");
-            ESP_LOGI("animation", "   - Embarrass SD card animation has %d frames", spiffs_embarrass.len);
+            ESP_LOGI("animation", "   - Embarrass animation now uses SPIFFS (embarrass1.bin, embarrass2.bin, embarrass3.bin)");
+            ESP_LOGI("animation", "   - Embarrass SPIFFS animation has %d frames", spiffs_embarrass.len);
         }
         if (fire_loaded) {
-            ESP_LOGI("animation", "   - Fire animation now uses SD card (fire1.bin, fire2.bin, fire3.bin, fire4.bin)");
-            ESP_LOGI("animation", "   - Fire SD card animation has %d frames", spiffs_fire.len);
+            ESP_LOGI("animation", "   - Fire animation now uses SPIFFS (fire1.bin, fire2.bin, fire3.bin, fire4.bin)");
+            ESP_LOGI("animation", "   - Fire SPIFFS animation has %d frames", spiffs_fire.len);
         }
         if (happy_loaded) {
-            ESP_LOGI("animation", "   - Happy animation now uses SD card (happy1.bin, happy2.bin, happy3.bin, happy4.bin)");
-            ESP_LOGI("animation", "   - Happy SD card animation has %d frames", spiffs_happy.len);
+            ESP_LOGI("animation", "   - Happy animation now uses SPIFFS (happy1.bin, happy2.bin, happy3.bin, happy4.bin)");
+            ESP_LOGI("animation", "   - Happy SPIFFS animation has %d frames", spiffs_happy.len);
         }
         if (inspiration_loaded) {
-            ESP_LOGI("animation", "   - Inspiration animation now uses SD card (inspiration1.bin, inspiration2.bin, inspiration3.bin, inspiration4.bin)");
-            ESP_LOGI("animation", "   - Inspiration SD card animation has %d frames", spiffs_inspiration.len);
+            ESP_LOGI("animation", "   - Inspiration animation now uses SPIFFS (inspiration1.bin, inspiration2.bin, inspiration3.bin, inspiration4.bin)");
+            ESP_LOGI("animation", "   - Inspiration SPIFFS animation has %d frames", spiffs_inspiration.len);
         }
         if (question_loaded) {
-            ESP_LOGI("animation", "   - Question animation now uses SD card (question1.bin, question2.bin, question3.bin, question4.bin)");
-            ESP_LOGI("animation", "   - Question SD card animation has %d frames", spiffs_question.len);
+            ESP_LOGI("animation", "   - Question animation now uses SPIFFS (question1.bin, question2.bin, question3.bin, question4.bin)");
+            ESP_LOGI("animation", "   - Question SPIFFS animation has %d frames", spiffs_question.len);
         }
         if (shy_loaded) {
-            ESP_LOGI("animation", "   - Shy animation now uses SD card (shy1.bin, shy2.bin)");
-            ESP_LOGI("animation", "   - Shy SD card animation has %d frames", spiffs_shy.len);
+            ESP_LOGI("animation", "   - Shy animation now uses SPIFFS (shy1.bin, shy2.bin)");
+            ESP_LOGI("animation", "   - Shy SPIFFS animation has %d frames", spiffs_shy.len);
         }
         if (sleep_loaded) {
-            ESP_LOGI("animation", "   - Sleep animation now uses SD card (sleep1.bin, sleep2.bin, sleep3.bin, sleep4.bin)");
-            ESP_LOGI("animation", "   - Sleep SD card animation has %d frames", spiffs_sleep.len);
+            ESP_LOGI("animation", "   - Sleep animation now uses SPIFFS (sleep1.bin, sleep2.bin, sleep3.bin, sleep4.bin)");
+            ESP_LOGI("animation", "   - Sleep SPIFFS animation has %d frames", spiffs_sleep.len);
         }
     } else {
-        ESP_LOGI("animation", "⚠️  SD card animations not found, using static animations");
-        ESP_LOGI("animation", "   - Normal animation uses static images (normal1, normal2, normal3)");
-        ESP_LOGI("animation", "   - Embarrass animation uses static images (embarrass1, embarrass2, embarrass3)");
-        ESP_LOGI("animation", "   - Fire animation uses static images (fire1, fire2, fire3, fire4)");
-        ESP_LOGI("animation", "   - Happy animation uses static images (happy1, happy2, happy3, happy4)");
-        ESP_LOGI("animation", "   - Inspiration animation uses static images (inspiration1, inspiration2, inspiration3, inspiration4)");
-        ESP_LOGI("animation", "   - Question animation uses static images (question1, question2, question3, question4)");
-        ESP_LOGI("animation", "   - Shy animation uses static images (shy1, shy2)");
-        ESP_LOGI("animation", "   - Sleep animation uses static images (sleep1, sleep2, sleep3, sleep4)");
-        ESP_LOGI("animation", "   - To use SD card animations, place all .bin files on the SD card");
+        ESP_LOGW("animation", "❌ No animations could be loaded from SPIFFS");
+        ESP_LOGW("animation", "   - Check if animations partition is properly formatted");
+        ESP_LOGW("animation", "   - Check if animation files exist in SPIFFS");
+        ESP_LOGW("animation", "   - Will fall back to static animations");
     }
 }
 
