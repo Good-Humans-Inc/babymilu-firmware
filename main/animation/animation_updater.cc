@@ -3,6 +3,7 @@
 #include "system_info.h"
 #include "animation.h"
 #include "sd_card.h"
+#include "settings.h"
 #include <esp_log.h>
 #include <esp_timer.h>
 #include <cJSON.h>
@@ -20,6 +21,9 @@
 // Updated for HTTPS testing
 #define DEFAULT_SERVER_URL "https://github.com/Jackson-hangxuan/postman_test/raw/refs/heads/main"
 
+// Server version - should match the lambda function's SERVER_VERSION
+#define SERVER_VERSION "1.0.1"
+
 AnimationUpdater& AnimationUpdater::GetInstance() {
     static AnimationUpdater instance;
     return instance;
@@ -36,8 +40,8 @@ AnimationUpdater::~AnimationUpdater() {
 void AnimationUpdater::Initialize() {
     ESP_LOGI(TAG, "Initializing Animation Updater");
     
-    // Initialize SPIFFS for animations if not already done
-    animation_init_spiffs();
+    // NOTE: animation_init_spiffs() is now called from main.cc after SD card initialization
+    // This ensures SD card animations are loaded first, then SPIFFS as fallback
     
     // Load configuration from NVS
     LoadConfiguration();
@@ -240,17 +244,8 @@ void AnimationUpdater::UpdateLoop() {
                 ESP_LOGI(TAG, "Attempting to download animations_mega.bin from HTTPS server...");
                 TestHttpsDownload();
             } else {
-                // Check for updates periodically (every 10th iteration = ~100 seconds)
-                static int update_check_counter = 0;
-                update_check_counter++;
-                
-                if (update_check_counter >= 10) {
-                    ESP_LOGI(TAG, "Periodic check for animations_mega.bin updates...");
-                    TestHttpsDownload();
-                    update_check_counter = 0;
-                } else {
-                    ESP_LOGD(TAG, "Skipping update check (counter: %d/10)", update_check_counter);
-                }
+                // Skip download attempts after first successful download
+                ESP_LOGD(TAG, "First download already successful, skipping further download attempts");
             }
         }
         
@@ -451,9 +446,10 @@ bool AnimationUpdater::TestHttpsDownload() {
     // Test with the provided HTTPS endpoint
     std::string test_url = "https://1379890832-bqi413zoc2.ap-shanghai.tencentscf.com";
     
-    // Add device_id to the URL for Flask program handling
+    // Add device_id and version to the URL for Flask program handling
     std::string device_id = SystemInfo::GetMacAddress();
-    test_url += "?device_id=" + device_id;
+    std::string version = GetCurrentVersion();
+    test_url += "?device_id=" + device_id + "&version=" + version;
     
     ESP_LOGI(TAG, "Attempting to connect to: %s", test_url.c_str());
     
@@ -461,8 +457,10 @@ bool AnimationUpdater::TestHttpsDownload() {
     std::string download_url = GetDownloadUrlFromResponse(test_url);
     
     if (download_url.empty()) {
-        ESP_LOGE(TAG, "Failed to get download URL from response");
-        return false;
+        // Empty response means no update needed - treat as successful download with same version
+        ESP_LOGI(TAG, "Empty response received - no update needed, current version is up to date");
+        first_download_success_.store(true);
+        return true;
     }
     
     ESP_LOGI(TAG, "Got download URL: %s", download_url.c_str());
@@ -473,6 +471,8 @@ bool AnimationUpdater::TestHttpsDownload() {
     if (success) {
         ESP_LOGI(TAG, "Successfully downloaded animations_mega.bin!");
         first_download_success_.store(true);
+        // Update version to server version after successful download
+        SetCurrentVersion(SERVER_VERSION);  // Update to server version
         ReloadAnimations();
     } else {
         ESP_LOGE(TAG, "Failed to download animations_mega.bin!");
@@ -1201,13 +1201,36 @@ void AnimationUpdater::LoadConfiguration() {
     check_interval_seconds_ = 10;  // 10 seconds
     enabled_.store(true);  // Always enabled for testing
     
+    // Load version from NVS storage
+    Settings settings("animudter", true);
+    std::string saved_version = settings.GetString("version", "1.0.0");  // Default to 1.0.0 if not found
+    if (!saved_version.empty()) {
+        current_version_ = saved_version;
+        ESP_LOGI(TAG, "Loaded version from NVS: %s", current_version_.c_str());
+    } else {
+        ESP_LOGW(TAG, "Failed to load version from NVS, using default: %s", current_version_.c_str());
+    }
+    
     ESP_LOGI(TAG, "Configuration loaded:");
     ESP_LOGI(TAG, "  Server URL: %s", server_url_.c_str());
     ESP_LOGI(TAG, "  Check Interval: %u seconds", check_interval_seconds_);
     ESP_LOGI(TAG, "  Enabled: %s", enabled_.load() ? "true" : "false");
+    ESP_LOGI(TAG, "  Current Version: %s", current_version_.c_str());
 }
 
 void AnimationUpdater::SaveConfiguration() {
-    // Configuration is hardcoded, no need to save
-    ESP_LOGD(TAG, "Configuration is hardcoded, no save needed");
+    // Save version to NVS storage
+    Settings settings("animudter", true);
+    settings.SetString("version", current_version_);
+    ESP_LOGD(TAG, "Version save attempted: %s", current_version_.c_str());
+}
+
+std::string AnimationUpdater::GetCurrentVersion() const {
+    return current_version_;
+}
+
+void AnimationUpdater::SetCurrentVersion(const std::string& version) {
+    current_version_ = version;
+    SaveConfiguration();  // Save to NVS storage
+    ESP_LOGI(TAG, "Animation version updated to: %s", version.c_str());
 }

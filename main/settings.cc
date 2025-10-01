@@ -6,7 +6,15 @@
 #define TAG "Settings"
 
 Settings::Settings(const std::string& ns, bool read_write) : ns_(ns), read_write_(read_write) {
-    nvs_open(ns.c_str(), read_write_ ? NVS_READWRITE : NVS_READONLY, &nvs_handle_);
+    esp_err_t err = nvs_open(ns.c_str(), read_write_ ? NVS_READWRITE : NVS_READONLY, &nvs_handle_);
+    if (err != ESP_OK) {
+        if (err == ESP_ERR_NVS_NOT_FOUND) {
+            ESP_LOGW(TAG, "NVS namespace '%s' not found (will use defaults)", ns.c_str());
+        } else {
+            ESP_LOGE(TAG, "Failed to open NVS namespace '%s': %s", ns.c_str(), esp_err_to_name(err));
+        }
+        nvs_handle_ = 0;
+    }
 }
 
 Settings::~Settings() {
@@ -38,8 +46,17 @@ std::string Settings::GetString(const std::string& key, const std::string& defau
 }
 
 void Settings::SetString(const std::string& key, const std::string& value) {
+    if (nvs_handle_ == 0) {
+        ESP_LOGE(TAG, "NVS handle is invalid, cannot set string for key '%s'", key.c_str());
+        return;
+    }
+    
     if (read_write_) {
-        ESP_ERROR_CHECK(nvs_set_str(nvs_handle_, key.c_str(), value.c_str()));
+        esp_err_t err = nvs_set_str(nvs_handle_, key.c_str(), value.c_str());
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to set string for key '%s': %s", key.c_str(), esp_err_to_name(err));
+            return;
+        }
         dirty_ = true;
     } else {
         ESP_LOGW(TAG, "Namespace %s is not open for writing", ns_.c_str());
@@ -59,8 +76,17 @@ int32_t Settings::GetInt(const std::string& key, int32_t default_value) {
 }
 
 void Settings::SetInt(const std::string& key, int32_t value) {
+    if (nvs_handle_ == 0) {
+        ESP_LOGE(TAG, "NVS handle is invalid, cannot set int for key '%s'", key.c_str());
+        return;
+    }
+    
     if (read_write_) {
-        ESP_ERROR_CHECK(nvs_set_i32(nvs_handle_, key.c_str(), value));
+        esp_err_t err = nvs_set_i32(nvs_handle_, key.c_str(), value);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to set int for key '%s': %s", key.c_str(), esp_err_to_name(err));
+            return;
+        }
         dirty_ = true;
     } else {
         ESP_LOGW(TAG, "Namespace %s is not open for writing", ns_.c_str());

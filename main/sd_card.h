@@ -46,6 +46,12 @@ public:
      */
     static bool IsMounted();
 
+    /**
+     * @brief Debug function to print SD card status and files
+     * @return ESP_OK on success, error code on failure
+     */
+    static esp_err_t DebugStatus();
+
 private:
     static bool s_mounted;
     static constexpr const char* MOUNT_POINT = "/sdcard";

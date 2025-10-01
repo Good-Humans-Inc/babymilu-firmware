@@ -46,8 +46,13 @@ esp_err_t SdCard::Initialize()
 
     esp_err_t ret = spi_bus_initialize(static_cast<spi_host_device_t>(host.slot), &bus_cfg, SDSPI_DEFAULT_DMA);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to initialize SPI bus: %s", esp_err_to_name(ret));
-        return ret;
+        if (ret == ESP_ERR_INVALID_STATE) {
+            ESP_LOGW(TAG, "SPI bus already initialized (likely by board), continuing with SD card initialization");
+            // SPI bus is already initialized, we can still proceed with SD card mounting
+        } else {
+            ESP_LOGE(TAG, "Failed to initialize SPI bus: %s", esp_err_to_name(ret));
+            return ret;
+        }
     }
 
     // Store the SPI host for later cleanup
@@ -189,11 +194,15 @@ esp_err_t SdCard::Eject()
         // Continue with SPI bus cleanup even if unmount fails
     }
 
-    // Free SPI bus
+    // Free SPI bus (only if we initialized it)
     ret = spi_bus_free(s_spi_host);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to free SPI bus: %s", esp_err_to_name(ret));
-        return ret;
+        if (ret == ESP_ERR_INVALID_STATE) {
+            ESP_LOGW(TAG, "SPI bus was not initialized by SD card, skipping cleanup");
+        } else {
+            ESP_LOGE(TAG, "Failed to free SPI bus: %s", esp_err_to_name(ret));
+            return ret;
+        }
     }
 
     s_mounted = false;
@@ -204,4 +213,53 @@ esp_err_t SdCard::Eject()
 bool SdCard::IsMounted()
 {
     return s_mounted;
+}
+
+esp_err_t SdCard::DebugStatus()
+{
+    ESP_LOGI(TAG, "=== SD Card Debug Status ===");
+    ESP_LOGI(TAG, "Mount status: %s", s_mounted ? "MOUNTED" : "NOT MOUNTED");
+    ESP_LOGI(TAG, "Mount point: %s", MOUNT_POINT);
+    ESP_LOGI(TAG, "SPI host: %d", s_spi_host);
+    
+    if (!s_mounted) {
+        ESP_LOGW(TAG, "SD card is not mounted - cannot list files");
+        return ESP_ERR_INVALID_STATE;
+    }
+    
+    // List files in the SD card directory
+    DIR* dir = opendir(MOUNT_POINT);
+    if (dir == NULL) {
+        ESP_LOGE(TAG, "Failed to open directory: %s", MOUNT_POINT);
+        return ESP_FAIL;
+    }
+
+    struct dirent* entry;
+    int file_count = 0;
+    ESP_LOGI(TAG, "Files on SD card:");
+    
+    while ((entry = readdir(dir)) != NULL) {
+        if (entry->d_type == DT_REG) {  // Regular file
+            file_count++;
+            char full_path[512];  // Increased buffer size to handle long filenames
+            int ret = snprintf(full_path, sizeof(full_path), "%s/%s", MOUNT_POINT, entry->d_name);
+            if (ret >= sizeof(full_path)) {
+                ESP_LOGW(TAG, "  %s (filename too long, truncated)", entry->d_name);
+                continue;
+            }
+            
+            struct stat st;
+            if (stat(full_path, &st) == 0) {
+                ESP_LOGI(TAG, "  %s (%ld bytes)", entry->d_name, st.st_size);
+            } else {
+                ESP_LOGI(TAG, "  %s (size unknown)", entry->d_name);
+            }
+        }
+    }
+    closedir(dir);
+    
+    ESP_LOGI(TAG, "Total files found: %d", file_count);
+    ESP_LOGI(TAG, "=== End SD Card Debug Status ===");
+    
+    return ESP_OK;
 }

@@ -11,6 +11,8 @@
 #include "iot/thing_manager.h"
 #include "power_save_timer.h"
 #include "sscma_camera.h"
+#include "sd_card.h"
+#include "animation.h"
 
 #include <esp_log.h>
 #include "esp_check.h"
@@ -561,6 +563,21 @@ public:
         InitializeButton();
         InitializeKnob();
         Initializespd2010Display();
+        
+        // Initialize SD card BEFORE camera to avoid SPI bus conflict
+        ESP_LOGI(TAG, "Initializing SD card before camera...");
+        esp_err_t ret = SdCard::Initialize();
+        if (ret == ESP_OK) {
+            ESP_LOGI(TAG, "SD card initialized successfully before camera");
+            
+            // Initialize animations immediately after SD card is ready
+            ESP_LOGI(TAG, "Initializing animations after SD card...");
+            animation_init_spiffs();
+            ESP_LOGI(TAG, "Animations initialized successfully");
+        } else {
+            ESP_LOGW(TAG, "SD card initialization failed before camera: %s", esp_err_to_name(ret));
+        }
+        
         InitializeCamera();
         InitializeIot();
         GetBacklight()->RestoreBrightness();

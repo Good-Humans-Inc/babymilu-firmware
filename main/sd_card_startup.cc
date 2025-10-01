@@ -8,10 +8,14 @@ std::string SdCardStartup::s_hello_content;
 
 esp_err_t SdCardStartup::ProcessStartup()
 {
+    ESP_LOGI(TAG, "=== SdCardStartup::ProcessStartup() called ===");
     ESP_LOGI(TAG, "Starting SD card startup process...");
 
     // Initialize SD card
+    ESP_LOGI(TAG, "Calling SdCard::Initialize()...");
     esp_err_t ret = SdCard::Initialize();
+    ESP_LOGI(TAG, "SdCard::Initialize() returned: %s", esp_err_to_name(ret));
+    
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "Failed to initialize SD card: %s", esp_err_to_name(ret));
         ESP_LOGW(TAG, "Continuing without SD card functionality");
@@ -36,14 +40,9 @@ esp_err_t SdCardStartup::ProcessStartup()
         }
     }
 
-    // Eject SD card regardless of read success/failure
-    ret = SdCard::Eject();
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "Failed to eject SD card: %s", esp_err_to_name(ret));
-        ESP_LOGW(TAG, "Continuing anyway - file was read successfully");
-    }
-
-    ESP_LOGI(TAG, "SD card startup process completed");
+    // DO NOT eject SD card - keep it mounted for animation loading
+    ESP_LOGI(TAG, "SD card startup process completed - card remains mounted for animation loading");
+    ESP_LOGI(TAG, "=== SdCardStartup::ProcessStartup() completed successfully ===");
     return ESP_OK;  // Always return OK since file reading succeeded
 }
 

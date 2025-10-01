@@ -1,11 +1,14 @@
 from flask import Flask, request
 app = Flask(__name__)
 
-# Static URLs to cycle through
+# Static URLs to cycle through (version 1.0.1)
 STATIC_URLS = [
-    "https://gitee.com/xie-hangxuan/test/raw/master/normal1.bin",
-    "https://gitee.com/xie-hangxuan/test/raw/master/temp/normal1.bin"
+    "https://gitee.com/xie-hangxuan/test/raw/master/animations_mega.bin",
+    "https://gitee.com/xie-hangxuan/test/raw/master/animations_mega.bin"
 ]
+
+# Server version
+SERVER_VERSION = "1.0.1"
 
 # Dictionary to store device_id registrations
 device_registrations = {}
@@ -20,6 +23,7 @@ def hello_world():
     
     if action == 'status':
         status_text = f"""Status Report:
+Server Version: {SERVER_VERSION}
 Total Devices: {len(device_registrations)}
 URLs Used: {url_index}
 URLs Available: {len(STATIC_URLS) - url_index}
@@ -32,12 +36,19 @@ Registered Devices: {', '.join(device_registrations.keys()) if device_registrati
         return "Registrations reset"
     
     elif action == 'register':
-        # Original device registration logic
+        # Device registration with version checking
         device_id = request.args.get('device_id', '')
+        device_version = request.args.get('version', '1.0.0')  # Default to 1.0.0 if not provided
         
         if not device_id:
             return "No device_id provided"
         
+        # Check if device version is up to date
+        if device_version == SERVER_VERSION:
+            # Device is up to date, return empty response
+            return ""
+        
+        # Device needs update, check if already registered
         if device_id in device_registrations:
             return device_registrations[device_id]
         

@@ -8,6 +8,7 @@
 #include "lvgl.h"
 #include "board.h"
 #include "display.h"
+#include "sd_card.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <type_traits>
@@ -245,7 +246,8 @@ void plat_animation_task(void *arg)
         
         // CRITICAL FIX: Check for NULL animation to prevent crashes
         if (current_anim == NULL) {
-            ESP_LOGW("plat_animation_task", "Animation %d is not available, skipping frame", now_animation);
+            // COMMENTED OUT: Warning obsolete since animations are now loaded from SD card
+            // ESP_LOGW("plat_animation_task", "Animation %d is not available, skipping frame", now_animation);
             vTaskDelay(pdMS_TO_TICKS(500));
             continue;
         }
@@ -402,6 +404,10 @@ void animation_load_spiffs_animations(void)
     
     // NEW: Try to load ALL animations from SD card
     ESP_LOGI("animation", "Attempting to load ALL animations from SD card...");
+    
+    // Debug SD card status before attempting to load
+    SdCard::DebugStatus();
+    
     if (animation_load_all_from_sd_card()) {
         ESP_LOGI("animation", "🎉 Successfully loaded ALL animations from SD card!");
         ESP_LOGI("animation", "   - All 8 animation types loaded in one operation");
@@ -1094,12 +1100,13 @@ Animation_t* animation_get_normal_animation(void)
         // ESP_LOGI("animation", "Using SPIFFS-based normal animation");
         return &spiffs_normal;
     } else {
-        ESP_LOGI("animation", "Static normal animation not available - using SPIFFS fallback");
+        // COMMENTED OUT: These warnings are obsolete since animations are now loaded from SD card
+        // ESP_LOGI("animation", "Static normal animation not available - using SPIFFS fallback");
         // return &static_normal; // Commented out - static normal not available
         // Create a minimal fallback animation or return NULL
-        ESP_LOGW("animation", "No normal animation available (neither SPIFFS nor static)");
+        // ESP_LOGW("animation", "No normal animation available (neither SPIFFS nor static)");
         // CRITICAL FIX: Return a minimal fallback instead of NULL to prevent crashes
-        ESP_LOGW("animation", "Creating minimal fallback for normal animation");
+        // ESP_LOGW("animation", "Creating minimal fallback for normal animation");
         return NULL; // This will be handled by the fallback logic in plat_animation_task
     }
 }
@@ -1474,8 +1481,6 @@ bool animation_load_all_from_mega_file(void)
 // SD CARD ANIMATION LOADING FUNCTIONS
 // ============================================================================
 
-#include "sd_card.h"
-
 bool animation_load_from_sd_card(const char* filename, lv_image_dsc_t* img_dsc)
 {
     if (!SdCard::IsMounted()) {
@@ -1825,11 +1830,14 @@ bool animation_create_sd_card_animation_from_merged(Animation_t* anim, const cha
 
 bool animation_load_all_from_sd_card(void)
 {
+    ESP_LOGI("animation", "Checking SD card mount status...");
     if (!SdCard::IsMounted()) {
-        ESP_LOGE("animation", "SD card not mounted");
+        ESP_LOGE("animation", "SD card not mounted - cannot load animations from SD card");
+        ESP_LOGE("animation", "This may happen if SD card initialization failed during startup");
         return false;
     }
     
+    ESP_LOGI("animation", "✅ SD card is mounted, proceeding with animation loading...");
     ESP_LOGI("animation", "Attempting to load ALL animations from SD card mega file...");
     
     // First, let's list what files are actually on the SD card
@@ -2097,10 +2105,13 @@ bool animation_load_all_from_sd_card(void)
 // Individual animation loading functions for SD card
 bool animation_load_normal_from_sd_card(void)
 {
+    ESP_LOGI("animation", "Checking SD card mount status for normal animation...");
     if (!SdCard::IsMounted()) {
-        ESP_LOGE("animation", "SD card not mounted");
+        ESP_LOGE("animation", "SD card not mounted - cannot load normal animation from SD card");
         return false;
     }
+    
+    ESP_LOGI("animation", "✅ SD card is mounted, loading normal animation...");
     
     // Clean up existing SD card normal animation if any
     animation_cleanup_spiffs_animation(&spiffs_normal);

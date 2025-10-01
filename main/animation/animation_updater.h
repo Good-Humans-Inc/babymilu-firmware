@@ -48,6 +48,10 @@ public:
     
     // Get status information
     std::string GetStatusJson() const;
+    
+    // Version management
+    std::string GetCurrentVersion() const;
+    void SetCurrentVersion(const std::string& version);
 
 private:
     AnimationUpdater();
@@ -103,6 +107,9 @@ private:
     
     // Success tracking
     std::atomic<bool> first_download_success_{false};
+    
+    // Version management
+    std::string current_version_{"1.0.0"}; // Default version
 };
 
 #endif // ANIMATION_UPDATER_H
