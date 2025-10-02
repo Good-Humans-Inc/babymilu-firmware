@@ -578,7 +578,8 @@ public:
             ESP_LOGW(TAG, "SD card initialization failed before camera: %s", esp_err_to_name(ret));
         }
         
-        InitializeCamera();
+        // DISABLED: Camera initialization disabled for sensecap_watcher to improve startup performance
+        // InitializeCamera();
         InitializeIot();
         GetBacklight()->RestoreBrightness();
     }
@@ -642,7 +643,9 @@ public:
     }
 
     virtual Camera* GetCamera() override {
-        return camera_;
+        // DISABLED: Camera disabled for sensecap_watcher to improve startup performance
+        return nullptr;
+        // return camera_;
     }
 };
 
