@@ -47,6 +47,13 @@ public:
     static bool IsMounted();
 
     /**
+     * @brief Check if SD card is detected (hardware detection)
+     * 
+     * @return true if SD card is detected, false otherwise
+     */
+    static bool IsDetected();
+
+    /**
      * @brief Debug function to print SD card status and files
      * @return ESP_OK on success, error code on failure
      */

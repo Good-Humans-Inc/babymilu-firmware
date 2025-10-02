@@ -730,7 +730,20 @@ bool AnimationUpdater::DownloadMegaAnimationFile(const std::string& url) {
         if (!SdCard::IsMounted()) {
             ESP_LOGE(TAG, "SD card is not mounted. Please ensure SD card is properly inserted and formatted as FAT32.");
             ESP_LOGE(TAG, "SD card should be initialized during system startup in main.cc");
-            return false;
+            
+            // Check if SD card is detected
+            if (!SdCard::IsDetected()) {
+                ESP_LOGE(TAG, "SD card is not detected - please check hardware connection");
+            } else {
+                ESP_LOGW(TAG, "SD card is detected but not mounted - attempting to initialize...");
+                esp_err_t init_ret = SdCard::Initialize();
+                if (init_ret == ESP_OK) {
+                    ESP_LOGI(TAG, "SD card initialized successfully, retrying download...");
+                } else {
+                    ESP_LOGE(TAG, "Failed to initialize SD card: %s", esp_err_to_name(init_ret));
+                    return false;
+                }
+            }
         }
         ESP_LOGI(TAG, "SD card is mounted and ready for animations_mega.bin download");
         

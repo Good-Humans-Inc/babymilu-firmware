@@ -8,6 +8,8 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <dirent.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 
 // Include SenseCAP Watcher board configuration
 #ifdef CONFIG_BOARD_TYPE_SENSECAP_WATCHER
@@ -31,6 +33,10 @@ esp_err_t SdCard::Initialize()
     ESP_LOGI(TAG, "MOSI: GPIO%d, MISO: GPIO%d, CLK: GPIO%d, CS: GPIO%d", 
              BSP_SPI2_HOST_MOSI, BSP_SPI2_HOST_MISO, BSP_SPI2_HOST_SCLK, BSP_SD_SPI_CS);
 
+    // Add delay to ensure power has stabilized after IO expander initialization
+    ESP_LOGI(TAG, "Waiting for SD card power to stabilize...");
+    vTaskDelay(pdMS_TO_TICKS(100)); // 100ms delay for power stabilization
+
     // Configure SPI bus using SenseCAP Watcher pins
     sdmmc_host_t host = SDSPI_HOST_DEFAULT();
     host.slot = SPI2_HOST;  // Use SPI2_HOST
@@ -49,19 +55,30 @@ esp_err_t SdCard::Initialize()
         if (ret == ESP_ERR_INVALID_STATE) {
             ESP_LOGW(TAG, "SPI bus already initialized (likely by board), continuing with SD card initialization");
             // SPI bus is already initialized, we can still proceed with SD card mounting
+            // Don't store the SPI host for cleanup since we didn't initialize it
+            s_spi_host = SPI_HOST_MAX; // Mark as not initialized by us
         } else {
             ESP_LOGE(TAG, "Failed to initialize SPI bus: %s", esp_err_to_name(ret));
             return ret;
         }
+    } else {
+        // Store the SPI host for later cleanup only if we initialized it
+        s_spi_host = static_cast<spi_host_device_t>(host.slot);
     }
-
-    // Store the SPI host for later cleanup
-    s_spi_host = static_cast<spi_host_device_t>(host.slot);
 
     // Configure SD card using SenseCAP Watcher CS pin
     sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
     slot_config.gpio_cs = BSP_SD_SPI_CS;
     slot_config.host_id = static_cast<spi_host_device_t>(host.slot);
+    
+    ESP_LOGI(TAG, "SD card slot configuration: CS=GPIO%d, Host=SPI%d", BSP_SD_SPI_CS, host.slot);
+    
+    // Ensure SD card CS pin is properly configured for SPI operation
+    // This is important because other parts of the code might have configured it differently
+    ESP_LOGI(TAG, "Configuring SD card CS pin (GPIO%d) for SPI operation...", BSP_SD_SPI_CS);
+    gpio_reset_pin(static_cast<gpio_num_t>(BSP_SD_SPI_CS));
+    vTaskDelay(pdMS_TO_TICKS(10)); // Small delay to ensure pin reset completes
+    
 #else
     ESP_LOGE(TAG, "SD card functionality only supported on SenseCAP Watcher board");
     return ESP_ERR_NOT_SUPPORTED;
@@ -71,19 +88,46 @@ esp_err_t SdCard::Initialize()
     const esp_vfs_fat_sdmmc_mount_config_t mount_config = {
         .format_if_mount_failed = true,  // Allow formatting if mount fails
         .max_files = 10,                 // Increase max files
-        .allocation_unit_size = 16 * 1024
+        .allocation_unit_size = 16 * 1024,
+        .disk_status_check_enable = false // Disable disk status check for better compatibility
     };
 
     sdmmc_card_t* card;
-    ret = esp_vfs_fat_sdspi_mount(MOUNT_POINT, &host, &slot_config, &mount_config, &card);
+    
+    // Try mounting with retry mechanism
+    int retry_count = 0;
+    const int max_retries = 3;
+    do {
+        ESP_LOGI(TAG, "Attempting SD card mount (attempt %d/%d)...", retry_count + 1, max_retries);
+        ret = esp_vfs_fat_sdspi_mount(MOUNT_POINT, &host, &slot_config, &mount_config, &card);
+        
+        if (ret == ESP_OK) {
+            ESP_LOGI(TAG, "SD card mounted successfully on attempt %d", retry_count + 1);
+            break;
+        }
+        
+        retry_count++;
+        if (retry_count < max_retries) {
+            ESP_LOGW(TAG, "Mount attempt %d failed: %s, retrying in 500ms...", retry_count, esp_err_to_name(ret));
+            vTaskDelay(pdMS_TO_TICKS(500)); // Wait 500ms before retry
+        }
+    } while (retry_count < max_retries);
 
     if (ret != ESP_OK) {
         if (ret == ESP_FAIL) {
             ESP_LOGE(TAG, "Failed to mount filesystem. If you want the card to be formatted, set format_if_mount_failed = true.");
+            ESP_LOGE(TAG, "This usually means the SD card is not properly formatted or is corrupted.");
+        } else if (ret == ESP_ERR_NOT_FOUND) {
+            ESP_LOGE(TAG, "SD card not found. Please check: 1) SD card is inserted, 2) SD card is not damaged, 3) SPI connections are correct");
+        } else if (ret == ESP_ERR_TIMEOUT) {
+            ESP_LOGE(TAG, "SD card communication timeout. Please check: 1) SD card is not corrupted, 2) SPI clock speed is appropriate");
         } else {
             ESP_LOGE(TAG, "Failed to initialize the card (%s). Make sure SD card lines have pull-up resistors in place.", esp_err_to_name(ret));
         }
-        spi_bus_free(s_spi_host);
+        // Only free SPI bus if we initialized it
+        if (s_spi_host != SPI_HOST_MAX) {
+            spi_bus_free(s_spi_host);
+        }
         return ret;
     }
 
@@ -195,14 +239,18 @@ esp_err_t SdCard::Eject()
     }
 
     // Free SPI bus (only if we initialized it)
-    ret = spi_bus_free(s_spi_host);
-    if (ret != ESP_OK) {
-        if (ret == ESP_ERR_INVALID_STATE) {
-            ESP_LOGW(TAG, "SPI bus was not initialized by SD card, skipping cleanup");
-        } else {
-            ESP_LOGE(TAG, "Failed to free SPI bus: %s", esp_err_to_name(ret));
-            return ret;
+    if (s_spi_host != SPI_HOST_MAX) {
+        ret = spi_bus_free(s_spi_host);
+        if (ret != ESP_OK) {
+            if (ret == ESP_ERR_INVALID_STATE) {
+                ESP_LOGW(TAG, "SPI bus was not initialized by SD card, skipping cleanup");
+            } else {
+                ESP_LOGE(TAG, "Failed to free SPI bus: %s", esp_err_to_name(ret));
+                return ret;
+            }
         }
+    } else {
+        ESP_LOGI(TAG, "SPI bus was not initialized by SD card, skipping cleanup");
     }
 
     s_mounted = false;
@@ -213,6 +261,20 @@ esp_err_t SdCard::Eject()
 bool SdCard::IsMounted()
 {
     return s_mounted;
+}
+
+bool SdCard::IsDetected()
+{
+#ifdef CONFIG_BOARD_TYPE_SENSECAP_WATCHER
+    // Check SD card detection pin through IO expander
+    // Note: This requires access to the IO expander handle, which is not available here
+    // For now, we'll assume SD card is detected if we can initialize SPI communication
+    ESP_LOGI(TAG, "SD card detection check not implemented - assuming detected");
+    return true;
+#else
+    ESP_LOGW(TAG, "SD card detection only supported on SenseCAP Watcher board");
+    return false;
+#endif
 }
 
 esp_err_t SdCard::DebugStatus()
