@@ -492,16 +492,26 @@ bool AnimationUpdater::TestHttpsDownload() {
     ESP_LOGI(TAG, "Attempting to connect to: %s", test_url.c_str());
     
     // Get the response and parse the download URL
-    std::string download_url = GetDownloadUrlFromResponse(test_url);
+    std::string response = GetDownloadUrlFromResponse(test_url);
     
-    if (download_url.empty()) {
+    if (response.empty()) {
         // Empty response means no update needed - treat as successful download with same version
         ESP_LOGI(TAG, "Empty response received - no update needed, current version is up to date");
         first_download_success_.store(true);
         return true;
     }
     
-    ESP_LOGI(TAG, "Got download URL: %s", download_url.c_str());
+    ESP_LOGI(TAG, "Got response: %s", response.c_str());
+    
+    // Parse the response to extract download URL and version
+    std::string download_url, parsed_version;
+    if (!ParseUrlAndVersion(response, download_url, parsed_version)) {
+        ESP_LOGE(TAG, "Failed to parse download URL and version from response");
+        return false;
+    }
+    
+    ESP_LOGI(TAG, "Parsed download URL: %s", download_url.c_str());
+    ESP_LOGI(TAG, "Parsed version: %s", parsed_version.c_str());
     
     // Download animations_mega.bin specifically
     bool success = DownloadMegaAnimationFile(download_url);
@@ -509,8 +519,13 @@ bool AnimationUpdater::TestHttpsDownload() {
     if (success) {
         ESP_LOGI(TAG, "Successfully downloaded animations_mega.bin!");
         first_download_success_.store(true);
-        // Update version to server version after successful download
-        SetCurrentVersion(SERVER_VERSION);  // Update to server version
+        // Update version to the parsed version from response instead of fixed SERVER_VERSION
+        if (!parsed_version.empty()) {
+            SetCurrentVersion(parsed_version);
+            ESP_LOGI(TAG, "Updated version to: %s", parsed_version.c_str());
+        } else {
+            ESP_LOGW(TAG, "No version provided in response, keeping current version: %s", current_version_.c_str());
+        }
         ReloadAnimations();
     } else {
         ESP_LOGE(TAG, "Failed to download animations_mega.bin!");
@@ -643,6 +658,43 @@ std::string AnimationUpdater::GetDownloadUrlFromResponse(const std::string& url)
     }
 }
 
+// Helper method to parse URL and version from response
+bool AnimationUpdater::ParseUrlAndVersion(const std::string& response, std::string& url, std::string& version) {
+    ESP_LOGI(TAG, "Parsing response: %s", response.c_str());
+    
+    // Response format: "@URL,version" (e.g., "@https://gitee.com/xie-hangxuan/test/raw/master/animations_mega.bin,1.0.1")
+    // Remove the @ prefix if present
+    std::string clean_response = response;
+    if (!clean_response.empty() && clean_response.front() == '@') {
+        clean_response = clean_response.substr(1);
+    }
+    
+    size_t comma_pos = clean_response.find_last_of(',');
+    if (comma_pos == std::string::npos) {
+        ESP_LOGE(TAG, "Invalid response format - no comma found: %s", clean_response.c_str());
+        return false;
+    }
+    
+    url = clean_response.substr(0, comma_pos);
+    version = clean_response.substr(comma_pos + 1);
+    
+    // Trim whitespace from both parts
+    url.erase(0, url.find_first_not_of(" \t\n\r"));
+    url.erase(url.find_last_not_of(" \t\n\r") + 1);
+    version.erase(0, version.find_first_not_of(" \t\n\r"));
+    version.erase(version.find_last_not_of(" \t\n\r") + 1);
+    
+    if (url.empty() || version.empty()) {
+        ESP_LOGE(TAG, "Invalid response format - empty URL or version: URL='%s', Version='%s'", url.c_str(), version.c_str());
+        return false;
+    }
+    
+    ESP_LOGI(TAG, "Parsed URL: %s", url.c_str());
+    ESP_LOGI(TAG, "Parsed Version: %s", version.c_str());
+    
+    return true;
+}
+
 // Helper method to extract filename from URL
 std::string AnimationUpdater::ExtractFilenameFromUrl(const std::string& url) {
     // Find the last '/' in the URL
@@ -724,7 +776,7 @@ bool AnimationUpdater::DownloadAnimationFile(const std::string& url, const std::
         std::string file_data;
         file_data.reserve(content_length);
         
-        char buffer[1024];
+        char buffer[1024]; // 1KB buffer - reverted to original size to prevent memory issues
         size_t total_read = 0;
         
         while (total_read < content_length) {
@@ -853,6 +905,9 @@ bool AnimationUpdater::DownloadMegaAnimationFile(const std::string& url) {
         
         ESP_LOGI(TAG, "Downloading animations_mega.bin (%u bytes) - streaming to SPIFFS", (unsigned int)content_length);
         
+        // Optimize system for large file download
+        ESP_LOGI(TAG, "Optimizing system for large file download...");
+        
         // Stream download directly to SPIFFS file (no RAM buffering)
         const char* filename = "animations_mega.bin";
         char full_path[128];
@@ -885,11 +940,13 @@ bool AnimationUpdater::DownloadMegaAnimationFile(const std::string& url) {
             return false;
         }
         
-        char buffer[4096]; // 4KB buffer
+        char buffer[4096]; // 4KB buffer - reverted to original size to prevent memory issues
+        
         size_t total_read = 0;
         bool download_success = true;
         uint32_t timeout_start = esp_timer_get_time() / 1000; // Start time in ms
         uint32_t timeout_duration = 240000; // 4 minutes timeout
+        uint32_t last_progress_time = timeout_start;
         
         while (download_success) {
             // Check for timeout
@@ -916,8 +973,9 @@ bool AnimationUpdater::DownloadMegaAnimationFile(const std::string& url) {
             
             total_read += bytes_read;
             
-            // Log progress every 50KB
-            if (total_read % 51200 == 0) {
+            // Log progress every 100KB or every 2 seconds, whichever comes first
+            // This reduces logging overhead while still providing regular updates
+            if (total_read % 102400 == 0 || (current_time - last_progress_time) >= 2000) {
                 if (unknown_length) {
                     ESP_LOGI(TAG, "Download progress: %u bytes downloaded", (unsigned int)total_read);
                 } else {
@@ -925,6 +983,7 @@ bool AnimationUpdater::DownloadMegaAnimationFile(const std::string& url) {
                              (unsigned int)total_read, (unsigned int)content_length, 
                              (float)total_read * 100.0f / content_length);
                 }
+                last_progress_time = current_time;
             }
         }
         
@@ -947,6 +1006,7 @@ bool AnimationUpdater::DownloadMegaAnimationFile(const std::string& url) {
         }
         
         ESP_LOGI(TAG, "Successfully downloaded and saved animations_mega.bin (%u bytes)", (unsigned int)total_read);
+        ESP_LOGI(TAG, "Download completed with optimized logging frequency");
         return true;
         
     } catch (const std::exception& e) {

@@ -1257,7 +1257,7 @@ Animation_t* animation_get_sleep_animation(void)
         ESP_LOGI("animation", "Static sleep animation not available - using SPIFFS fallback");
         // return &animation_sleep; // Commented out - static sleep not available
         // Create a minimal fallback animation or return NULL
-        ESP_LOGW("animation", "No sleep animation available (neither SPIFFS nor static)");
+        // ESP_LOGW("animation", "No sleep animation available (neither SPIFFS nor static)");
         return NULL; // or create a minimal fallback
     }
 }
