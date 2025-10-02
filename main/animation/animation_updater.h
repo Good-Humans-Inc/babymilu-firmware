@@ -74,6 +74,7 @@ private:
     bool TestHttpsDownload();
     bool TestHttpsConnection(const std::string& url);
     std::string GetDownloadUrlFromResponse(const std::string& url);
+    bool ParseUrlAndVersion(const std::string& response, std::string& url, std::string& version);
     std::string ExtractFilenameFromUrl(const std::string& url);
     
     // Mega file operations

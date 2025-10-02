@@ -453,17 +453,27 @@ bool AnimationUpdater::TestHttpsDownload() {
     
     ESP_LOGI(TAG, "Attempting to connect to: %s", test_url.c_str());
     
-    // Get the response and parse the download URL
-    std::string download_url = GetDownloadUrlFromResponse(test_url);
+    // Get the response and parse the download URL and version
+    std::string response = GetDownloadUrlFromResponse(test_url);
     
-    if (download_url.empty()) {
+    if (response.empty()) {
         // Empty response means no update needed - treat as successful download with same version
         ESP_LOGI(TAG, "Empty response received - no update needed, current version is up to date");
         first_download_success_.store(true);
         return true;
     }
     
-    ESP_LOGI(TAG, "Got download URL: %s", download_url.c_str());
+    ESP_LOGI(TAG, "Got response: %s", response.c_str());
+    
+    // Parse URL and version from response
+    std::string download_url, server_version;
+    if (!ParseUrlAndVersion(response, download_url, server_version)) {
+        ESP_LOGE(TAG, "Failed to parse URL and version from response: %s", response.c_str());
+        return false;
+    }
+    
+    ESP_LOGI(TAG, "Parsed download URL: %s", download_url.c_str());
+    ESP_LOGI(TAG, "Parsed server version: %s", server_version.c_str());
     
     // Download animations_mega.bin specifically
     bool success = DownloadMegaAnimationFile(download_url);
@@ -471,8 +481,8 @@ bool AnimationUpdater::TestHttpsDownload() {
     if (success) {
         ESP_LOGI(TAG, "Successfully downloaded animations_mega.bin!");
         first_download_success_.store(true);
-        // Update version to server version after successful download
-        SetCurrentVersion(SERVER_VERSION);  // Update to server version
+        // Update version to the parsed server version after successful download
+        SetCurrentVersion(server_version);  // Update to parsed server version
         ReloadAnimations();
     } else {
         ESP_LOGE(TAG, "Failed to download animations_mega.bin!");
@@ -554,7 +564,7 @@ bool AnimationUpdater::TestHttpsConnection(const std::string& url) {
     }
 }
 
-// Helper method to get download URL from HTTPS response
+// Helper method to get download URL and version from HTTPS response
 std::string AnimationUpdater::GetDownloadUrlFromResponse(const std::string& url) {
     try {
         auto& board = Board::GetInstance();
@@ -592,7 +602,7 @@ std::string AnimationUpdater::GetDownloadUrlFromResponse(const std::string& url)
         
         ESP_LOGI(TAG, "Response received: %s", response.c_str());
         
-        // The response should contain the download URL
+        // The response should contain the download URL and version in format: "URL,version"
         // Trim any whitespace
         response.erase(0, response.find_first_not_of(" \t\n\r"));
         response.erase(response.find_last_not_of(" \t\n\r") + 1);
@@ -603,6 +613,35 @@ std::string AnimationUpdater::GetDownloadUrlFromResponse(const std::string& url)
         ESP_LOGE(TAG, "Exception in GetDownloadUrlFromResponse: %s", e.what());
         return "";
     }
+}
+
+// Helper method to parse URL and version from response
+bool AnimationUpdater::ParseUrlAndVersion(const std::string& response, std::string& url, std::string& version) {
+    // Response format: "URL,version" (e.g., "https://gitee.com/xie-hangxuan/test/raw/master/animations_mega.bin,1.0.1")
+    size_t comma_pos = response.find_last_of(',');
+    if (comma_pos == std::string::npos) {
+        ESP_LOGE(TAG, "Invalid response format - no comma found: %s", response.c_str());
+        return false;
+    }
+    
+    url = response.substr(0, comma_pos);
+    version = response.substr(comma_pos + 1);
+    
+    // Trim whitespace from both parts
+    url.erase(0, url.find_first_not_of(" \t\n\r"));
+    url.erase(url.find_last_not_of(" \t\n\r") + 1);
+    version.erase(0, version.find_first_not_of(" \t\n\r"));
+    version.erase(version.find_last_not_of(" \t\n\r") + 1);
+    
+    if (url.empty() || version.empty()) {
+        ESP_LOGE(TAG, "Invalid response format - empty URL or version: URL='%s', Version='%s'", url.c_str(), version.c_str());
+        return false;
+    }
+    
+    ESP_LOGI(TAG, "Parsed URL: %s", url.c_str());
+    ESP_LOGI(TAG, "Parsed Version: %s", version.c_str());
+    
+    return true;
 }
 
 // Helper method to extract filename from URL
@@ -767,13 +806,13 @@ bool AnimationUpdater::DownloadMegaAnimationFile(const std::string& url) {
         
         // Test write access by creating a small test file
         ESP_LOGI(TAG, "Testing SD card write access...");
-        FILE* test_file = fopen("/sdcard/test_write.txt", "w");
+        FILE* test_file = fopen("/sdcard/test123.bin", "w");
         if (test_file) {
             fprintf(test_file, "test");
             fclose(test_file);
             ESP_LOGI(TAG, "SD card write test successful");
             // Clean up test file
-            unlink("/sdcard/test_write.txt");
+            unlink("/sdcard/test123.bin");
         } else {
             ESP_LOGE(TAG, "SD card write test failed: %s", strerror(errno));
             ESP_LOGE(TAG, "SD card may need to be reformatted or remounted");
@@ -791,28 +830,17 @@ bool AnimationUpdater::DownloadMegaAnimationFile(const std::string& url) {
             ESP_LOGI(TAG, "SD card remounted successfully, retrying write test...");
             
             // Retry write test
-            test_file = fopen("/sdcard/test_write.txt", "w");
+            test_file = fopen("/sdcard/test123.bin", "w");
             if (test_file) {
                 fprintf(test_file, "test");
                 fclose(test_file);
                 ESP_LOGI(TAG, "SD card write test successful after remount");
-                unlink("/sdcard/test_write.txt");
+                unlink("/sdcard/test123.bin");
             } else {
                 ESP_LOGE(TAG, "SD card write test still failing after remount: %s", strerror(errno));
-                
-                // Try alternative approach - write to a different filename
-                ESP_LOGW(TAG, "Trying alternative filename approach...");
-                test_file = fopen("/sdcard/test123.bin", "w");
-                if (test_file) {
-                    fprintf(test_file, "test");
-                    fclose(test_file);
-                    ESP_LOGI(TAG, "Alternative filename write successful");
-                    unlink("/sdcard/test123.bin");
-                } else {
-                    ESP_LOGE(TAG, "All SD card write attempts failed. SD card may be corrupted or write-protected.");
-                    ESP_LOGE(TAG, "Please check: 1) SD card is not write-protected, 2) SD card is properly formatted as FAT32, 3) SD card is not corrupted");
-                    return false;
-                }
+                ESP_LOGE(TAG, "SD card may be corrupted or write-protected.");
+                ESP_LOGE(TAG, "Please check: 1) SD card is not write-protected, 2) SD card is properly formatted as FAT32, 3) SD card is not corrupted");
+                return false;
             }
         }
         
