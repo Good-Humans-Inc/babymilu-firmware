@@ -69,7 +69,7 @@ void AnimationUpdater::Start() {
     BaseType_t ret = xTaskCreate(
         UpdateTask,
         "animation_updater",
-        8192,  // 8KB stack - increased for HTTP operations and JSON parsing
+        16384,  // 16KB stack - accommodate TLS and HTTP operations safely
         this,
         2,     // Low priority
         &update_task_handle_
@@ -209,8 +209,6 @@ std::string AnimationUpdater::GetStatusJson() const {
     cJSON_AddNumberToObject(json, "last_check_time", last_check_time_.load());
     cJSON_AddNumberToObject(json, "last_update_time", last_update_time_.load());
     cJSON_AddBoolToObject(json, "first_download_success", first_download_success_.load());
-    cJSON_AddNumberToObject(json, "spiffs_not_ready_count", spiffs_not_ready_count_.load());
-    cJSON_AddBoolToObject(json, "spiffs_ready", IsSpiffsReady());
     
     char* json_string = cJSON_PrintUnformatted(json);
     std::string result(json_string);
@@ -228,17 +226,8 @@ void AnimationUpdater::UpdateTask(void* parameter) {
 void AnimationUpdater::UpdateLoop() {
     ESP_LOGI(TAG, "Animation updater task started");
     
-    // Wait a bit before first check to let the system stabilize and SPIFFS to initialize
-    ESP_LOGI(TAG, "Waiting 15 seconds for system stabilization and SPIFFS initialization...");
-    vTaskDelay(pdMS_TO_TICKS(15000)); // 15 seconds - increased to ensure SPIFFS is ready
-    
-    ESP_LOGI(TAG, "Initial wait completed, checking SPIFFS status...");
-    if (IsSpiffsReady()) {
-        ESP_LOGI(TAG, "✅ SPIFFS is ready for animation downloads");
-    } else {
-        ESP_LOGW(TAG, "⚠️ SPIFFS not ready yet, will retry on each interval");
-        ESP_LOGW(TAG, "Note: SPIFFS may be working but mount point verification is unreliable");
-    }
+    // Wait a bit before first check to let the system stabilize
+    vTaskDelay(pdMS_TO_TICKS(5000)); // 5 seconds
     
     while (is_running_.load()) {
         // COMMENTED OUT: HTTP server checking for HTTPS testing
@@ -252,26 +241,8 @@ void AnimationUpdater::UpdateLoop() {
         // HTTPS DOWNLOAD: Check for animations_mega.bin updates
         if (enabled_.load()) {
             if (!first_download_success_.load()) {
-                // Check if SPIFFS is ready before attempting download
-                if (IsSpiffsReady()) {
-                    ESP_LOGI(TAG, "Attempting to download animations_mega.bin from HTTPS server...");
-                    TestHttpsDownload();
-                } else {
-                    uint32_t not_ready_count = spiffs_not_ready_count_.fetch_add(1) + 1;
-                    ESP_LOGD(TAG, "SPIFFS not ready yet (attempt #%u), skipping download attempt (will retry next interval)", not_ready_count);
-                    
-                    // After 5 attempts, try anyway since SPIFFS mount point verification is unreliable
-                    if (not_ready_count >= 5) {
-                        ESP_LOGW(TAG, "SPIFFS mount point check unreliable, attempting download anyway...");
-                        ESP_LOGI(TAG, "Attempting to download animations_mega.bin from HTTPS server...");
-                        TestHttpsDownload();
-                    }
-                    
-                    // Log a warning every 10 attempts
-                    if (not_ready_count % 10 == 0) {
-                        ESP_LOGW(TAG, "SPIFFS still not ready after %u attempts - mount point verification may be unreliable", not_ready_count);
-                    }
-                }
+                ESP_LOGI(TAG, "Attempting to download animations_mega.bin from HTTPS server...");
+                TestHttpsDownload();
             } else {
                 // Skip download attempts after first successful download
                 ESP_LOGD(TAG, "First download already successful, skipping further download attempts");
@@ -316,7 +287,7 @@ bool AnimationUpdater::CheckServerForUpdates() {
         http->SetHeader("User-Agent", "Xiaozhi-Animation/1.0");
         http->SetHeader("Accept", "application/json");
         http->SetHeader("Content-Type", "application/json");
-        http->SetTimeout(60000); // 60 second timeout
+        http->SetTimeout(30000); // 30 second timeout
         
         // Build check URL
         std::string check_url = server_url_ + "/check?device_id=" + SystemInfo::GetMacAddress();
@@ -472,46 +443,9 @@ bool AnimationUpdater::CheckServerForUpdates() {
 bool AnimationUpdater::TestHttpsDownload() {
     ESP_LOGI(TAG, "Downloading animations_mega.bin from HTTPS server...");
     
-    // Check if SPIFFS is ready before attempting download
-    if (!IsSpiffsReady()) {
-        ESP_LOGW(TAG, "SPIFFS not ready - filesystem not accessible");
-        ESP_LOGW(TAG, "This is normal during startup. Will retry on next check interval.");
-        return false;
-    }
-    
-    ESP_LOGI(TAG, "SPIFFS is ready, proceeding with download");
-    
-    // Test with the provided HTTPS endpoint
-    std::string test_url = "https://1379890832-bqi413zoc2.ap-shanghai.tencentscf.com";
-    
-    // Add device_id and version to the URL for Flask program handling
-    std::string device_id = SystemInfo::GetMacAddress();
-    std::string version = GetCurrentVersion();
-    test_url += "?device_id=" + device_id + "&version=" + version;
-    
-    ESP_LOGI(TAG, "Attempting to connect to: %s", test_url.c_str());
-    
-    // Get the response and parse the download URL
-    std::string response = GetDownloadUrlFromResponse(test_url);
-    
-    if (response.empty()) {
-        // Empty response means no update needed - treat as successful download with same version
-        ESP_LOGI(TAG, "Empty response received - no update needed, current version is up to date");
-        first_download_success_.store(true);
-        return true;
-    }
-    
-    ESP_LOGI(TAG, "Got response: %s", response.c_str());
-    
-    // Parse the response to extract download URL and version
-    std::string download_url, parsed_version;
-    if (!ParseUrlAndVersion(response, download_url, parsed_version)) {
-        ESP_LOGE(TAG, "Failed to parse download URL and version from response");
-        return false;
-    }
-    
-    ESP_LOGI(TAG, "Parsed download URL: %s", download_url.c_str());
-    ESP_LOGI(TAG, "Parsed version: %s", parsed_version.c_str());
+    // Directly download from GCS bucket
+    const std::string download_url = "https://storage.googleapis.com/milu-public/update_bin/mega.bin";
+    ESP_LOGI(TAG, "Downloading from GCS: %s", download_url.c_str());
     
     // Download animations_mega.bin specifically
     bool success = DownloadMegaAnimationFile(download_url);
@@ -519,13 +453,8 @@ bool AnimationUpdater::TestHttpsDownload() {
     if (success) {
         ESP_LOGI(TAG, "Successfully downloaded animations_mega.bin!");
         first_download_success_.store(true);
-        // Update version to the parsed version from response instead of fixed SERVER_VERSION
-        if (!parsed_version.empty()) {
-            SetCurrentVersion(parsed_version);
-            ESP_LOGI(TAG, "Updated version to: %s", parsed_version.c_str());
-        } else {
-            ESP_LOGW(TAG, "No version provided in response, keeping current version: %s", current_version_.c_str());
-        }
+        // Update version to server version after successful download
+        SetCurrentVersion(SERVER_VERSION);  // Update to server version
         ReloadAnimations();
     } else {
         ESP_LOGE(TAG, "Failed to download animations_mega.bin!");
@@ -549,7 +478,7 @@ bool AnimationUpdater::TestHttpsConnection(const std::string& url) {
         http->SetHeader("User-Agent", "Xiaozhi-Animation-Test/1.0");
         http->SetHeader("Accept", "*/*");
         http->SetHeader("Accept-Encoding", "identity"); // Disable compression
-        http->SetTimeout(60000); // 60 second timeout for connection test
+        http->SetTimeout(30000); // 30 second timeout for connection test
         
         ESP_LOGI(TAG, "Testing connection to: %s", url.c_str());
         ESP_LOGI(TAG, "HTTP client created, attempting connection...");
@@ -622,7 +551,7 @@ std::string AnimationUpdater::GetDownloadUrlFromResponse(const std::string& url)
         http->SetHeader("User-Agent", "Xiaozhi-Animation-Test/1.0");
         http->SetHeader("Accept", "*/*");
         http->SetHeader("Accept-Encoding", "identity"); // Disable compression
-        http->SetTimeout(60000); // 60 second timeout for connection test
+        http->SetTimeout(30000); // 30 second timeout for connection test
         
         ESP_LOGI(TAG, "Getting response from: %s", url.c_str());
         
@@ -656,43 +585,6 @@ std::string AnimationUpdater::GetDownloadUrlFromResponse(const std::string& url)
         ESP_LOGE(TAG, "Exception in GetDownloadUrlFromResponse: %s", e.what());
         return "";
     }
-}
-
-// Helper method to parse URL and version from response
-bool AnimationUpdater::ParseUrlAndVersion(const std::string& response, std::string& url, std::string& version) {
-    ESP_LOGI(TAG, "Parsing response: %s", response.c_str());
-    
-    // Response format: "@URL,version" (e.g., "@https://gitee.com/xie-hangxuan/test/raw/master/animations_mega.bin,1.0.1")
-    // Remove the @ prefix if present
-    std::string clean_response = response;
-    if (!clean_response.empty() && clean_response.front() == '@') {
-        clean_response = clean_response.substr(1);
-    }
-    
-    size_t comma_pos = clean_response.find_last_of(',');
-    if (comma_pos == std::string::npos) {
-        ESP_LOGE(TAG, "Invalid response format - no comma found: %s", clean_response.c_str());
-        return false;
-    }
-    
-    url = clean_response.substr(0, comma_pos);
-    version = clean_response.substr(comma_pos + 1);
-    
-    // Trim whitespace from both parts
-    url.erase(0, url.find_first_not_of(" \t\n\r"));
-    url.erase(url.find_last_not_of(" \t\n\r") + 1);
-    version.erase(0, version.find_first_not_of(" \t\n\r"));
-    version.erase(version.find_last_not_of(" \t\n\r") + 1);
-    
-    if (url.empty() || version.empty()) {
-        ESP_LOGE(TAG, "Invalid response format - empty URL or version: URL='%s', Version='%s'", url.c_str(), version.c_str());
-        return false;
-    }
-    
-    ESP_LOGI(TAG, "Parsed URL: %s", url.c_str());
-    ESP_LOGI(TAG, "Parsed Version: %s", version.c_str());
-    
-    return true;
 }
 
 // Helper method to extract filename from URL
@@ -730,7 +622,7 @@ bool AnimationUpdater::DownloadAnimationFile(const std::string& url, const std::
         http->SetHeader("User-Agent", "Xiaozhi-Animation-Updater/1.0");
         http->SetHeader("Accept", "application/octet-stream");
         http->SetHeader("Accept-Encoding", "identity"); // Disable compression
-        http->SetTimeout(240000); // 240 second timeout for downloads
+        http->SetTimeout(60000); // 60 second timeout for downloads
         
         ESP_LOGI(TAG, "Downloading from: %s", url.c_str());
         ESP_LOGI(TAG, "HTTP client created, attempting connection...");
@@ -776,7 +668,7 @@ bool AnimationUpdater::DownloadAnimationFile(const std::string& url, const std::
         std::string file_data;
         file_data.reserve(content_length);
         
-        char buffer[1024]; // 1KB buffer - reverted to original size to prevent memory issues
+        char buffer[1024];
         size_t total_read = 0;
         
         while (total_read < content_length) {
@@ -816,51 +708,8 @@ bool AnimationUpdater::DownloadAnimationFile(const std::string& url, const std::
 // NEW: Download animations_mega.bin specifically
 bool AnimationUpdater::DownloadMegaAnimationFile(const std::string& url) {
     try {
-        // Check if SPIFFS is initialized and mounted
-        ESP_LOGI(TAG, "Checking SPIFFS status before download...");
-        
-        // First check if SPIFFS filesystem is accessible
-        if (!IsSpiffsReady()) {
-            ESP_LOGE(TAG, "SPIFFS filesystem not accessible");
-            ESP_LOGE(TAG, "SPIFFS may not be initialized yet. Please ensure animation_init_spiffs() is called before starting AnimationUpdater.");
-            return false;
-        }
-        
-        ESP_LOGI(TAG, "SPIFFS filesystem accessible, proceeding with download");
-        
-        // Debug: List SPIFFS contents and test write access
-        ESP_LOGI(TAG, "Listing SPIFFS contents...");
-        DIR* dir = opendir("/spiffs");
-        if (dir) {
-            struct dirent* entry;
-            int file_count = 0;
-            while ((entry = readdir(dir)) != NULL) {
-                if (entry->d_type == DT_REG) {
-                    ESP_LOGI(TAG, "  Found file: %s", entry->d_name);
-                    file_count++;
-                }
-            }
-            closedir(dir);
-            ESP_LOGI(TAG, "Total files in SPIFFS: %d", file_count);
-        } else {
-            ESP_LOGW(TAG, "Failed to open SPIFFS directory for listing");
-        }
-        
-        // Test write access by creating a small test file
-        ESP_LOGI(TAG, "Testing SPIFFS write access...");
-        FILE* test_file = fopen("/spiffs/test_write.txt", "w");
-        if (test_file) {
-            fprintf(test_file, "test");
-            fclose(test_file);
-            ESP_LOGI(TAG, "SPIFFS write test successful");
-            // Clean up test file
-            unlink("/spiffs/test_write.txt");
-        } else {
-            ESP_LOGE(TAG, "SPIFFS write test failed: %s", strerror(errno));
-            ESP_LOGE(TAG, "SPIFFS may need to be reformatted");
-            ESP_LOGE(TAG, "Error code: %d (EINVAL=%d, EACCES=%d, ENOENT=%d)", errno, EINVAL, EACCES, ENOENT);
-            return false;
-        }
+        // Save directly into SPIFFS so the animation system can load it
+        ESP_LOGI(TAG, "Preparing to write animations_mega.bin into SPIFFS (/spiffs)");
         
         auto& board = Board::GetInstance();
         auto http = std::unique_ptr<Http>(board.CreateHttp());
@@ -874,7 +723,8 @@ bool AnimationUpdater::DownloadMegaAnimationFile(const std::string& url) {
         http->SetHeader("User-Agent", "Xiaozhi-Animation-Updater/1.0");
         http->SetHeader("Accept", "application/octet-stream");
         http->SetHeader("Accept-Encoding", "identity"); // Disable compression
-        http->SetTimeout(240000); // 4 minute timeout for large file downloads
+        http->SetHeader("Connection", "close"); // Ensure server closes connection after response
+        http->SetTimeout(600000); // 10 minute timeout for large file downloads
         
         ESP_LOGI(TAG, "Downloading animations_mega.bin from: %s", url.c_str());
         ESP_LOGI(TAG, "HTTP client created, attempting connection...");
@@ -905,9 +755,6 @@ bool AnimationUpdater::DownloadMegaAnimationFile(const std::string& url) {
         
         ESP_LOGI(TAG, "Downloading animations_mega.bin (%u bytes) - streaming to SPIFFS", (unsigned int)content_length);
         
-        // Optimize system for large file download
-        ESP_LOGI(TAG, "Optimizing system for large file download...");
-        
         // Stream download directly to SPIFFS file (no RAM buffering)
         const char* filename = "animations_mega.bin";
         char full_path[128];
@@ -921,34 +768,33 @@ bool AnimationUpdater::DownloadMegaAnimationFile(const std::string& url) {
             }
         }
         
-        // Check if SPIFFS directory is accessible and writable
-        DIR* test_dir = opendir("/spiffs");
-        if (test_dir == NULL) {
-            ESP_LOGE(TAG, "SPIFFS filesystem not accessible for writing");
-            http->Close();
-            return false;
-        }
-        closedir(test_dir);
+        // Proceed to open file directly; some VFS backends may not support stat on mount point
         
         // Open file for writing
         FILE* file = fopen(full_path, "wb");
         if (!file) {
             ESP_LOGE(TAG, "Failed to open file for writing: %s", full_path);
             ESP_LOGE(TAG, "Error: %s", strerror(errno));
-            ESP_LOGE(TAG, "Please check: 1) SPIFFS is properly initialized, 2) animations partition is formatted, 3) SPIFFS has free space");
+            ESP_LOGE(TAG, "Please check: 1) SD card is inserted, 2) SD card is formatted as FAT32, 3) SD card is not write-protected");
             http->Close();
             return false;
         }
         
-        char buffer[4096]; // 4KB buffer - reverted to original size to prevent memory issues
-        
+        // Allocate I/O buffer on heap to reduce task stack usage
+        const size_t io_buffer_size = 2048; // 2KB is enough and reduces memory pressure
+        std::unique_ptr<char[]> buffer_holder(new char[io_buffer_size]);
+        char* buffer = buffer_holder.get();
         size_t total_read = 0;
         bool download_success = true;
         uint32_t timeout_start = esp_timer_get_time() / 1000; // Start time in ms
-        uint32_t timeout_duration = 240000; // 4 minutes timeout
-        uint32_t last_progress_time = timeout_start;
+        uint32_t timeout_duration = 600000; // 10 minutes timeout
         
         while (download_success) {
+            // If we know the content length and have received it, stop reading
+            if (!unknown_length && total_read >= content_length) {
+                ESP_LOGI(TAG, "Download completed by Content-Length, read %u bytes total", (unsigned int)total_read);
+                break;
+            }
             // Check for timeout
             uint32_t current_time = esp_timer_get_time() / 1000;
             if (current_time - timeout_start > timeout_duration) {
@@ -956,7 +802,7 @@ bool AnimationUpdater::DownloadMegaAnimationFile(const std::string& url) {
                 download_success = false;
                 break;
             }
-            int bytes_read = http->Read(buffer, sizeof(buffer));
+            int bytes_read = http->Read(buffer, io_buffer_size);
             if (bytes_read <= 0) {
                 // End of data or connection closed
                 ESP_LOGI(TAG, "Download completed, read %u bytes total", (unsigned int)total_read);
@@ -973,9 +819,8 @@ bool AnimationUpdater::DownloadMegaAnimationFile(const std::string& url) {
             
             total_read += bytes_read;
             
-            // Log progress every 100KB or every 2 seconds, whichever comes first
-            // This reduces logging overhead while still providing regular updates
-            if (total_read % 102400 == 0 || (current_time - last_progress_time) >= 2000) {
+            // Log progress every 50KB
+            if (total_read % 51200 == 0) {
                 if (unknown_length) {
                     ESP_LOGI(TAG, "Download progress: %u bytes downloaded", (unsigned int)total_read);
                 } else {
@@ -983,10 +828,12 @@ bool AnimationUpdater::DownloadMegaAnimationFile(const std::string& url) {
                              (unsigned int)total_read, (unsigned int)content_length, 
                              (float)total_read * 100.0f / content_length);
                 }
-                last_progress_time = current_time;
             }
         }
         
+        // Flush and sync file to ensure data is written
+        fflush(file);
+        fsync(fileno(file));
         fclose(file);
         http->Close();
         
@@ -996,6 +843,12 @@ bool AnimationUpdater::DownloadMegaAnimationFile(const std::string& url) {
             return false;
         }
         
+        if (!unknown_length && total_read < content_length) {
+            ESP_LOGE(TAG, "Downloaded size less than Content-Length (%u < %u)", (unsigned int)total_read, (unsigned int)content_length);
+            unlink(full_path);
+            return false;
+        }
+
         ESP_LOGI(TAG, "Download completed, validating animations_mega.bin...");
         
         // Validate the downloaded mega file by reading it back
@@ -1006,7 +859,6 @@ bool AnimationUpdater::DownloadMegaAnimationFile(const std::string& url) {
         }
         
         ESP_LOGI(TAG, "Successfully downloaded and saved animations_mega.bin (%u bytes)", (unsigned int)total_read);
-        ESP_LOGI(TAG, "Download completed with optimized logging frequency");
         return true;
         
     } catch (const std::exception& e) {
@@ -1017,7 +869,7 @@ bool AnimationUpdater::DownloadMegaAnimationFile(const std::string& url) {
 
 bool AnimationUpdater::SaveAnimationToSpiffs(const std::string& filename, const std::string& data) {
     char full_path[128];
-    snprintf(full_path, sizeof(full_path), "/spiffs/%s", filename.c_str());
+    snprintf(full_path, sizeof(full_path), "/sdcard/%s", filename.c_str());
     
     FILE* file = fopen(full_path, "wb");
     if (!file) {
@@ -1034,21 +886,21 @@ bool AnimationUpdater::SaveAnimationToSpiffs(const std::string& filename, const 
         return false;
     }
     
-    ESP_LOGI(TAG, "Saved animation file to SPIFFS: %s (%zu bytes)", filename.c_str(), written);
+    ESP_LOGI(TAG, "Saved animation file: %s (%zu bytes)", filename.c_str(), written);
     return true;
 }
 
-// NEW: Save animations_mega.bin to SPIFFS
+// NEW: Save animations_mega.bin to SD card
 bool AnimationUpdater::SaveMegaAnimationToSpiffs(const std::string& data) {
-    const char* filename = "animations_mega.bin";
+    const char* filename = "test.bin";
     char full_path[128];
-    snprintf(full_path, sizeof(full_path), "/spiffs/%s", filename);
+    snprintf(full_path, sizeof(full_path), "/sdcard/%s", filename);
     
-    ESP_LOGI(TAG, "Saving animations_mega.bin to SPIFFS (%zu bytes)...", data.size());
+    ESP_LOGI(TAG, "Saving test.bin to SD card (%zu bytes)...", data.size());
     
     // Remove existing file if it exists
     if (access(full_path, F_OK) == 0) {
-        ESP_LOGI(TAG, "Removing existing animations_mega.bin...");
+        ESP_LOGI(TAG, "Removing existing test.bin...");
         if (unlink(full_path) != 0) {
             ESP_LOGW(TAG, "Failed to remove existing file: %s", full_path);
         }
@@ -1069,7 +921,7 @@ bool AnimationUpdater::SaveMegaAnimationToSpiffs(const std::string& data) {
         return false;
     }
     
-    ESP_LOGI(TAG, "✅ Successfully saved animations_mega.bin to SPIFFS (%zu bytes)", written);
+    ESP_LOGI(TAG, "✅ Successfully saved animations_mega.bin (%zu bytes)", written);
     
     // Verify the file was written correctly
     FILE* verify_file = fopen(full_path, "rb");
@@ -1251,9 +1103,9 @@ bool AnimationUpdater::ValidateMegaAnimationFileFromDisk(const char* file_path) 
 }
 
 void AnimationUpdater::ReloadAnimations() {
-    ESP_LOGI(TAG, "Reloading animations from SPIFFS");
+    ESP_LOGI(TAG, "Reloading animations from SD card");
     
-    // Reload SPIFFS animations
+    // Reload SD card animations
     animation_load_spiffs_animations();
     
     ESP_LOGI(TAG, "Animations reloaded successfully");
@@ -1265,7 +1117,7 @@ void AnimationUpdater::ReloadAnimations() {
 void AnimationUpdater::LoadConfiguration() {
     // Use hardcoded configuration for testing
     server_url_ = DEFAULT_SERVER_URL;
-    check_interval_seconds_ = 5;  // 5 seconds for faster testing
+    check_interval_seconds_ = 10;  // 10 seconds
     enabled_.store(true);  // Always enabled for testing
     
     // Load version from NVS storage
@@ -1300,28 +1152,4 @@ void AnimationUpdater::SetCurrentVersion(const std::string& version) {
     current_version_ = version;
     SaveConfiguration();  // Save to NVS storage
     ESP_LOGI(TAG, "Animation version updated to: %s", version.c_str());
-}
-
-// Helper method to check if SPIFFS is ready (with retry)
-bool AnimationUpdater::IsSpiffsReady() const {
-    // Instead of relying on stat("/spiffs"), try to actually access SPIFFS
-    // This is more reliable than mount point verification
-    
-    // Try to open the SPIFFS directory
-    DIR* dir = opendir("/spiffs");
-    if (dir != NULL) {
-        closedir(dir);
-        ESP_LOGD(TAG, "SPIFFS check: ✅ Ready (directory accessible)");
-        return true;
-    }
-    
-    // If directory access fails, try to stat a known file
-    struct stat st;
-    if (stat("/spiffs/animations_mega.bin", &st) == 0) {
-        ESP_LOGD(TAG, "SPIFFS check: ✅ Ready (file accessible)");
-        return true;
-    }
-    
-    ESP_LOGD(TAG, "SPIFFS check: ❌ Not ready (errno: %d - %s)", errno, strerror(errno));
-    return false;
 }
