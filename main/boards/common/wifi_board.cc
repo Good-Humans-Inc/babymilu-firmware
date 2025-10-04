@@ -441,6 +441,15 @@ void WifiBoard::HandleBleConnection(bool connected) {
         ESP_LOGI(TAG, "BLE client connected");
         // Send status message to client
         ble_server_send_data("Ready for WiFi configuration", 30);
+
+        // Also send device MAC address to the app upon connection
+        std::string mac = SystemInfo::GetMacAddress();
+        std::string msg = std::string("MAC:") + mac;
+        ESP_LOGI(TAG, "Sending MAC to BLE client: %s", mac.c_str());
+        bool mac_sent = ble_server_send_data(msg.c_str(), msg.size());
+        if (!mac_sent) {
+            ESP_LOGW(TAG, "Failed to send MAC to BLE client");
+        }
     } else {
         ESP_LOGI(TAG, "BLE client disconnected");
     }

@@ -9,6 +9,7 @@
 #include <cJSON.h>
 #include <cstring>
 #include <algorithm>
+#include <cctype>
 #include <unistd.h>
 #include <sys/stat.h>
 #include <errno.h>
@@ -443,9 +444,22 @@ bool AnimationUpdater::CheckServerForUpdates() {
 bool AnimationUpdater::TestHttpsDownload() {
     ESP_LOGI(TAG, "Downloading animations_mega.bin directly from GCS...");
 
-    // Direct GCS URL for mega.bin
-    std::string download_url = "https://storage.googleapis.com/milu-public/update_bin/mega.bin";
+    // Direct GCS URL for mega.bin scoped by device MAC (uppercase + URL-encoded ':')
+    std::string mac = SystemInfo::GetMacAddress();
+    std::string mac_upper = mac;
+    std::transform(mac_upper.begin(), mac_upper.end(), mac_upper.begin(), [](unsigned char c){ return (unsigned char)std::toupper(c); });
+    std::string mac_encoded;
+    mac_encoded.reserve(mac_upper.size() * 3);
+    for (char c : mac_upper) {
+        if (c == ':') {
+            mac_encoded += "%3A";
+        } else {
+            mac_encoded += c;
+        }
+    }
+    std::string download_url = std::string("https://storage.googleapis.com/milu-public/device_bin/") + mac_encoded + "/mega.bin";
 
+    ESP_LOGI(TAG, "Using MAC (raw): %s, (encoded): %s", mac.c_str(), mac_encoded.c_str());
     ESP_LOGI(TAG, "Fetching: %s", download_url.c_str());
 
     // Download animations_mega.bin specifically

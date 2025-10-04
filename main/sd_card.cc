@@ -47,7 +47,7 @@ esp_err_t SdCard::Initialize()
         .sclk_io_num = BSP_SPI2_HOST_SCLK,
         .quadwp_io_num = -1,
         .quadhd_io_num = -1,
-        .max_transfer_sz = 4000,
+        .max_transfer_sz = 2048,
     };
 
     esp_err_t ret = spi_bus_initialize(static_cast<spi_host_device_t>(host.slot), &bus_cfg, SDSPI_DEFAULT_DMA);
@@ -84,11 +84,11 @@ esp_err_t SdCard::Initialize()
     return ESP_ERR_NOT_SUPPORTED;
 #endif
 
-    // Mount SD card with more permissive settings
+    // Mount SD card with memory-conservative settings
     const esp_vfs_fat_sdmmc_mount_config_t mount_config = {
-        .format_if_mount_failed = true,  // Allow formatting if mount fails
-        .max_files = 10,                 // Increase max files
-        .allocation_unit_size = 16 * 1024,
+        .format_if_mount_failed = false, // Do not format to avoid large work buffers
+        .max_files = 4,                  // Reduce FATFS file descriptors
+        .allocation_unit_size = 0,       // Default AU size
         .disk_status_check_enable = false // Disable disk status check for better compatibility
     };
 
@@ -96,7 +96,7 @@ esp_err_t SdCard::Initialize()
     
     // Try mounting with retry mechanism
     int retry_count = 0;
-    const int max_retries = 3;
+    const int max_retries = 5;
     do {
         ESP_LOGI(TAG, "Attempting SD card mount (attempt %d/%d)...", retry_count + 1, max_retries);
         ret = esp_vfs_fat_sdspi_mount(MOUNT_POINT, &host, &slot_config, &mount_config, &card);
@@ -108,8 +108,8 @@ esp_err_t SdCard::Initialize()
         
         retry_count++;
         if (retry_count < max_retries) {
-            ESP_LOGW(TAG, "Mount attempt %d failed: %s, retrying in 500ms...", retry_count, esp_err_to_name(ret));
-            vTaskDelay(pdMS_TO_TICKS(500)); // Wait 500ms before retry
+            ESP_LOGW(TAG, "Mount attempt %d failed: %s, retrying in 1000ms...", retry_count, esp_err_to_name(ret));
+            vTaskDelay(pdMS_TO_TICKS(1000)); // Wait 1s before retry to allow power settle
         }
     } while (retry_count < max_retries);
 
@@ -121,6 +121,9 @@ esp_err_t SdCard::Initialize()
             ESP_LOGE(TAG, "SD card not found. Please check: 1) SD card is inserted, 2) SD card is not damaged, 3) SPI connections are correct");
         } else if (ret == ESP_ERR_TIMEOUT) {
             ESP_LOGE(TAG, "SD card communication timeout. Please check: 1) SD card is not corrupted, 2) SPI clock speed is appropriate");
+        } else if (ret == ESP_ERR_NO_MEM) {
+            ESP_LOGE(TAG, "Failed to initialize the card (ESP_ERR_NO_MEM). Reducing buffers and retrying later may help.");
+            ESP_LOGE(TAG, "Tips: reduce FATFS max files, lower SPI transfer size, ensure PSRAM configured, free heap");
         } else {
             ESP_LOGE(TAG, "Failed to initialize the card (%s). Make sure SD card lines have pull-up resistors in place.", esp_err_to_name(ret));
         }

@@ -1068,24 +1068,30 @@ bool animation_load_sleep_from_spiffs(void)
 
 void animation_cleanup_spiffs_animation(Animation_t* anim)
 {
-    if (anim && anim->use_spiffs && anim->spiffs_imgs) {
+    if (!anim) {
+        return;
+    }
+
+    if (anim->use_spiffs && anim->spiffs_imgs) {
         for (int i = 0; i < anim->len; i++) {
-            if (anim->spiffs_imgs[i] && anim->spiffs_imgs[i]->data) {
-                free((void*)anim->spiffs_imgs[i]->data);
-            }
             if (anim->spiffs_imgs[i]) {
+                if (anim->spiffs_imgs[i]->data) {
+                    free((void*)anim->spiffs_imgs[i]->data);
+                    anim->spiffs_imgs[i]->data = NULL;
+                }
                 free(anim->spiffs_imgs[i]);
+                anim->spiffs_imgs[i] = NULL;
             }
         }
         free(anim->spiffs_imgs);
         anim->spiffs_imgs = NULL;
     }
-    
-    if (anim && anim->animations) {
+
+    if (anim->animations) {
         free(anim->animations);
         anim->animations = NULL;
     }
-    
+
     // Reset animation structure
     anim->imges = NULL;
     anim->len = 0;
@@ -1415,10 +1421,26 @@ bool animation_load_all_from_mega_file(void)
                 break;
             }
             
-            // Read pixel data
-            if (fread((void*)img_dsc->data, 1, data_size, f) != data_size) {
+            // Read pixel data with a short retry for transient SD errors
+            size_t want = data_size;
+            int read_retries = 0;
+            while (read_retries < 2) {
+                if (fread((void*)img_dsc->data, 1, want, f) == want) {
+                    break; // success
+                }
+                read_retries++;
+                ESP_LOGW("animation", "Retry %d reading pixel data for frame %d", read_retries, current_frame);
+                vTaskDelay(pdMS_TO_TICKS(50));
+                // Seek back to frame start data position
+                long back = (long)want;
+                fseek(f, -back, SEEK_CUR);
+            }
+            if (read_retries == 2) {
                 ESP_LOGE("animation", "Failed to read pixel data for frame %d", current_frame);
                 success = false;
+                // free only this frame buffer
+                free((void*)img_dsc->data);
+                img_dsc->data = NULL;
                 break;
             }
             
@@ -2087,8 +2109,12 @@ bool animation_load_all_from_sd_card(void)
         // Clean up on failure
         for (int i = 0; i < total_frames; i++) {
             if (all_sd_card_imgs[i]) {
-                if (all_sd_card_imgs[i]->data) free((void*)all_sd_card_imgs[i]->data);
+                if (all_sd_card_imgs[i]->data) {
+                    free((void*)all_sd_card_imgs[i]->data);
+                    all_sd_card_imgs[i]->data = NULL;
+                }
                 free(all_sd_card_imgs[i]);
+                all_sd_card_imgs[i] = NULL;
             }
         }
         free(all_sd_card_imgs);

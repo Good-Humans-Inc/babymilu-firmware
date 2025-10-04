@@ -26,6 +26,10 @@ static struct {
     uint16_t conn_handle;
 } ble_server_state = {0};
 
+// Buffer for current READ characteristic value
+static char ble_read_value[128];
+static uint16_t ble_read_len = 0;
+
 // Forward declarations
 static void ble_app_advertise(void);
 static int ble_gap_event(struct ble_gap_event *event, void *arg);
@@ -104,8 +108,12 @@ static int ble_device_write(uint16_t conn_handle, uint16_t attr_handle,
 static int ble_device_read(uint16_t con_handle, uint16_t attr_handle, 
                           struct ble_gatt_access_ctxt *ctxt, void *arg)
 {
-    const char *response = "Data from the server";
-    os_mbuf_append(ctxt->om, response, strlen(response));
+    if (ble_read_len > 0) {
+        os_mbuf_append(ctxt->om, ble_read_value, ble_read_len);
+    } else {
+        const char *response = "";
+        os_mbuf_append(ctxt->om, response, strlen(response));
+    }
     return 0;
 }
 
@@ -274,16 +282,14 @@ bool ble_server_send_data(const char* data, uint16_t length)
         return false;
     }
 
-    // Find the read characteristic to send data
-    struct ble_gatt_chr_def *chr = (struct ble_gatt_chr_def *)gatt_svcs[0].characteristics;
-    if (chr && chr->uuid) {
-        // This is a simplified implementation
-        // In a real implementation, you'd need to use notifications or indications
-        ESP_LOGI(TAG, "Sending data: %.*s", length, data);
-        return true;
+    // Store data as current READ characteristic value for polling clients
+    if (length > sizeof(ble_read_value)) {
+        length = sizeof(ble_read_value);
     }
-
-    return false;
+    memcpy(ble_read_value, data, length);
+    ble_read_len = length;
+    ESP_LOGI(TAG, "Prepared READ value: %.*s", ble_read_len, ble_read_value);
+    return true;
 }
 
 bool ble_server_is_connected(void)
