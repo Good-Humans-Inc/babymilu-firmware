@@ -572,8 +572,12 @@ public:
             
             // Initialize animations immediately after SD card is ready
             ESP_LOGI(TAG, "Initializing animations after SD card...");
-            animation_init_spiffs();
+            animation_init();
             ESP_LOGI(TAG, "Animations initialized successfully");
+            
+            // Test ERROR logging after everything is fully initialized
+            extern void test_error_logging_after_init();
+            test_error_logging_after_init();
         } else {
             ESP_LOGW(TAG, "SD card initialization failed before camera: %s", esp_err_to_name(ret));
         }

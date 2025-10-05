@@ -59,6 +59,22 @@ public:
      */
     static esp_err_t DebugStatus();
 
+    /**
+     * @brief Append content to a file on the SD card
+     * 
+     * @param filename The name of the file to append to (e.g., "err.txt")
+     * @param content The content to append to the file
+     * @return ESP_OK on success, error code on failure
+     */
+    static esp_err_t AppendToFile(const std::string& filename, const std::string& content);
+
+    /**
+     * @brief Check if SD card is writable by testing directory permissions
+     * 
+     * @return ESP_OK if writable, error code if not writable
+     */
+    static esp_err_t TestWriteCapability();
+
 private:
     static bool s_mounted;
     static constexpr const char* MOUNT_POINT = "/sdcard";

@@ -40,8 +40,8 @@ AnimationUpdater::~AnimationUpdater() {
 void AnimationUpdater::Initialize() {
     ESP_LOGI(TAG, "Initializing Animation Updater");
     
-    // NOTE: animation_init_spiffs() is now called from main.cc after SD card initialization
-    // This ensures SD card animations are loaded first, then SPIFFS as fallback
+    // NOTE: animation_init() is now called from main.cc after SD card initialization
+    // This ensures SD card animations are loaded from test.bin
     
     // Load configuration from NVS
     LoadConfiguration();
@@ -1228,7 +1228,7 @@ void AnimationUpdater::ReloadAnimations() {
     ESP_LOGI(TAG, "Reloading animations from SD card");
     
     // Reload SD card animations
-    animation_load_spiffs_animations();
+    animation_load_sd_card_animations();
     
     ESP_LOGI(TAG, "Animations reloaded successfully");
     

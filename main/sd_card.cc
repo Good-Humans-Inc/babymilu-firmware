@@ -8,6 +8,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <dirent.h>
+#include <errno.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
@@ -324,4 +325,98 @@ esp_err_t SdCard::DebugStatus()
     ESP_LOGI(TAG, "=== End SD Card Debug Status ===");
     
     return ESP_OK;
+}
+
+esp_err_t SdCard::AppendToFile(const std::string& filename, const std::string& content)
+{
+    if (!s_mounted) {
+        ESP_LOGW(TAG, "SD card not mounted, cannot append to file");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    std::string full_path = std::string(MOUNT_POINT) + "/" + filename;
+    
+    // Debug: Check if directory is writable
+    ESP_LOGI(TAG, "Attempting to append to file: %s", full_path.c_str());
+    
+    FILE* file = fopen(full_path.c_str(), "a");  // "a" = append mode
+    if (file == NULL) {
+        ESP_LOGE(TAG, "Failed to open file for appending: %s", full_path.c_str());
+        ESP_LOGE(TAG, "Error details: errno=%d", errno);
+        
+        // Try to create the file if it doesn't exist
+        ESP_LOGI(TAG, "Trying to create new file instead...");
+        file = fopen(full_path.c_str(), "w");  // "w" = write mode (creates file)
+        if (file == NULL) {
+            ESP_LOGE(TAG, "Failed to create file: %s, errno=%d", full_path.c_str(), errno);
+            return ESP_FAIL;
+        }
+        ESP_LOGI(TAG, "Successfully created new file: %s", full_path.c_str());
+    } else {
+        ESP_LOGI(TAG, "Successfully opened existing file for appending: %s", full_path.c_str());
+    }
+    
+    size_t bytes_written = fwrite(content.c_str(), 1, content.length(), file);
+    if (bytes_written != content.length()) {
+        ESP_LOGE(TAG, "Failed to write all content to file: %s (wrote %zu of %zu bytes)", 
+                 full_path.c_str(), bytes_written, content.length());
+        fclose(file);
+        return ESP_FAIL;
+    }
+    
+    // Ensure data is flushed to SD card
+    fflush(file);
+    
+    fclose(file);
+    ESP_LOGI(TAG, "Successfully wrote %zu bytes to file: %s", bytes_written, full_path.c_str());
+    return ESP_OK;
+}
+
+esp_err_t SdCard::TestWriteCapability() {
+    if (!s_mounted) {
+        ESP_LOGW(TAG, "SD card not mounted, cannot test write capability");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    ESP_LOGI(TAG, "Testing SD card write capability...");
+    
+    // Test 1: Check directory permissions
+    struct stat st;
+    if (stat(MOUNT_POINT, &st) == 0) {
+        ESP_LOGI(TAG, "SD card directory exists: %s", MOUNT_POINT);
+        ESP_LOGI(TAG, "Directory permissions: mode=0%o, uid=%d, gid=%d", st.st_mode, st.st_uid, st.st_gid);
+    } else {
+        ESP_LOGE(TAG, "Failed to stat SD card directory: %s", MOUNT_POINT);
+        return ESP_FAIL;
+    }
+    
+    // Test 2: Try to create a temporary file
+    std::string test_file = std::string(MOUNT_POINT) + "/write_test.tmp";
+    FILE* file = fopen(test_file.c_str(), "w");
+    if (file == NULL) {
+        ESP_LOGE(TAG, "Failed to create test file: %s, errno=%d", test_file.c_str(), errno);
+        return ESP_FAIL;
+    }
+    
+    // Test 3: Write some data
+    const char* test_data = "Write capability test\n";
+    size_t written = fwrite(test_data, 1, strlen(test_data), file);
+    if (written != strlen(test_data)) {
+        ESP_LOGE(TAG, "Failed to write test data, wrote %zu of %zu bytes", written, strlen(test_data));
+        fclose(file);
+        remove(test_file.c_str());
+        return ESP_FAIL;
+    }
+    
+    fflush(file);
+    fclose(file);
+    
+    // Test 4: Clean up test file
+    if (remove(test_file.c_str()) == 0) {
+        ESP_LOGI(TAG, "SD card write capability test PASSED - can create, write, and delete files");
+        return ESP_OK;
+    } else {
+        ESP_LOGW(TAG, "Write test passed but failed to delete test file: %s", test_file.c_str());
+        return ESP_OK; // Still consider it a pass since writing worked
+    }
 }

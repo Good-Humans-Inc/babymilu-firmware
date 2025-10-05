@@ -10,6 +10,7 @@
 #include "animation.h"
 #include "sd_card.h"
 #include "sd_card_startup.h"
+#include "custom_logging.h"
 
 #define TAG "main"
 
@@ -50,12 +51,26 @@ extern "C" void app_main(void)
         ESP_LOGI(TAG, "SD card initialized and ready for animation loading");
     } else {
         ESP_LOGW(TAG, "SD card startup failed: %s", esp_err_to_name(ret));
-        ESP_LOGW(TAG, "Will fall back to SPIFFS animations");
+        ESP_LOGW(TAG, "Animations will not be available without SD card");
     }
     
     ESP_LOGI(TAG, "=== SD card initialization process completed ===");
 
-    // NOTE: animation_init_spiffs() is now called from SensecapWatcher constructor
+    // Setup custom logging to write ERROR logs to SD card
+    ESP_LOGI(TAG, "Setting up custom logging for ERROR logs...");
+    ret = setup_custom_logging();
+    if (ret == ESP_OK) {
+        ESP_LOGI(TAG, "Custom logging setup successful - ERROR logs will be written to err.txt on SD card");
+        
+        // Test the custom logging system
+        ESP_LOGI(TAG, "Running custom logging test...");
+        test_custom_logging();
+    } else {
+        ESP_LOGW(TAG, "Custom logging setup failed: %s", esp_err_to_name(ret));
+        ESP_LOGW(TAG, "ERROR logs will only be available via UART monitor");
+    }
+
+    // NOTE: animation_init() is now called from SensecapWatcher constructor
     // after SD card initialization to ensure proper timing
 
     // Launch the application
