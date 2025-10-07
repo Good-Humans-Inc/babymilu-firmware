@@ -120,9 +120,9 @@ void test_custom_logging() {
     ESP_LOGI(TAG, "Testing custom logging system...");
     
     // Generate some test ERROR logs
-    ESP_LOGE(TAG, "Test ERROR log 1: This is a test error message");
-    ESP_LOGE(TAG, "Test ERROR log 2: Simulated failure with code %d", 12345);
-    ESP_LOGE(TAG, "Test ERROR log 3: Another test error for SD card logging");
+    // ESP_LOGE(TAG, "Test ERROR log 1: This is a test error message");
+    // ESP_LOGE(TAG, "Test ERROR log 2: Simulated failure with code %d", 12345);
+    // ESP_LOGE(TAG, "Test ERROR log 3: Another test error for SD card logging");
     
     // Generate some non-ERROR logs (these should NOT be written to SD card)
     ESP_LOGI(TAG, "This INFO log should NOT appear in err.txt");

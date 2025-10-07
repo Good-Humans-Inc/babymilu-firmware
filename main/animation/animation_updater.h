@@ -52,6 +52,15 @@ public:
     // Version management
     std::string GetCurrentVersion() const;
     void SetCurrentVersion(const std::string& version);
+    
+    // Error log upload functionality
+    bool UploadErrorLogToScf(const std::string& scf_url);
+    bool UploadErrorLogToScfSingleAttempt(const std::string& scf_url, int timeout_ms);
+    bool UploadErrorLogToDefaultScf();  // Uses the default SCF URL
+    
+    // Test functionality
+    bool TestBasicPostToScf();  // Simple "hello world" test
+    bool TestAlternativePostToScf();  // Alternative POST approach
 
 private:
     AnimationUpdater();

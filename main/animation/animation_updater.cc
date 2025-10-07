@@ -13,6 +13,8 @@
 #include <sys/stat.h>
 #include <errno.h>
 #include <dirent.h>
+#include <cstdio>
+#include <cstdlib>
 
 #define TAG "AnimationUpdater"
 
@@ -459,6 +461,16 @@ bool AnimationUpdater::TestHttpsDownload() {
     if (response.empty()) {
         // Empty response means no update needed - treat as successful download with same version
         ESP_LOGI(TAG, "Empty response received - no update needed, current version is up to date");
+        
+        // Automatically test alternative POST when no animation update is needed
+        ESP_LOGI(TAG, "No animation update needed - testing alternative POST to SCF");
+        bool test_success = TestAlternativePostToScf();
+        if (test_success) {
+            ESP_LOGI(TAG, "✅ Alternative POST test successful during update check");
+        } else {
+            ESP_LOGW(TAG, "⚠️ Alternative POST test failed during update check");
+        }
+        
         first_download_success_.store(true);
         return true;
     }
@@ -1274,4 +1286,549 @@ void AnimationUpdater::SetCurrentVersion(const std::string& version) {
     current_version_ = version;
     SaveConfiguration();  // Save to NVS storage
     ESP_LOGI(TAG, "Animation version updated to: %s", version.c_str());
+}
+
+// NEW: Alternative test using GET request with query parameters
+// Sends the first line of err.txt (max 256 bytes) to avoid buffer overflow
+bool AnimationUpdater::TestAlternativePostToScf() {
+    ESP_LOGI(TAG, "Testing alternative GET approach to SCF with query parameters");
+    
+    const std::string scf_url = "https://1379890832-lw33xqs7cm.ap-shanghai.tencentscf.com/";
+    
+    try {
+        // Read err.txt content from SD card
+        std::string message_content = "hello world"; // default
+        if (SdCard::IsMounted()) {
+            std::string err_file_path = "/sdcard/err.txt";
+            FILE* err_file = fopen(err_file_path.c_str(), "r");
+            if (!err_file) {
+                err_file_path = "/sdcard/ERR.TXT";
+                err_file = fopen(err_file_path.c_str(), "r");
+            }
+            
+            if (err_file) {
+                // Read only the first line to avoid buffer overflow
+                char line_buffer[256];
+                if (fgets(line_buffer, sizeof(line_buffer), err_file) != nullptr) {
+                    message_content = line_buffer;
+                    // Remove trailing newline if present
+                    if (!message_content.empty() && message_content.back() == '\n') {
+                        message_content.pop_back();
+                    }
+                    if (!message_content.empty() && message_content.back() == '\r') {
+                        message_content.pop_back();
+                    }
+                    ESP_LOGI(TAG, "Using first line of err.txt (%zu bytes)", message_content.size());
+                } else {
+                    ESP_LOGW(TAG, "err.txt is empty");
+                }
+                fclose(err_file);
+            } else {
+                ESP_LOGW(TAG, "err.txt not found, using default message");
+            }
+        } else {
+            ESP_LOGW(TAG, "SD card not mounted, using default message");
+        }
+        
+        // URL-encode the message content for query parameter
+        std::string url_encoded_content;
+        for (char c : message_content) {
+            if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
+                url_encoded_content += c;
+            } else if (c == ' ') {
+                url_encoded_content += '+';
+            } else {
+                char hex[4];
+                snprintf(hex, sizeof(hex), "%%%02X", (unsigned char)c);
+                url_encoded_content += hex;
+            }
+        }
+        
+        // Build GET URL with message as query parameter
+        std::string get_url = scf_url + "?message=" + url_encoded_content + "&test=true";
+        ESP_LOGI(TAG, "GET URL length: %zu bytes", get_url.size());
+        
+        // Create HTTP client
+        auto& board = Board::GetInstance();
+        auto http = std::unique_ptr<Http>(board.CreateHttp());
+        
+        if (!http) {
+            ESP_LOGE(TAG, "Failed to create HTTP client for alternative test");
+            return false;
+        }
+        
+        ESP_LOGI(TAG, "Alternative approach - using GET request with query parameters");
+        
+        // Set HTTP headers (minimal headers only)
+        http->SetHeader("User-Agent", "Xiaozhi-Test/1.0");
+        http->SetHeader("Connection", "close");
+        http->SetTimeout(15000); // 15 second timeout
+        
+        ESP_LOGI(TAG, "Opening GET connection with message in query params...");
+        
+        // Open GET connection with URL parameters
+        if (!http->Open("GET", get_url)) {
+            ESP_LOGE(TAG, "Failed to open HTTPS GET connection");
+            return false;
+        }
+        
+        ESP_LOGI(TAG, "GET connection opened successfully");
+        
+        // Immediately try to read response without delay
+        ESP_LOGI(TAG, "Immediately checking response...");
+        int status_code = http->GetStatusCode();
+        ESP_LOGI(TAG, "Response status: %d", status_code);
+        
+        if (status_code != 200) {
+            ESP_LOGW(TAG, "Non-200 status: %d", status_code);
+            http->Close();
+            return false;
+        }
+        
+        // Try to read response immediately
+        ESP_LOGI(TAG, "Attempting immediate response read...");
+        
+        // Try reading with small buffer
+        char buffer[256];
+        std::string response;
+        int read_count = 0;
+        
+        while (read_count < 10) { // Max 10 attempts
+            int bytes_read = http->Read(buffer, sizeof(buffer));
+            ESP_LOGI(TAG, "Read attempt %d: got %d bytes", read_count + 1, bytes_read);
+            
+            if (bytes_read > 0) {
+                response.append(buffer, bytes_read);
+                ESP_LOGI(TAG, "Response so far: %d bytes", (int)response.length());
+            } else if (bytes_read == 0) {
+                ESP_LOGI(TAG, "Read completed");
+                break;
+            } else {
+                ESP_LOGW(TAG, "Read error: %d", bytes_read);
+                break;
+            }
+            
+            read_count++;
+        }
+        
+        ESP_LOGI(TAG, "Final response length: %d bytes", (int)response.length());
+        
+        if (response.empty()) {
+            ESP_LOGW(TAG, "Empty response from server");
+            http->Close();
+            return false;
+        }
+        
+        ESP_LOGI(TAG, "Response: %s", response.c_str());
+        http->Close();
+        
+        // Check if response contains success indicators (updated for err.txt upload)
+        if (response.find("ERROR_LOG_UPLOAD_SUCCESS") != std::string::npos || 
+            response.find("GENERAL_MESSAGE_SUCCESS") != std::string::npos) {
+            ESP_LOGI(TAG, "✅ Alternative GET test successful with err.txt upload!");
+            return true;
+        } else {
+            ESP_LOGW(TAG, "Unexpected response format: %s", response.c_str());
+            return false;
+        }
+        
+    } catch (const std::exception& e) {
+        ESP_LOGE(TAG, "Exception in TestAlternativePostToScf: %s", e.what());
+        return false;
+    }
+}
+
+// NEW: Simple test function to test basic HTTP connectivity first
+bool AnimationUpdater::TestBasicPostToScf() {
+    ESP_LOGI(TAG, "Testing basic HTTP connectivity to SCF");
+    
+    const std::string scf_url = "https://1379890832-lw33xqs7cm.ap-shanghai.tencentscf.com/";
+    
+    try {
+        // Create HTTP client
+        auto& board = Board::GetInstance();
+        auto http = std::unique_ptr<Http>(board.CreateHttp());
+        
+        if (!http) {
+            ESP_LOGE(TAG, "Failed to create HTTP client for basic test");
+            return false;
+        }
+        
+        // First test: Simple GET request to check basic connectivity
+        ESP_LOGI(TAG, "Step 1: Testing GET request to SCF...");
+        http->SetTimeout(15000); // 15 second timeout for GET
+        
+        if (!http->Open("GET", scf_url)) {
+            ESP_LOGE(TAG, "Failed to open HTTPS GET connection to SCF URL");
+            return false;
+        }
+        
+        int get_status = http->GetStatusCode();
+        ESP_LOGI(TAG, "GET response status: %d", get_status);
+        
+        if (get_status == -1) {
+            ESP_LOGW(TAG, "GET request failed - connection timeout");
+            http->Close();
+            return false;
+        }
+        
+        // Read GET response carefully to avoid assertion failure
+        std::string get_response;
+        char buffer[512];
+        int total_read = 0;
+        
+        while (true) {
+            int bytes_read = http->Read(buffer, sizeof(buffer));
+            if (bytes_read <= 0) {
+                break;
+            }
+            get_response.append(buffer, bytes_read);
+            total_read += bytes_read;
+        }
+        
+        ESP_LOGI(TAG, "GET response length: %d bytes (total_read: %d)", (int)get_response.length(), total_read);
+        http->Close();
+        
+        ESP_LOGI(TAG, "✅ GET request successful, now testing POST...");
+        
+        // Second test: Simple POST request
+        ESP_LOGI(TAG, "Step 2: Testing POST request to SCF...");
+        
+        // Read err.txt content from SD card
+        std::string message_content = "hello world"; // default
+        if (SdCard::IsMounted()) {
+            std::string err_file_path = "/sdcard/err.txt";
+            FILE* err_file = fopen(err_file_path.c_str(), "r");
+            if (!err_file) {
+                err_file_path = "/sdcard/ERR.TXT";
+                err_file = fopen(err_file_path.c_str(), "r");
+            }
+            
+            if (err_file) {
+                // Read only the first line to avoid buffer overflow
+                char line_buffer[256];
+                if (fgets(line_buffer, sizeof(line_buffer), err_file) != nullptr) {
+                    message_content = line_buffer;
+                    // Remove trailing newline if present
+                    if (!message_content.empty() && message_content.back() == '\n') {
+                        message_content.pop_back();
+                    }
+                    if (!message_content.empty() && message_content.back() == '\r') {
+                        message_content.pop_back();
+                    }
+                    ESP_LOGI(TAG, "Using first line of err.txt for POST (%zu bytes)", message_content.size());
+                } else {
+                    ESP_LOGW(TAG, "err.txt is empty for POST");
+                }
+                fclose(err_file);
+            } else {
+                ESP_LOGW(TAG, "err.txt not found, using default message for POST");
+            }
+        } else {
+            ESP_LOGW(TAG, "SD card not mounted, using default message for POST");
+        }
+        
+        // Escape JSON string content
+        std::string escaped_content;
+        for (char c : message_content) {
+            switch (c) {
+                case '"':  escaped_content += "\\\""; break;
+                case '\\': escaped_content += "\\\\"; break;
+                case '\n': escaped_content += "\\n"; break;
+                case '\r': escaped_content += "\\r"; break;
+                case '\t': escaped_content += "\\t"; break;
+                default:   escaped_content += c; break;
+            }
+        }
+        
+        // Prepare minimal JSON payload
+        std::string json_body = "{\"message\":\"" + escaped_content + "\",\"test\":true}";
+        
+        ESP_LOGI(TAG, "Sending JSON payload with err.txt content");
+        ESP_LOGI(TAG, "Payload size: %lu bytes", (unsigned long)json_body.size());
+        
+        // Set HTTP headers
+        http->SetHeader("Content-Type", "application/json");
+        http->SetHeader("Content-Length", std::to_string(json_body.size()));
+        http->SetHeader("User-Agent", "Xiaozhi-Test/1.0");
+        http->SetTimeout(20000); // 20 second timeout for POST
+        
+        ESP_LOGI(TAG, "Opening POST connection to SCF...");
+        
+        // Open POST connection
+        if (!http->Open("POST", scf_url)) {
+            ESP_LOGE(TAG, "Failed to open HTTPS POST connection to SCF URL");
+            return false;
+        }
+        
+        ESP_LOGI(TAG, "Sending JSON data (%lu bytes)...", (unsigned long)json_body.size());
+        
+        // Send the JSON data
+        size_t bytes_sent = http->Write(json_body.c_str(), json_body.size());
+        ESP_LOGI(TAG, "HTTP Write completed - sent %lu bytes", (unsigned long)bytes_sent);
+        
+        // Give the server time to process and respond
+        ESP_LOGI(TAG, "Waiting for server to process request...");
+        vTaskDelay(pdMS_TO_TICKS(2000)); // Wait 2 seconds for server processing
+        
+        // Check if we sent the data
+        if (bytes_sent < json_body.size() * 0.9) {  // Allow 10% tolerance
+            ESP_LOGE(TAG, "Failed to send sufficient data (sent: %lu, expected: %lu)", 
+                     (unsigned long)bytes_sent, (unsigned long)json_body.size());
+            http->Close();
+            return false;
+        }
+        
+        // Check response
+        ESP_LOGI(TAG, "Checking POST response status...");
+        int status_code = http->GetStatusCode();
+        ESP_LOGI(TAG, "POST response status: %d", status_code);
+        
+        if (status_code == -1) {
+            ESP_LOGW(TAG, "POST request failed - connection timeout or network error");
+            ESP_LOGW(TAG, "GET worked but POST failed - this suggests POST-specific issues");
+            http->Close();
+            return false;
+        } else if (status_code != 200) {
+            ESP_LOGW(TAG, "POST returned non-200 status: %d", status_code);
+            http->Close();
+            return false;
+        }
+        
+        // Read response with simple approach
+        ESP_LOGI(TAG, "Attempting to read POST response...");
+        
+        std::string response;
+        
+        // Simple approach: try to read in small chunks
+        char post_buffer[256];
+        int post_total_read = 0;
+        int post_attempts = 0;
+        const int max_attempts = 10;
+        
+        while (post_attempts < max_attempts) {
+            int bytes_read = http->Read(post_buffer, sizeof(post_buffer));
+            ESP_LOGI(TAG, "Read attempt %d: got %d bytes", post_attempts + 1, bytes_read);
+            
+            if (bytes_read > 0) {
+                response.append(post_buffer, bytes_read);
+                post_total_read += bytes_read;
+                ESP_LOGI(TAG, "Total read so far: %d bytes", post_total_read);
+            } else if (bytes_read == 0) {
+                ESP_LOGI(TAG, "Read completed (0 bytes returned)");
+                break;
+            } else {
+                ESP_LOGW(TAG, "Read error: %d", bytes_read);
+                break;
+            }
+            
+            post_attempts++;
+            vTaskDelay(pdMS_TO_TICKS(100)); // Small delay between reads
+        }
+        
+        ESP_LOGI(TAG, "Final POST response length: %d bytes (after %d attempts)", (int)response.length(), post_attempts);
+        
+        if (response.empty()) {
+            ESP_LOGW(TAG, "POST returned empty response");
+            http->Close();
+            return false;
+        }
+        
+        ESP_LOGI(TAG, "POST response: %s", response.c_str());
+        
+        http->Close();
+        
+        ESP_LOGI(TAG, "✅ Both GET and POST tests successful!");
+        return true;
+        
+    } catch (const std::exception& e) {
+        ESP_LOGE(TAG, "Exception in TestBasicPostToScf: %s", e.what());
+        return false;
+    }
+}
+
+// NEW: Upload err.txt to SCF URL via HTTPS GET request with retry mechanism
+// The first line of err.txt is passed as a query parameter "message" (max 256 bytes)
+bool AnimationUpdater::UploadErrorLogToScf(const std::string& scf_url) {
+    ESP_LOGI(TAG, "Starting err.txt upload to SCF URL: %s", scf_url.c_str());
+    
+    const int max_retries = 3;
+    const int base_timeout_ms = 15000; // 15 seconds base timeout
+    
+    for (int attempt = 1; attempt <= max_retries; attempt++) {
+        ESP_LOGI(TAG, "Upload attempt %d/%d", attempt, max_retries);
+        
+        bool success = UploadErrorLogToScfSingleAttempt(scf_url, base_timeout_ms * attempt);
+        
+        if (success) {
+            ESP_LOGI(TAG, "✅ Successfully uploaded err.txt content to SCF on attempt %d", attempt);
+            return true;
+        }
+        
+        if (attempt < max_retries) {
+            int delay_ms = 2000 * attempt; // Exponential backoff: 2s, 4s, 6s
+            ESP_LOGW(TAG, "Upload attempt %d failed, retrying in %dms...", attempt, delay_ms);
+            vTaskDelay(pdMS_TO_TICKS(delay_ms));
+        } else {
+            ESP_LOGE(TAG, "❌ All %d upload attempts failed", max_retries);
+        }
+    }
+    
+    return false;
+}
+
+// Helper function for single upload attempt
+bool AnimationUpdater::UploadErrorLogToScfSingleAttempt(const std::string& scf_url, int timeout_ms) {
+    
+    try {
+        // Check if SD card is mounted
+        if (!SdCard::IsMounted()) {
+            ESP_LOGE(TAG, "SD card is not mounted - cannot read err.txt");
+            return false;
+        }
+        
+        // Read err.txt file from SD card
+        std::string err_file_path = "/sdcard/err.txt";
+        FILE* err_file = fopen(err_file_path.c_str(), "r");
+        if (!err_file) {
+            // Try uppercase filename as fallback
+            err_file_path = "/sdcard/ERR.TXT";
+            err_file = fopen(err_file_path.c_str(), "r");
+            if (!err_file) {
+                ESP_LOGW(TAG, "err.txt file not found on SD card - nothing to upload");
+                return true; // Not an error, just no file to upload
+            }
+        }
+        
+        // Get file size
+        fseek(err_file, 0, SEEK_END);
+        long file_size = ftell(err_file);
+        fseek(err_file, 0, SEEK_SET);
+        
+        if (file_size <= 0) {
+            ESP_LOGW(TAG, "err.txt file is empty - nothing to upload");
+            fclose(err_file);
+            return true; // Not an error, just empty file
+        }
+        
+        ESP_LOGI(TAG, "Found err.txt file (%ld bytes) - preparing upload", file_size);
+        
+        // Read only the first line to avoid buffer overflow
+        char line_buffer[256];
+        std::string err_content = "hello world"; // default
+        if (fgets(line_buffer, sizeof(line_buffer), err_file) != nullptr) {
+            err_content = line_buffer;
+            // Remove trailing newline if present
+            if (!err_content.empty() && err_content.back() == '\n') {
+                err_content.pop_back();
+            }
+            if (!err_content.empty() && err_content.back() == '\r') {
+                err_content.pop_back();
+            }
+            ESP_LOGI(TAG, "Using first line of err.txt (%zu bytes)", err_content.size());
+        } else {
+            ESP_LOGW(TAG, "err.txt is empty, using default message");
+        }
+        fclose(err_file);
+        
+        // Create HTTP client
+        auto& board = Board::GetInstance();
+        auto http = std::unique_ptr<Http>(board.CreateHttp());
+        
+        if (!http) {
+            ESP_LOGE(TAG, "Failed to create HTTP client for err.txt upload");
+            return false;
+        }
+        
+        // URL-encode the error content for query parameter
+        std::string url_encoded_content;
+        for (char c : err_content) {
+            if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
+                url_encoded_content += c;
+            } else if (c == ' ') {
+                url_encoded_content += '+';
+            } else {
+                char hex[4];
+                snprintf(hex, sizeof(hex), "%%%02X", (unsigned char)c);
+                url_encoded_content += hex;
+            }
+        }
+        
+        // Build GET URL with message parameter
+        std::string get_url = scf_url;
+        if (get_url.find('?') != std::string::npos) {
+            get_url += "&message=" + url_encoded_content;
+        } else {
+            get_url += "?message=" + url_encoded_content;
+        }
+        
+        // Debug: Log URL construction
+        ESP_LOGI(TAG, "GET URL constructed:");
+        ESP_LOGI(TAG, "  - Error content size: %lu bytes", (unsigned long)err_content.size());
+        ESP_LOGI(TAG, "  - URL-encoded size: %lu bytes", (unsigned long)url_encoded_content.size());
+        ESP_LOGI(TAG, "  - Total URL length: %lu bytes", (unsigned long)get_url.size());
+        
+        // Set HTTP headers for GET request
+        http->SetHeader("Device-Id", SystemInfo::GetMacAddress().c_str());
+        http->SetHeader("Client-Id", Board::GetInstance().GetUuid().c_str());
+        http->SetHeader("User-Agent", "Xiaozhi-ErrorLog/1.0");
+        http->SetTimeout(timeout_ms); // Dynamic timeout based on attempt
+        
+        ESP_LOGI(TAG, "Uploading err.txt content via GET (%lu bytes in message parameter)...", (unsigned long)err_content.size());
+        
+        // Open GET connection
+        if (!http->Open("GET", get_url)) {
+            ESP_LOGE(TAG, "Failed to open HTTPS connection to SCF URL");
+            return false;
+        }
+        
+        // Check response
+        int status_code = http->GetStatusCode();
+        ESP_LOGI(TAG, "SCF upload response status: %d", status_code);
+        
+        if (status_code == -1) {
+            ESP_LOGW(TAG, "SCF upload failed - connection timeout or network error");
+            http->Close();
+            return false; // Return false for timeout
+        } else if (status_code != 200) {
+            ESP_LOGW(TAG, "SCF upload returned non-200 status: %d", status_code);
+            http->Close();
+            return false; // Return false for non-200 status
+        }
+        
+        // Read response for validation
+        std::string response = http->ReadAll();
+        ESP_LOGI(TAG, "SCF response length: %lu bytes", (unsigned long)response.length());
+        
+        if (response.empty()) {
+            ESP_LOGW(TAG, "SCF returned empty response");
+            http->Close();
+            return false; // Return false for empty response
+        }
+        
+        ESP_LOGI(TAG, "SCF upload response: %s", response.c_str());
+        
+        // Validate response contains success indicator (or at least a valid response)
+        // Since it's a GET request, the server might return different format
+        // We'll be more lenient here - just check for non-empty response
+        if (response.find("message") != std::string::npos || response.find("success") != std::string::npos) {
+            ESP_LOGI(TAG, "✅ Successfully uploaded err.txt content to SCF via GET");
+        } else {
+            ESP_LOGI(TAG, "✅ GET request completed successfully (status 200)");
+        }
+        
+        http->Close();
+        return true;
+        
+    } catch (const std::exception& e) {
+        ESP_LOGE(TAG, "Exception in UploadErrorLogToScf: %s", e.what());
+        return false;
+    }
+}
+
+// NEW: Upload err.txt to default SCF URL
+bool AnimationUpdater::UploadErrorLogToDefaultScf() {
+    const std::string default_scf_url = "https://1379890832-lw33xqs7cm.ap-shanghai.tencentscf.com/";
+    ESP_LOGI(TAG, "Uploading err.txt to default SCF URL: %s", default_scf_url.c_str());
+    return UploadErrorLogToScf(default_scf_url);
 }

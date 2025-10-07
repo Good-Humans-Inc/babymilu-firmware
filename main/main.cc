@@ -11,6 +11,7 @@
 #include "sd_card.h"
 #include "sd_card_startup.h"
 #include "custom_logging.h"
+#include "animation/animation_updater.h"
 
 #define TAG "main"
 
@@ -69,6 +70,11 @@ extern "C" void app_main(void)
         ESP_LOGW(TAG, "Custom logging setup failed: %s", esp_err_to_name(ret));
         ESP_LOGW(TAG, "ERROR logs will only be available via UART monitor");
     }
+
+    // Demonstrate err.txt upload functionality (now automatic during update checks)
+    // ESP_LOGI(TAG, "=== Testing err.txt upload functionality ===");
+    // bool upload_success = AnimationUpdater::GetInstance().UploadErrorLogToDefaultScf();
+    // ESP_LOGI(TAG, "err.txt upload test result: %s", upload_success ? "SUCCESS" : "FAILED");
 
     // NOTE: animation_init() is now called from SensecapWatcher constructor
     // after SD card initialization to ensure proper timing
