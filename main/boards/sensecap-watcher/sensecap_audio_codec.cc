@@ -102,7 +102,7 @@ void SensecapAudioCodec::CreateDuplexChannels(gpio_num_t mclk, gpio_num_t bclk, 
         .dma_frame_num = AUDIO_CODEC_DMA_FRAME_NUM,
         .auto_clear_after_cb = true,
         .auto_clear_before_cb = false,
-        .intr_priority = 0,
+        .intr_priority = 3,  // Increased from 0 to 3 for higher audio interrupt priority
     };
     ESP_ERROR_CHECK(i2s_new_channel(&chan_cfg, &tx_handle_, &rx_handle_));
 

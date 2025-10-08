@@ -107,7 +107,7 @@ void animation_set_now_animation(int animation)
 {
     if (animation_task_handle == nullptr)
     {
-        xTaskCreate(plat_animation_task, "plat_animation_task", 2048, nullptr, 4, &animation_task_handle);
+        xTaskCreatePinnedToCore(plat_animation_task, "plat_animation_task", 2048, nullptr, 4, &animation_task_handle, 0);
     }
     if (animation < 0 || animation >= ANIMATION_NUM)
     {

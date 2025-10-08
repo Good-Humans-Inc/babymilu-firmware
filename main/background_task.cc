@@ -6,10 +6,12 @@
 #define TAG "BackgroundTask"
 
 BackgroundTask::BackgroundTask(uint32_t stack_size) {
+    // Priority 6: Higher than animation (4) and main loop (3), lower than audio loop (8)
+    // This ensures audio decoding (Opus) is not blocked by display operations
     xTaskCreate([](void* arg) {
         BackgroundTask* task = (BackgroundTask*)arg;
         task->BackgroundTaskLoop();
-    }, "background_task", stack_size, this, 2, &background_task_handle_);
+    }, "background_task", stack_size, this, 6, &background_task_handle_);
 }
 
 BackgroundTask::~BackgroundTask() {

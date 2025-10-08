@@ -67,14 +67,15 @@ void AnimationUpdater::Start() {
     
     ESP_LOGI(TAG, "Starting animation updater");
     
-    // Create background task
-    BaseType_t ret = xTaskCreate(
+    // Create background task - pin to Core 0 to avoid interference with audio on Core 1
+    BaseType_t ret = xTaskCreatePinnedToCore(
         UpdateTask,
         "animation_updater",
         8192,  // 8KB stack - increased for HTTP operations and JSON parsing
         this,
         2,     // Low priority
-        &update_task_handle_
+        &update_task_handle_,
+        0      // Pin to Core 0
     );
     
     if (ret != pdPASS) {

@@ -11,7 +11,9 @@
 
 #include "board.h"
 
-#define AUDIO_CODEC_DMA_DESC_NUM 6
+// DMA buffer configuration: Increased from 6 to 12 descriptors for better audio stability
+// This provides ~120-180ms of buffering (was 60-90ms) to prevent glitches during heavy display operations
+#define AUDIO_CODEC_DMA_DESC_NUM 12
 #define AUDIO_CODEC_DMA_FRAME_NUM 240
 #define AUDIO_CODEC_DEFAULT_MIC_GAIN 30.0
 
