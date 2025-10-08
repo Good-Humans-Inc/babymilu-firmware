@@ -192,6 +192,74 @@ bool AnimationUpdater::ForceUpdateCheck() {
     return success;
 }
 
+std::string AnimationUpdater::BuildMegaDownloadUrl() {
+    // Direct GCS URL for mega.bin scoped by device MAC (uppercase + URL-encoded ':')
+    std::string mac = SystemInfo::GetMacAddress();
+    std::string mac_upper = mac;
+    std::transform(mac_upper.begin(), mac_upper.end(), mac_upper.begin(), [](unsigned char c){ return (unsigned char)std::toupper(c); });
+    std::string mac_encoded;
+    mac_encoded.reserve(mac_upper.size() * 3);
+    for (char c : mac_upper) {
+        if (c == ':') mac_encoded += "%3A"; else mac_encoded += c;
+    }
+    return std::string("https://storage.googleapis.com/milu-public/device_bin/") + mac_encoded + "/mega.bin";
+}
+
+bool AnimationUpdater::GetRemoteMegaContentLength(size_t &out_length) {
+    try {
+        auto& board = Board::GetInstance();
+        auto http = std::unique_ptr<Http>(board.CreateHttp());
+        if (!http) {
+            ESP_LOGE(TAG, "Failed to create HTTP client for HEAD request");
+            return false;
+        }
+
+        http->SetHeader("User-Agent", "Xiaozhi-Animation-HEAD/1.0");
+        http->SetHeader("Accept", "*/*");
+        http->SetHeader("Accept-Encoding", "identity");
+        http->SetTimeout(10000);
+
+        std::string url = BuildMegaDownloadUrl();
+
+        // Some HTTP stacks may not support HEAD. Try GET without body if needed.
+        bool opened = http->Open("HEAD", url);
+        if (!opened) {
+            ESP_LOGW(TAG, "HEAD not supported; falling back to GET for headers");
+            opened = http->Open("GET", url);
+        }
+        if (!opened) {
+            ESP_LOGE(TAG, "Failed to open connection for Content-Length query");
+            return false;
+        }
+
+        int status_code = http->GetStatusCode();
+        if (status_code != 200) {
+            ESP_LOGW(TAG, "HEAD/GET returned status %d", status_code);
+            return false;
+        }
+
+        size_t content_length = http->GetBodyLength();
+        if (content_length == 0) {
+            ESP_LOGW(TAG, "Remote Content-Length is 0 or unknown");
+            return false;
+        }
+        out_length = content_length;
+        return true;
+    } catch (...) {
+        ESP_LOGE(TAG, "Exception in GetRemoteMegaContentLength");
+        return false;
+    }
+}
+
+size_t AnimationUpdater::GetLocalMegaFileSize(const char* file_path) {
+    FILE* f = fopen(file_path, "rb");
+    if (!f) return 0;
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    fclose(f);
+    return size < 0 ? 0 : (size_t)size;
+}
+
 void AnimationUpdater::ResetFirstDownloadSuccess() {
     first_download_success_.store(false);
     ESP_LOGI(TAG, "First download success flag reset");
@@ -229,6 +297,21 @@ void AnimationUpdater::UpdateLoop() {
     
     // Wait a bit before first check to let the system stabilize
     vTaskDelay(pdMS_TO_TICKS(5000)); // 5 seconds
+    
+    // Startup guard: if local file exists and matches remote content length, skip immediate re-download.
+    // Still re-check periodically per check_interval.
+    size_t remote_len = 0;
+    if (GetRemoteMegaContentLength(remote_len) && remote_len > 0) {
+        size_t local_len = GetLocalMegaFileSize("/sdcard/test.bin");
+        if (local_len == remote_len && ValidateMegaAnimationFileFromDisk("/sdcard/test.bin")) {
+            ESP_LOGI(TAG, "Local mega file matches remote size (%u). Skipping download at startup.", (unsigned int)remote_len);
+            first_download_success_.store(true);
+        } else {
+            ESP_LOGI(TAG, "Local mega file missing/mismatch (local %u vs remote %u). Will download.", (unsigned int)local_len, (unsigned int)remote_len);
+        }
+    } else {
+        ESP_LOGW(TAG, "Could not get remote Content-Length at startup; proceeding with normal logic.");
+    }
     
     while (is_running_.load()) {
         // COMMENTED OUT: HTTP server checking for HTTPS testing
@@ -444,22 +527,7 @@ bool AnimationUpdater::CheckServerForUpdates() {
 bool AnimationUpdater::TestHttpsDownload() {
     ESP_LOGI(TAG, "Downloading animations_mega.bin directly from GCS...");
 
-    // Direct GCS URL for mega.bin scoped by device MAC (uppercase + URL-encoded ':')
-    std::string mac = SystemInfo::GetMacAddress();
-    std::string mac_upper = mac;
-    std::transform(mac_upper.begin(), mac_upper.end(), mac_upper.begin(), [](unsigned char c){ return (unsigned char)std::toupper(c); });
-    std::string mac_encoded;
-    mac_encoded.reserve(mac_upper.size() * 3);
-    for (char c : mac_upper) {
-        if (c == ':') {
-            mac_encoded += "%3A";
-        } else {
-            mac_encoded += c;
-        }
-    }
-    std::string download_url = std::string("https://storage.googleapis.com/milu-public/device_bin/") + mac_encoded + "/mega.bin";
-
-    ESP_LOGI(TAG, "Using MAC (raw): %s, (encoded): %s", mac.c_str(), mac_encoded.c_str());
+    std::string download_url = BuildMegaDownloadUrl();
     ESP_LOGI(TAG, "Fetching: %s", download_url.c_str());
 
     // Download animations_mega.bin specifically

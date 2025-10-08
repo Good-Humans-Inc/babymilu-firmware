@@ -1001,18 +1001,18 @@ void LcdDisplay::SetEmotion(const char *emotion)
         {ANIMATION_STATIC_NORMAL, "neutral"},
         {ANIMATION_HAPPY, "happy"},
         {ANIMATION_HAPPY, "laughing"},
-        {ANIMATION_NORMAL, "funny"},
+        {ANIMATION_HAPPY, "funny"},
         {ANIMATION_SHY, "sad"},
         {ANIMATION_FIRE, "angry"},
-        {ANIMATION_SHY, "crying"},
+        {ANIMATION_EMBARRESSED, "crying"},
         {ANIMATION_INSPIRATION, "loving"},
-        {ANIMATION_EMBARRESSED, "embarrassed"},
-        {ANIMATION_HAPPY, "surprised"},
+        {ANIMATION_SHY, "embarrassed"},
+        {ANIMATION_INSPIRATION, "surprised"},
         {ANIMATION_INSPIRATION, "shocked"},
         {ANIMATION_QUESTION, "thinking"},
         {ANIMATION_NORMAL, "winking"},
         {ANIMATION_INSPIRATION, "cool"},
-        {ANIMATION_SLEEP, "relaxed"},
+        {ANIMATION_HAPPY, "relaxed"},
         {ANIMATION_HAPPY, "delicious"},
         {ANIMATION_INSPIRATION, "kissy"},
         {ANIMATION_HAPPY, "confident"},
@@ -1021,6 +1021,7 @@ void LcdDisplay::SetEmotion(const char *emotion)
         {ANIMATION_QUESTION, "confused"}};
 
     // 查找匹配的表情
+    ESP_LOGI(TAG, "***** SetEmotion request: %s *****", emotion ? emotion : "<null>");
     std::string_view emotion_view(emotion);
     auto it = std::find_if(emotions.begin(), emotions.end(),
                            [&emotion_view](const Emotion &e)
@@ -1034,18 +1035,17 @@ void LcdDisplay::SetEmotion(const char *emotion)
         lv_obj_align(emotion_label_, LV_ALIGN_CENTER, 0, 0);
     }
     
-    if (emotion_label_ == nullptr)
-    {
-        return; // Still can't create, skip emotion setting
-    }
+    // Even if the label can't be created yet, proceed to update the animation
 
     // 如果找到匹配的表情就显示对应图标，否则显示默认的neutral表情
     if (it != emotions.end())
     {
+        ESP_LOGI(TAG, "***** Emotion matched: %s -> animation %d *****", emotion, (int)it->animation_num);
         animation_set_now_animation(it->animation_num);
     }
     else
     {
+        ESP_LOGW(TAG, "***** Emotion unknown: %s -> default animation %d *****", emotion, (int)ANIMATION_NORMAL);
         animation_set_now_animation(ANIMATION_NORMAL);
     }
 

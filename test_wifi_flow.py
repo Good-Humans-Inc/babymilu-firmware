@@ -93,7 +93,7 @@ def main():
     print("1. Clear WiFi configuration (using method above)")
     print("2. Flash and start device")
     print("3. Device should start nimBLE for WiFi config")
-    print("4. Connect via BLE 'Xiaozhi-WiFi' and configure WiFi")
+    print("4. Connect via BLE 'BabyMilu' and configure WiFi")
     print("5. Device connects to WiFi and nimBLE stops")
     print("6. Disconnect WiFi router/AP to simulate WiFi loss")
     print("7. Device should automatically start nimBLE for reconfiguration")

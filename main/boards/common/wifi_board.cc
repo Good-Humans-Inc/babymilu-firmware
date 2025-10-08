@@ -93,7 +93,7 @@ void WifiBoard::EnterWifiConfigModeViaBLE() {
     application.SetDeviceState(kDeviceStateWifiConfiguring);
     
     // Display BLE configuration instructions for reconnection
-    std::string hint = "WiFi disconnected. Connect to BLE device 'Xiaozhi-WiFi' to reconfigure WiFi";
+    std::string hint = "WiFi disconnected. Connect to BLE device 'BabyMilu' to reconfigure WiFi";
     application.Alert("WiFi Reconfiguration", hint.c_str(), "", Lang::Sounds::P3_WIFICONFIG);
     
     // Wait for BLE configuration
@@ -134,7 +134,7 @@ void WifiBoard::StartNetwork() {
         application.SetDeviceState(kDeviceStateWifiConfiguring);
         
         // Display BLE configuration instructions
-        std::string hint = "Connect to BLE device 'Xiaozhi-WiFi' to configure WiFi";
+        std::string hint = "Connect to BLE device 'BabyMilu' to configure WiFi";
         application.Alert("WiFi Configuration", hint.c_str(), "", Lang::Sounds::P3_WIFICONFIG);
         
         // Wait for BLE configuration
@@ -196,7 +196,7 @@ void WifiBoard::StartNetwork() {
         application.SetDeviceState(kDeviceStateWifiConfiguring);
         
         // Display BLE configuration instructions
-        std::string hint = "WiFi connection failed. Connect to BLE device 'Xiaozhi-WiFi' to configure WiFi";
+        std::string hint = "WiFi connection failed. Connect to BLE device 'BabyMilu' to configure WiFi";
         application.Alert("WiFi Configuration", hint.c_str(), "", Lang::Sounds::P3_WIFICONFIG);
         
         // Wait for BLE configuration
@@ -419,7 +419,7 @@ void WifiBoard::InitializeBleServer() {
     g_wifi_board_instance = this;
     
     // Initialize BLE server with callbacks
-    if (ble_server_init("Xiaozhi-WiFi", 
+    if (ble_server_init("BabyMilu", 
                        ble_data_callback,
                        ble_connection_callback,
                        nullptr)) { // No device control callback for now

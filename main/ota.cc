@@ -41,12 +41,8 @@ Ota::~Ota() {
 }
 
 std::string Ota::GetCheckVersionUrl() {
-    Settings settings("wifi", false);
-    std::string url = settings.GetString("ota_url");
-    if (url.empty()) {
-        url = CONFIG_OTA_URL;
-    }
-    return url;
+    // Hardcoded OTA endpoint per user request
+    return "http://34.136.76.107:8003/xiaozhi/ota/";
 }
 
 Http* Ota::SetupHttp() {

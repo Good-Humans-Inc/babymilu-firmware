@@ -82,6 +82,9 @@ private:
     bool SaveMegaAnimationToSpiffs(const std::string& data); // Note: Now saves to SD card
     bool ValidateMegaAnimationFile(const std::string& data);
     bool ValidateMegaAnimationFileFromDisk(const char* file_path);
+    bool GetRemoteMegaContentLength(size_t &out_length);
+    size_t GetLocalMegaFileSize(const char* file_path);
+    std::string BuildMegaDownloadUrl();
     
     // Configuration management
     void LoadConfiguration();

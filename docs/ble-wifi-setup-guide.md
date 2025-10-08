@@ -4,7 +4,7 @@ This guide explains how to use the BLE (Bluetooth Low Energy) WiFi configuration
 
 ## How It Works
 
-1. **Device starts BLE server** with name "Xiaozhi-WiFi"
+1. **Device starts BLE server** with name "BabyMilu"
 2. **Client connects** via Bluetooth Low Energy
 3. **Client sends WiFi credentials** in specific format
 4. **Device saves credentials** and connects to WiFi
@@ -12,7 +12,7 @@ This guide explains how to use the BLE (Bluetooth Low Energy) WiFi configuration
 ## BLE Connection
 
 ### Device Name
-- **BLE Device Name**: `Xiaozhi-WiFi`
+- **BLE Device Name**: `BabyMilu`
 - **Service UUID**: `0x180` (Generic Access)
 - **Read Characteristic**: `0xFEF4` (for status messages)
 - **Write Characteristic**: `0xDEAD` (for sending data)
@@ -44,7 +44,7 @@ async def configure_wifi():
     xiaozhi_device = None
     
     for device in devices:
-        if device.name == "Xiaozhi-WiFi":
+        if device.name == "BabyMilu":
             xiaozhi_device = device
             break
     
@@ -87,7 +87,7 @@ async function configureWifi() {
     try {
         // Scan for devices
         const devices = await client.scan();
-        const xiaozhiDevice = devices.find(d => d.name === 'Xiaozhi-WiFi');
+        const xiaozhiDevice = devices.find(d => d.name === 'BabyMilu');
         
         if (!xiaozhiDevice) {
             console.log('Xiaozhi device not found');
@@ -96,7 +96,7 @@ async function configureWifi() {
         
         // Connect to device
         await client.connect(xiaozhiDevice.address);
-        console.log('Connected to Xiaozhi-WiFi');
+        console.log('Connected to BabyMilu');
         
         // Send WiFi credentials
         const wifiSsid = 'YOUR_WIFI_NAME';
@@ -145,7 +145,7 @@ CONFIG_LOG_MAXIMUM_LEVEL_DEBUG=y
 ## Integration Notes
 
 - BLE server starts automatically when WifiBoard is created
-- Device advertises as "Xiaozhi-WiFi" 
+- Device advertises as "BabyMilu" 
 - BLE runs alongside normal WiFi functionality
 - Credentials are saved using the existing SSID manager
 - Device will attempt to connect to WiFi after receiving credentials

@@ -2107,7 +2107,12 @@ bool animation_load_all_from_sd_card(void)
         ESP_LOGE("animation", "❌ Failed to load animations from SD card mega file");
         
         // Clean up on failure
-        for (int i = 0; i < total_frames; i++) {
+        // Notes:
+        // 1) Frames 0..(current_frame-1) have already been assigned into one of the
+        //    per-animation arrays (even if that animation wasn't finalized yet).
+        //    Those pointers must be freed via per-animation cleanup to avoid double-free.
+        // 2) Frames current_frame..(total_frames-1) were never assigned; free them here.
+        for (int i = current_frame; i < total_frames; i++) {
             if (all_sd_card_imgs[i]) {
                 if (all_sd_card_imgs[i]->data) {
                     free((void*)all_sd_card_imgs[i]->data);
@@ -2118,10 +2123,41 @@ bool animation_load_all_from_sd_card(void)
             }
         }
         free(all_sd_card_imgs);
-        
-        // Clean up partial animations
+
+        // Clean up per-animation allocations safely
         for (int i = 0; i < 8; i++) {
-            animation_cleanup_spiffs_animation(animations[i]);
+            Animation_t* anim = animations[i];
+            // If animation was fully finalized, let the standard cleanup handle it
+            if (anim->use_spiffs) {
+                animation_cleanup_spiffs_animation(anim);
+                continue;
+            }
+
+            // If not finalized but some frames were assigned, free them manually
+            if (anim->spiffs_imgs) {
+                int expected_frames = animation_frame_counts[i];
+                for (int j = 0; j < expected_frames; j++) {
+                    if (anim->spiffs_imgs[j]) {
+                        if (anim->spiffs_imgs[j]->data) {
+                            free((void*)anim->spiffs_imgs[j]->data);
+                            anim->spiffs_imgs[j]->data = NULL;
+                        }
+                        free(anim->spiffs_imgs[j]);
+                        anim->spiffs_imgs[j] = NULL;
+                    }
+                }
+                free(anim->spiffs_imgs);
+                anim->spiffs_imgs = NULL;
+            }
+
+            if (anim->animations) {
+                free(anim->animations);
+                anim->animations = NULL;
+            }
+
+            anim->imges = NULL;
+            anim->len = 0;
+            anim->use_spiffs = false;
         }
         
         return false;
