@@ -588,8 +588,8 @@ void Application::Start()
                                     {
         board.SetPowerSaveMode(true);
         Schedule([this]() {
-            auto display = Board::GetInstance().GetDisplay();
             // DISABLED: Comment out transcript display to reduce memory usage
+            // auto display = Board::GetInstance().GetDisplay();
             // display->SetChatMessage("system", "");
             SetDeviceState(kDeviceStateIdle);
         }); });

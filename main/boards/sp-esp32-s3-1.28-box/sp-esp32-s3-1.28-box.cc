@@ -90,8 +90,11 @@ public:
 
         DisplayLockGuard lock(this);
         // 由于屏幕是圆的，所以状态栏需要增加左右内边距
-        lv_obj_set_style_pad_left(status_bar_, LV_HOR_RES * 0.33, 0);
-        lv_obj_set_style_pad_right(status_bar_, LV_HOR_RES * 0.33, 0);
+        // Only set status bar styles if it exists (it may be commented out for full image scaling)
+        if (status_bar_ != nullptr) {
+            lv_obj_set_style_pad_left(status_bar_, LV_HOR_RES * 0.33, 0);
+            lv_obj_set_style_pad_right(status_bar_, LV_HOR_RES * 0.33, 0);
+        }
     }
 };
 

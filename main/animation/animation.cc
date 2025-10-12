@@ -693,6 +693,12 @@ bool animation_create_sd_card_animation_from_merged(Animation_t* anim, const cha
     return true;
 }
 
+// Convenient wrapper function with a clear name
+bool load_mega_animation_from_sd_card(void)
+{
+    return animation_load_all_from_sd_card();
+}
+
 bool animation_load_all_from_sd_card(void)
 {
     ESP_LOGI("animation", "Checking SD card mount status...");
@@ -732,62 +738,58 @@ bool animation_load_all_from_sd_card(void)
         return false;
     }
     
-    char mega_path[128];
-    snprintf(mega_path, sizeof(mega_path), "/sdcard/test.bin");
+    char mega_path[512];  // Increased buffer size to accommodate full path
+    FILE* f = NULL;
     
-    ESP_LOGI("animation", "Attempting to open mega file: %s", mega_path);
-    FILE* f = fopen(mega_path, "rb");
-    if (f == NULL) {
-        ESP_LOGE("animation", "❌ Failed to open mega file: %s (errno: %d)", mega_path, errno);
-        ESP_LOGE("animation", "Make sure test.bin exists in the root of the SD card");
+    // Try to find the animation file with case-insensitive matching
+    ESP_LOGI("animation", "Searching for animation file (test.bin or TEST.BIN)...");
+    DIR* dir2 = opendir("/sdcard");
+    if (dir2 != NULL) {
+        struct dirent* entry;
+        char found_animation_file[256] = {0};
         
-        // Check if there are any files with similar names and try to use them
-        ESP_LOGI("animation", "Checking for animation files on SD card...");
-        DIR* dir2 = opendir("/sdcard");
-        if (dir2 != NULL) {
-            struct dirent* entry;
-            char found_animation_file[256] = {0};
-            while ((entry = readdir(dir2)) != NULL) {
-                if (entry->d_type == DT_REG) {
-                    // Check for various patterns that could be the mega file
-                    if (strstr(entry->d_name, "mega") != NULL || 
-                        strstr(entry->d_name, "ANIMAT") != NULL ||
-                        strstr(entry->d_name, "animation") != NULL ||
-                        (strstr(entry->d_name, ".bin") != NULL && strlen(found_animation_file) == 0)) {
-                        
-                        ESP_LOGI("animation", "  Found potential animation file: %s", entry->d_name);
-                        if (strlen(found_animation_file) == 0) {
-                            strncpy(found_animation_file, entry->d_name, sizeof(found_animation_file) - 1);
-                        }
-                    }
+        while ((entry = readdir(dir2)) != NULL) {
+            if (entry->d_type == DT_REG) {
+                // Case-insensitive check for test.bin / TEST.BIN
+                if (strcasecmp(entry->d_name, "test.bin") == 0 || 
+                    strcasecmp(entry->d_name, "TEST.BIN") == 0) {
+                    ESP_LOGI("animation", "🎯 Found test.bin file: %s", entry->d_name);
+                    strncpy(found_animation_file, entry->d_name, sizeof(found_animation_file) - 1);
+                    break;  // Prioritize test.bin
+                }
+                // Also check for other animation file patterns as fallback
+                else if (strlen(found_animation_file) == 0 &&
+                         (strstr(entry->d_name, "mega") != NULL || 
+                          strstr(entry->d_name, "MEGA") != NULL ||
+                          strstr(entry->d_name, "ANIMAT") != NULL ||
+                          strstr(entry->d_name, "animation") != NULL ||
+                          strstr(entry->d_name, ".bin") != NULL)) {
+                    ESP_LOGI("animation", "  Found potential animation file: %s", entry->d_name);
+                    strncpy(found_animation_file, entry->d_name, sizeof(found_animation_file) - 1);
                 }
             }
-            closedir(dir2);
-            
-            // If we found an animation file, try to use it
-            if (strlen(found_animation_file) > 0) {
-                ESP_LOGI("animation", "🎯 Found animation file: %s, attempting to use it as mega file", found_animation_file);
-                char alternative_path[512];
-                snprintf(alternative_path, sizeof(alternative_path), "/sdcard/%s", found_animation_file);
-                
-                FILE* alt_f = fopen(alternative_path, "rb");
-                if (alt_f != NULL) {
-                    ESP_LOGI("animation", "✅ Successfully opened animation file: %s", alternative_path);
-                    f = alt_f;   // Use the alternative file
-                    strncpy(mega_path, alternative_path, sizeof(mega_path) - 1);
-                    mega_path[sizeof(mega_path) - 1] = '\0';
-                } else {
-                    ESP_LOGE("animation", "❌ Failed to open animation file: %s", alternative_path);
-                    return false;
-                }
+        }
+        closedir(dir2);
+        
+        // Try to open the found animation file
+        if (strlen(found_animation_file) > 0) {
+            snprintf(mega_path, sizeof(mega_path), "/sdcard/%s", found_animation_file);
+            ESP_LOGI("animation", "Attempting to open animation file: %s", mega_path);
+            f = fopen(mega_path, "rb");
+            if (f != NULL) {
+                ESP_LOGI("animation", "✅ Successfully opened animation file: %s", mega_path);
             } else {
-                ESP_LOGE("animation", "No animation files found on SD card");
+                ESP_LOGE("animation", "❌ Failed to open animation file: %s (errno: %d)", mega_path, errno);
                 return false;
             }
         } else {
-            ESP_LOGE("animation", "Failed to open /sdcard directory for alternative search");
+            ESP_LOGE("animation", "❌ No animation files found on SD card");
+            ESP_LOGE("animation", "Make sure test.bin or TEST.BIN exists in the root of the SD card");
             return false;
         }
+    } else {
+        ESP_LOGE("animation", "Failed to open /sdcard directory for file search");
+        return false;
     }
     
     // Get file size for verification

@@ -20,6 +20,8 @@
 #include <driver/spi_master.h>
 #include "esp_io_expander_tca9554.h"
 #include "settings.h"
+#include "animation/animation.h"
+#include "sd_card.h"
 
 #include <esp_lcd_touch_cst9217.h>
 #include <esp_lvgl_port.h>
@@ -123,8 +125,11 @@ public:
                         })
     {
         DisplayLockGuard lock(this);
-        lv_obj_set_style_pad_left(status_bar_, LV_HOR_RES*  0.1, 0);
-        lv_obj_set_style_pad_right(status_bar_, LV_HOR_RES*  0.1, 0);
+        // Only set status bar styles if it exists (it may be commented out for full image scaling)
+        if (status_bar_ != nullptr) {
+            lv_obj_set_style_pad_left(status_bar_, LV_HOR_RES*  0.1, 0);
+            lv_obj_set_style_pad_right(status_bar_, LV_HOR_RES*  0.1, 0);
+        }
         lv_display_add_event_cb(display_, rounder_event_cb, LV_EVENT_INVALIDATE_AREA, NULL);
     }
 };
@@ -318,6 +323,7 @@ private:
 
 public:
     WaveshareEsp32s3TouchAMOLED1inch75() : boot_button_(BOOT_BUTTON_GPIO) {
+        ESP_LOGI(TAG, "Initialize Waveshare ESP32-S3 Touch AMOLED 1.75");
         InitializePowerSaveTimer();
         InitializeCodecI2c();
         InitializeTca9554();
@@ -326,6 +332,22 @@ public:
         InitializeSH8601Display();
         InitializeTouch();
         InitializeButtons();
+        
+        // Initialize SD card BEFORE animations (following SenseCAP Watcher pattern)
+        ESP_LOGI(TAG, "Initializing SD card...");
+        esp_err_t ret = SdCard::Initialize();
+        if (ret == ESP_OK) {
+            ESP_LOGI(TAG, "SD card initialized successfully");
+            
+            // Initialize animations immediately after SD card is ready
+            ESP_LOGI(TAG, "Initializing animations from SD card...");
+            animation_init();
+            ESP_LOGI(TAG, "Animations initialized successfully");
+        } else {
+            ESP_LOGW(TAG, "SD card initialization failed: %s", esp_err_to_name(ret));
+            ESP_LOGW(TAG, "Animations will not be loaded from SD card");
+        }
+        
         InitializeTools();
     }
 

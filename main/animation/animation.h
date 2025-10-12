@@ -43,6 +43,9 @@ bool animation_load_from_sd_card(const char* filename, lv_image_dsc_t* img_dsc);
 bool animation_create_sd_card_animation(Animation_t* anim, const char* filenames[], int count);
 bool animation_create_sd_card_animation_from_merged(Animation_t* anim, const char* merged_filename, int count);
 bool animation_load_all_from_sd_card(void);
+
+// Convenient wrapper function for loading mega animation from SD card (test.bin or TEST.BIN)
+bool load_mega_animation_from_sd_card(void);
 bool animation_load_normal_from_sd_card(void);
 bool animation_load_embarrass_from_sd_card(void);
 bool animation_load_fire_from_sd_card(void);

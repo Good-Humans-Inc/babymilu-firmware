@@ -41,4 +41,12 @@
 
 #define DISPLAY_BACKLIGHT_PIN GPIO_NUM_NC
 #define DISPLAY_BACKLIGHT_OUTPUT_INVERT false
+
+// SD Card SPI pins (using SPI3_HOST since SPI2_HOST is used by display)
+#define SD_SPI_HOST         SPI3_HOST
+#define SD_SPI_MOSI         GPIO_NUM_1
+#define SD_SPI_MISO         GPIO_NUM_3
+#define SD_SPI_SCLK         GPIO_NUM_2
+#define SD_SPI_CS           GPIO_NUM_41
+
 #endif // _BOARD_CONFIG_H_
