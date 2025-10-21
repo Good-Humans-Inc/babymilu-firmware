@@ -4,6 +4,7 @@
 # CMakeLists in this exact order for cmake to work correctly
 cmake_minimum_required(VERSION 3.16)
 
+# Change to 1.7.6 to create a OTA testing binary
 set(PROJECT_VER "1.7.5")
 
 # Add this line to disable the specific warning
