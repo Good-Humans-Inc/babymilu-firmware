@@ -1087,6 +1087,13 @@ void LcdDisplay::SetEmotionImg(const lv_image_dsc_t *img)
     
     lv_img_set_src(emotion_label_, img);
     
+    //Rotate animation by 180 degrees around its center
+    if (img != nullptr)
+    {
+        lv_img_set_pivot(emotion_label_, img->header.w / 2, img->header.h / 2);
+        lv_img_set_angle(emotion_label_, 1800); // 180.0 degrees in LVGL units (0.1 deg)
+    }
+    
     // Scale animation to fit display better - 128x128 -> 412x412 FULL SCREEN SCALING
     if (img != nullptr) {
         // Safety checks to prevent division by zero
