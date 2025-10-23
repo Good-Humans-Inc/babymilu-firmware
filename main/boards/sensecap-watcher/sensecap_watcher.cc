@@ -109,6 +109,8 @@ private:
     button_driver_t* btn_driver_ = nullptr;
     static SensecapWatcher* instance_;
     SscmaCamera* camera_ = nullptr;
+    bool is_muted_ = false;
+    int previous_volume_ = 70; // Store previous volume when muting
 
     void InitializePowerSaveTimer() {
         power_save_timer_ = new PowerSaveTimer(-1, 180, 580);
@@ -297,6 +299,40 @@ private:
                 esp_restart();
             }
         }, this);
+
+        // Register 3-click callback for mute functionality
+        button_event_args_t three_click_args = {
+            .multiple_clicks = {
+                .clicks = 3
+            }
+        };
+        iot_button_register_cb(btns, BUTTON_MULTIPLE_CLICK, &three_click_args, [](void* button_handle, void* usr_data) {
+            auto self = static_cast<SensecapWatcher*>(usr_data);
+            ESP_LOGI(TAG, "3-click detected - toggling mute");
+            self->power_save_timer_->WakeUp();
+            self->ToggleMute();
+        }, this);
+    }
+
+    void ToggleMute() {
+        auto& board = Board::GetInstance();
+        auto codec = board.GetAudioCodec();
+        auto display = board.GetDisplay();
+        
+        if (!is_muted_) {
+            // Mute: save current volume and set to 0
+            previous_volume_ = codec->output_volume();
+            codec->SetOutputVolume(0);
+            is_muted_ = true;
+            ESP_LOGI(TAG, "Device muted (previous volume: %d)", previous_volume_);
+            display->ShowNotification("Muted");
+        } else {
+            // Unmute: restore previous volume
+            codec->SetOutputVolume(previous_volume_);
+            is_muted_ = false;
+            ESP_LOGI(TAG, "Device unmuted (volume restored to: %d)", previous_volume_);
+            display->ShowNotification("Unmuted");
+        }
     }
 
     void InitializeSpi() {
