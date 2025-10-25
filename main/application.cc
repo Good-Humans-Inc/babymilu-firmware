@@ -36,6 +36,121 @@
 
 #define TAG "Application"
 
+#ifndef DEFAULT_MQTT_ENDPOINT
+#define DEFAULT_MQTT_ENDPOINT ""
+#endif
+#ifndef DEFAULT_MQTT_PUBLISH_TEMPLATE
+#define DEFAULT_MQTT_PUBLISH_TEMPLATE "xiaozhi/%s/up"
+#endif
+
+// Minimal WAV-from-HTTP player for POC: expects mono 16-bit PCM at codec sample rate
+static bool PlayWavFromUrl(const std::string &url, float gain)
+{
+    auto &board = Board::GetInstance();
+    auto codec = board.GetAudioCodec();
+    if (!codec)
+    {
+        ESP_LOGE(TAG, "Audio codec not available");
+        return false;
+    }
+
+    std::unique_ptr<Http> http(board.CreateHttp());
+    if (!http)
+    {
+        ESP_LOGE(TAG, "Failed to create HTTP client");
+        return false;
+    }
+    http->SetHeader("Accept", "audio/wav,application/octet-stream");
+    http->SetHeader("Accept-Encoding", "identity");
+    http->SetTimeout(10000);
+
+    ESP_LOGI(TAG, "Opening URL: %s", url.c_str());
+    if (!http->Open("GET", url))
+    {
+        ESP_LOGE(TAG, "HTTP open failed");
+        return false;
+    }
+    int status = http->GetStatusCode();
+    if (status != 200)
+    {
+        ESP_LOGE(TAG, "HTTP status %d", status);
+        http->Close();
+        return false;
+    }
+
+    // Naively skip 44-byte WAV header for PCM WAV
+    int to_skip = 44;
+    char hdr[64];
+    while (to_skip > 0)
+    {
+        int n = http->Read(hdr, to_skip > (int)sizeof(hdr) ? (int)sizeof(hdr) : to_skip);
+        if (n <= 0)
+        {
+            break;
+        }
+        to_skip -= n;
+    }
+
+    // Stream PCM frames -> codec
+    const size_t BUF = 1024;
+    std::unique_ptr<uint8_t[]> buf(new uint8_t[BUF]);
+    bool have_leftover = false;
+    uint8_t leftover = 0;
+    gain = (gain <= 0.0f) ? 1.0f : gain;
+    codec->EnableOutput(true);
+
+    while (true)
+    {
+        int n = http->Read(reinterpret_cast<char *>(buf.get()), BUF);
+        if (n <= 0)
+        {
+            break;
+        }
+
+        size_t offset = 0;
+        std::vector<int16_t> samples;
+        samples.reserve(n / 2 + 1);
+
+        // Handle odd byte from previous chunk
+        if (have_leftover)
+        {
+            int16_t s = (int16_t)((uint16_t)buf[offset] << 8 | leftover);
+            int32_t v = (int32_t)(s * gain);
+            if (v > 32767) v = 32767; else if (v < -32768) v = -32768;
+            samples.push_back((int16_t)v);
+            offset += 1;
+            have_leftover = false;
+        }
+
+        // Convert little-endian 16-bit to int16_t, apply gain
+        for (; offset + 1 < (size_t)n; offset += 2)
+        {
+            int16_t s = (int16_t)((uint16_t)buf[offset + 1] << 8 | buf[offset]);
+            int32_t v = (int32_t)(s * gain);
+            if (v > 32767)
+                v = 32767;
+            else if (v < -32768)
+                v = -32768;
+            samples.push_back((int16_t)v);
+        }
+
+        // Save leftover byte if odd length
+        if (offset < (size_t)n)
+        {
+            leftover = buf[offset];
+            have_leftover = true;
+        }
+
+        if (!samples.empty())
+        {
+            codec->OutputData(samples);
+        }
+    }
+
+    http->Close();
+    return true;
+}
+
 static const char *const STATE_STRINGS[] = {
     "unknown",
     "starting",
@@ -533,6 +648,23 @@ void Application::Start()
     // Check for new firmware version or get the MQTT broker address
     CheckNewVersion();
 
+    // Seed MQTT config on first boot if unset (allows setting broker at build time)
+    {
+        Settings mqtt_settings("mqtt", true);
+        auto endpoint = mqtt_settings.GetString("endpoint");
+        if (endpoint.empty() && std::string(DEFAULT_MQTT_ENDPOINT).size() > 0)
+        {
+            auto mac = SystemInfo::GetMacAddress();
+            char up_topic[128];
+            snprintf(up_topic, sizeof(up_topic), DEFAULT_MQTT_PUBLISH_TEMPLATE, mac.c_str());
+            mqtt_settings.SetString("endpoint", DEFAULT_MQTT_ENDPOINT);
+            mqtt_settings.SetString("client_id", mac);
+            mqtt_settings.SetString("publish_topic", up_topic);
+            // Optional username/password can be added similarly if needed
+            ESP_LOGI(TAG, "Seeded MQTT endpoint to %s", DEFAULT_MQTT_ENDPOINT);
+        }
+    }
+
     // Initialize the protocol
     display->SetStatus(Lang::Strings::LOADING_PROTOCOL);
 
@@ -682,6 +814,30 @@ void Application::Start()
                 Alert(status->valuestring, message->valuestring, emotion->valuestring, Lang::Sounds::P3_VIBRATION);
             } else {
                 ESP_LOGW(TAG, "Alert command requires status, message and emotion");
+            }
+        } else if (strcmp(type->valuestring, "play_url") == 0) {
+            auto url = cJSON_GetObjectItem(root, "url");
+            auto gain = cJSON_GetObjectItem(root, "gain");
+            if (cJSON_IsString(url)) {
+                float g = cJSON_IsNumber(gain) ? (float)gain->valuedouble : 1.0f;
+                // Run playback in background to avoid blocking main loop
+                Schedule([this, url_str = std::string(url->valuestring), g]() {
+                    ResetDecoder();
+                    if (device_state_ == kDeviceStateIdle || device_state_ == kDeviceStateListening) {
+                        SetDeviceState(kDeviceStateSpeaking);
+                    }
+                    background_task_->Schedule([this, url_str, g]() {
+                        bool ok = PlayWavFromUrl(url_str, g);
+                        Schedule([this, ok]() {
+                            if (device_state_ == kDeviceStateSpeaking) {
+                                SetDeviceState(kDeviceStateIdle);
+                            }
+                            ESP_LOGI(TAG, "PlayWavFromUrl %s", ok ? "done" : "failed");
+                        });
+                    });
+                });
+            } else {
+                ESP_LOGW(TAG, "play_url missing 'url' field");
             }
         } else {
             ESP_LOGW(TAG, "Unknown message type: %s", type->valuestring);

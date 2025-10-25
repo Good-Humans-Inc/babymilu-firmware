@@ -268,6 +268,16 @@ target_compile_definitions(${COMPONENT_LIB}
                     PRIVATE BOARD_TYPE=\"${BOARD_TYPE}\" BOARD_NAME=\"${BOARD_NAME}\"
                     )
 
+# Allow passing default MQTT settings at build time, e.g.:
+# idf.py -DDEFAULT_MQTT_ENDPOINT=\"192.168.1.10:1883\" -DDEFAULT_MQTT_PUBLISH_TEMPLATE=\"xiaozhi/%s/up\"
+if(DEFINED DEFAULT_MQTT_ENDPOINT)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE DEFAULT_MQTT_ENDPOINT=\"${DEFAULT_MQTT_ENDPOINT}\")
+endif()
+if(DEFINED DEFAULT_MQTT_PUBLISH_TEMPLATE)
+    # Note: keep %s placeholder for MAC in runtime formatting
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE DEFAULT_MQTT_PUBLISH_TEMPLATE=\"${DEFAULT_MQTT_PUBLISH_TEMPLATE}\")
+endif()
+
 # 添加生成规则
 add_custom_command(
     OUTPUT ${LANG_HEADER}
