@@ -10,6 +10,7 @@
 #include "iot/thing_manager.h"
 #include "assets/lang_config.h"
 #include "mcp_server.h"
+#include "settings.h"
 #include "audio_debugger.h"
 #include "animation/animation_updater.h"
 #include "ssid_manager.h"
@@ -720,7 +721,7 @@ void Application::Start()
                                     {
         board.SetPowerSaveMode(true);
         Schedule([this]() {
-            auto display = Board::GetInstance().GetDisplay();
+            /* removed unused: display */
             // DISABLED: Comment out transcript display to reduce memory usage
             // display->SetChatMessage("system", "");
             SetDeviceState(kDeviceStateIdle);
