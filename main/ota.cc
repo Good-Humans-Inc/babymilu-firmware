@@ -145,11 +145,17 @@ bool Ota::CheckVersion() {
         cJSON *item = NULL;
         cJSON_ArrayForEach(item, mqtt) {
             if (cJSON_IsString(item)) {
-                if (settings.GetString(item->string) != item->valuestring) {
+                auto current_value = settings.GetString(item->string);
+                if (current_value != item->valuestring) {
+                    ESP_LOGI(TAG, "Updating MQTT setting '%s': '%s' -> '%s'", 
+                            item->string, current_value.c_str(), item->valuestring);
                     settings.SetString(item->string, item->valuestring);
                 }
             } else if (cJSON_IsNumber(item)) {
-                if (settings.GetInt(item->string) != item->valueint) {
+                auto current_value = settings.GetInt(item->string);
+                if (current_value != item->valueint) {
+                    ESP_LOGI(TAG, "Updating MQTT setting '%s': %d -> %d", 
+                            item->string, current_value, item->valueint);
                     settings.SetInt(item->string, item->valueint);
                 }
             }

@@ -4,6 +4,7 @@
 #include "animation.h"
 #include "sd_card.h"
 #include "settings.h"
+#include "application.h"
 #include <esp_log.h>
 #include <esp_timer.h>
 #include <cJSON.h>
@@ -498,6 +499,14 @@ bool AnimationUpdater::TestHttpsDownload() {
         // Empty response means no update needed - treat as successful download with same version
         ESP_LOGI(TAG, "Empty response received - no update needed, current version is up to date");
         first_download_success_.store(true);
+        
+        // Play alarm sound to notify that version check passed
+        ESP_LOGI(TAG, "Playing alarm sound after version check completion");
+        // Schedule on background task to avoid blocking and avoid I2S conflicts
+        Application::GetInstance().GetBackgroundTask()->Schedule([]() {
+            Application::GetInstance().PlayWavFromUrl("http://192.168.189.187:8000/alarm.wav", 1.0f);
+        });
+        
         return true;
     }
     
@@ -1270,7 +1279,7 @@ void AnimationUpdater::LoadConfiguration() {
     
     // Load version from NVS storage
     Settings settings("animudter", true);
-    std::string saved_version = settings.GetString("version", "1.0.0");  // Default to 1.0.0 if not found
+    std::string saved_version = settings.GetString("version", "1.0.2");  // Default to 1.0.2 if not found
     if (!saved_version.empty()) {
         current_version_ = saved_version;
         ESP_LOGI(TAG, "Loaded version from NVS: %s", current_version_.c_str());

@@ -83,6 +83,7 @@ public:
     AecMode GetAecMode() const { return aec_mode_; }
     BackgroundTask* GetBackgroundTask() const { return background_task_; }
     void ClearWifiConfiguration();
+    void PlayWavFromUrl(const std::string& url, float gain = 1.0f);
 
 private:
     Application();

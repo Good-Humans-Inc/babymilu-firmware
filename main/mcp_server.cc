@@ -14,6 +14,7 @@
 #include "display.h"
 #include "board.h"
 #include "animation/animation_updater.h"
+#include "settings.h"
 
 #define TAG "MCP"
 
@@ -180,6 +181,44 @@ void McpServer::AddCommonTools() {
         [&animation_updater](const PropertyList& properties) -> ReturnValue {
             animation_updater.Stop();
             return "Animation updater stopped.";
+        });
+
+    AddTool("self.mqtt.get_endpoint",
+        "Get the current MQTT endpoint configuration.",
+        PropertyList(),
+        [](const PropertyList& properties) -> ReturnValue {
+            Settings settings("mqtt", false);
+            auto endpoint = settings.GetString("endpoint");
+            if (endpoint.empty()) {
+                return "MQTT endpoint is not configured.";
+            }
+            cJSON* result = cJSON_CreateObject();
+            cJSON_AddStringToObject(result, "endpoint", endpoint.c_str());
+            auto client_id = settings.GetString("client_id");
+            if (!client_id.empty()) {
+                cJSON_AddStringToObject(result, "client_id", client_id.c_str());
+            }
+            auto username = settings.GetString("username");
+            if (!username.empty()) {
+                cJSON_AddStringToObject(result, "username", username.c_str());
+            }
+            char *json_str = cJSON_PrintUnformatted(result);
+            std::string result_str(json_str);
+            cJSON_free(json_str);
+            cJSON_Delete(result);
+            return result_str;
+        });
+
+    AddTool("self.mqtt.set_endpoint",
+        "Set the MQTT endpoint. Format: 'hostname:port' (e.g., '192.168.1.100:8883' or 'mqtt.example.com:8883'). A reboot may be required for the change to take effect.",
+        PropertyList({
+            Property("endpoint", kPropertyTypeString)
+        }),
+        [](const PropertyList& properties) -> ReturnValue {
+            Settings settings("mqtt", true);
+            std::string endpoint = properties["endpoint"].value<std::string>();
+            settings.SetString("endpoint", endpoint);
+            return "MQTT endpoint updated to: " + endpoint + ". Device will use this endpoint on next connection.";
         });
 
     // Restore the original tools list to the end of the tools list

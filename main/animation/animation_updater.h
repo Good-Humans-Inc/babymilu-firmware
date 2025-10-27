@@ -114,7 +114,7 @@ private:
     std::atomic<uint32_t> spiffs_not_ready_count_{0};
     
     // Version management
-    std::string current_version_{"1.0.0"}; // Default version
+    std::string current_version_{"1.0.2"}; // Default version
 };
 
 #endif // ANIMATION_UPDATER_H

@@ -1309,3 +1309,154 @@ void Application::SetAecMode(AecMode mode)
             protocol_->CloseAudioChannel();
         } });
 }
+
+void Application::PlayWavFromUrl(const std::string& url, float gain)
+{
+    ESP_LOGI(TAG, "Playing WAV from URL: %s", url.c_str());
+    
+    auto& board = Board::GetInstance();
+    auto codec = board.GetAudioCodec();
+    if (!codec)
+    {
+        ESP_LOGE(TAG, "Audio codec not available");
+        return;
+    }
+
+    // Temporarily disable input to avoid I2S channel conflicts
+    bool input_was_enabled = codec->input_enabled();
+    if (input_was_enabled)
+    {
+        ESP_LOGI(TAG, "Temporarily disabling input for WAV playback");
+        codec->EnableInput(false);
+        vTaskDelay(pdMS_TO_TICKS(100)); // Allow I2S to settle
+    }
+
+    // Update last output time to prevent Application from disabling output
+    last_output_time_ = std::chrono::steady_clock::now();
+
+    // Scope guard to ensure input is re-enabled on any exit
+    auto ensure_input_restore = [&]() {
+        if (input_was_enabled)
+        {
+            ESP_LOGI(TAG, "Re-enabling input");
+            codec->EnableInput(true);
+        }
+    };
+
+    std::unique_ptr<Http> http(board.CreateHttp());
+    if (!http)
+    {
+        ESP_LOGE(TAG, "Failed to create HTTP client");
+        ensure_input_restore();
+        return;
+    }
+    http->SetHeader("Accept", "audio/wav,application/octet-stream");
+    http->SetHeader("Accept-Encoding", "identity");
+    http->SetTimeout(10000);
+
+    ESP_LOGI(TAG, "Opening URL: %s", url.c_str());
+    if (!http->Open("GET", url))
+    {
+        ESP_LOGE(TAG, "HTTP open failed");
+        ensure_input_restore();
+        return;
+    }
+    int status = http->GetStatusCode();
+    if (status != 200)
+    {
+        ESP_LOGE(TAG, "HTTP status %d", status);
+        http->Close();
+        ensure_input_restore();
+        return;
+    }
+
+    // Naively skip 44-byte WAV header for PCM WAV
+    int to_skip = 44;
+    char hdr[64];
+    while (to_skip > 0)
+    {
+        int n = http->Read(hdr, to_skip > (int)sizeof(hdr) ? (int)sizeof(hdr) : to_skip);
+        if (n <= 0)
+        {
+            break;
+        }
+        to_skip -= n;
+    }
+
+    // Stream PCM frames -> codec
+    const size_t BUF = 1024;
+    std::unique_ptr<uint8_t[]> buf(new uint8_t[BUF]);
+    bool have_leftover = false;
+    uint8_t leftover = 0;
+    gain = (gain <= 0.0f) ? 1.0f : gain;
+    codec->EnableOutput(true);
+
+    uint32_t total_samples = 0;
+    while (true)
+    {
+        int n = http->Read(reinterpret_cast<char*>(buf.get()), BUF);
+        if (n <= 0)
+        {
+            break;
+        }
+
+        size_t offset = 0;
+        std::vector<int16_t> samples;
+        samples.reserve(n / 2 + 1);
+
+        // Handle odd byte from previous chunk
+        if (have_leftover)
+        {
+            int16_t s = (int16_t)((uint16_t)buf[offset] << 8 | leftover);
+            int32_t v = (int32_t)(s * gain);
+            if (v > 32767) v = 32767; else if (v < -32768) v = -32768;
+            samples.push_back((int16_t)v);
+            offset += 1;
+            have_leftover = false;
+        }
+
+        // Convert little-endian 16-bit to int16_t, apply gain
+        for (; offset + 1 < (size_t)n; offset += 2)
+        {
+            int16_t s = (int16_t)((uint16_t)buf[offset + 1] << 8 | buf[offset]);
+            int32_t v = (int32_t)(s * gain);
+            if (v > 32767)
+                v = 32767;
+            else if (v < -32768)
+                v = -32768;
+            samples.push_back((int16_t)v);
+        }
+
+        // Save leftover byte if odd length
+        if (offset < (size_t)n)
+        {
+            leftover = buf[offset];
+            have_leftover = true;
+        }
+
+        if (!samples.empty())
+        {
+            codec->OutputData(samples);
+            total_samples += samples.size();
+        }
+    }
+
+    http->Close();
+    
+    // Wait for audio to finish playing
+    // Assuming 24kHz sample rate, calculate delay: samples / sample_rate * 1000ms + buffer time
+    int sample_rate = 24000; // Default sample rate
+    uint32_t play_time_ms = (total_samples * 1000) / sample_rate;
+    uint32_t wait_time = play_time_ms + 200; // Add 200ms buffer for codec processing
+    if (wait_time < 500) wait_time = 500; // Minimum 500ms
+    if (wait_time > 10000) wait_time = 10000; // Max 10s
+    
+    ESP_LOGI(TAG, "Total samples: %u, waiting %u ms for playback", total_samples, wait_time);
+    vTaskDelay(pdMS_TO_TICKS(wait_time));
+    
+    // Re-enable input if it was enabled before
+    ensure_input_restore();
+    
+    // Note: We don't disable output here - let Application's OnAudioOutput manage it
+    ESP_LOGI(TAG, "Finished playing WAV from URL");
+}

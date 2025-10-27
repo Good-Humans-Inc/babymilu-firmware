@@ -100,6 +100,8 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
     } else {
         broker_address = endpoint;
     }
+    ESP_LOGI(TAG, "Broker address: %s, port: %d (transport: %s)", 
+            broker_address.c_str(), broker_port, broker_port == 8883 ? "TLS" : "TCP");
     if (!mqtt_->Connect(broker_address, broker_port, client_id, username, password)) {
         ESP_LOGE(TAG, "Failed to connect to endpoint");
         SetError(Lang::Strings::SERVER_NOT_CONNECTED);
