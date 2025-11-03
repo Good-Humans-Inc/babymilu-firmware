@@ -9,7 +9,7 @@
 #include <sys/stat.h>
 #include <dirent.h>
 
-// Include SenseCAP Watcher board configuration
+// Include board-specific configurations
 #ifdef CONFIG_BOARD_TYPE_SENSECAP_WATCHER
 #include "boards/sensecap-watcher/config.h"
 #endif
@@ -62,10 +62,6 @@ esp_err_t SdCard::Initialize()
     sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
     slot_config.gpio_cs = BSP_SD_SPI_CS;
     slot_config.host_id = static_cast<spi_host_device_t>(host.slot);
-#else
-    ESP_LOGE(TAG, "SD card functionality only supported on SenseCAP Watcher board");
-    return ESP_ERR_NOT_SUPPORTED;
-#endif
 
     // Mount SD card with more permissive settings
     const esp_vfs_fat_sdmmc_mount_config_t mount_config = {
@@ -93,6 +89,11 @@ esp_err_t SdCard::Initialize()
     s_mounted = true;
     ESP_LOGI(TAG, "SD card mounted successfully at %s", MOUNT_POINT);
     return ESP_OK;
+
+#else
+    ESP_LOGE(TAG, "SD card functionality only supported on SenseCAP Watcher board");
+    return ESP_ERR_NOT_SUPPORTED;
+#endif
 }
 
 esp_err_t SdCard::ReadTextFile(const std::string& filename, std::string& content)
