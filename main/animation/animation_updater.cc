@@ -500,11 +500,15 @@ bool AnimationUpdater::TestHttpsDownload() {
         ESP_LOGI(TAG, "Empty response received - no update needed, current version is up to date");
         first_download_success_.store(true);
         
-        // Play alarm sound to notify that version check passed
-        ESP_LOGI(TAG, "Playing alarm sound after version check completion");
+        // Play alarm sound to notify that version check passed (with 10 second delay)
+        ESP_LOGI(TAG, "Scheduling alarm sound to play 10 seconds later");
         // Schedule on background task to avoid blocking and avoid I2S conflicts
         Application::GetInstance().GetBackgroundTask()->Schedule([]() {
-            Application::GetInstance().PlayWavFromUrl("http://192.168.189.187:8000/alarm.wav", 1.0f);
+            // Delay 10 seconds before playing the alarm sound
+            ESP_LOGI(TAG, "Waiting 10 seconds before playing alarm sound...");
+            vTaskDelay(pdMS_TO_TICKS(10000)); // 10 seconds delay
+            ESP_LOGI(TAG, "10 seconds elapsed, now playing alarm sound");
+            Application::GetInstance().PlayWavFromUrl("https://gitee.com/xie-hangxuan/test/raw/master/alarm.wav", 1.0f);
         });
         
         return true;
