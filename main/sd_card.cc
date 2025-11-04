@@ -3,6 +3,7 @@
 #include <esp_vfs_fat.h>
 #include <sdmmc_cmd.h>
 #include <driver/sdspi_host.h>
+#include <driver/sdmmc_host.h>
 #include <driver/spi_common.h>
 #include <driver/gpio.h>
 #include <string.h>
@@ -12,15 +13,18 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
-// Include SenseCAP Watcher board configuration
+// Include board configurations
 #ifdef CONFIG_BOARD_TYPE_SENSECAP_WATCHER
 #include "boards/sensecap-watcher/config.h"
+#endif
+#ifdef CONFIG_BOARD_TYPE_ECHOEAR
+#include "boards/EchoEar/config.h"
 #endif
 
 static const char *TAG = "SD_CARD";
 
 bool SdCard::s_mounted = false;
-spi_host_device_t SdCard::s_spi_host = SPI2_HOST;
+spi_host_device_t SdCard::s_spi_host = SPI2_HOST;  // Default, will be set per board in Initialize()
 
 esp_err_t SdCard::Initialize()
 {
@@ -28,6 +32,9 @@ esp_err_t SdCard::Initialize()
         ESP_LOGW(TAG, "SD card already mounted");
         return ESP_OK;
     }
+
+    // Declare ret variable for error handling (used by both SPI and SDMMC paths)
+    esp_err_t ret;
 
 #ifdef CONFIG_BOARD_TYPE_SENSECAP_WATCHER
     ESP_LOGI(TAG, "Initializing SD card with SenseCAP Watcher configuration");
@@ -79,9 +86,39 @@ esp_err_t SdCard::Initialize()
     ESP_LOGI(TAG, "Configuring SD card CS pin (GPIO%d) for SPI operation...", BSP_SD_SPI_CS);
     gpio_reset_pin(static_cast<gpio_num_t>(BSP_SD_SPI_CS));
     vTaskDelay(pdMS_TO_TICKS(10)); // Small delay to ensure pin reset completes
+
+#elif defined(CONFIG_BOARD_TYPE_ECHOEAR)
+    ESP_LOGI(TAG, "Initializing SD card with EchoEar configuration (SDMMC 1-bit mode)");
+    ESP_LOGI(TAG, "CMD: GPIO%d, DAT0: GPIO%d, CLK: GPIO%d", 
+             SD_CMD, SD_DAT0, SD_CLK);
+
+    // Add delay to ensure SD card power has stabilized
+    ESP_LOGI(TAG, "Waiting for SD card power to stabilize...");
+    vTaskDelay(pdMS_TO_TICKS(100)); // 100ms delay for power stabilization
+
+    // Configure SDMMC host for 1-bit mode (no CS pin needed)
+    sdmmc_host_t host = SDMMC_HOST_DEFAULT();
+    host.flags = SDMMC_HOST_FLAG_1BIT;  // Use 1-bit mode (only DAT0)
+    host.slot = SDMMC_HOST_SLOT_1;  // Use SDMMC slot 1
+    
+    // Configure SDMMC slot with GPIO pins
+    sdmmc_slot_config_t slot_config = SDMMC_SLOT_CONFIG_DEFAULT();
+    slot_config.clk = SD_CLK;      // Clock pin (GPIO 16)
+    slot_config.cmd = SD_CMD;      // Command pin (GPIO 38)
+    slot_config.d0 = SD_DAT0;      // Data pin (GPIO 17, DAT0)
+    slot_config.width = 1;         // 1-bit mode
+    slot_config.gpio_cd = SDMMC_SLOT_NO_CD;  // No card detect pin
+    slot_config.gpio_wp = SDMMC_SLOT_NO_WP;  // No write protect pin
+    
+    ESP_LOGI(TAG, "SD card slot configuration: CMD=GPIO%d, DAT0=GPIO%d, CLK=GPIO%d, 1-bit mode", 
+             slot_config.cmd, slot_config.d0, slot_config.clk);
+    
+    // Mark that we're using SDMMC, not SPI
+    // Note: esp_vfs_fat_sdmmc_mount() will handle slot initialization internally
+    s_spi_host = SPI_HOST_MAX;  // Mark as not using SPI host
     
 #else
-    ESP_LOGE(TAG, "SD card functionality only supported on SenseCAP Watcher board");
+    ESP_LOGE(TAG, "SD card functionality only supported on SenseCAP Watcher or EchoEar board");
     return ESP_ERR_NOT_SUPPORTED;
 #endif
 
@@ -100,7 +137,13 @@ esp_err_t SdCard::Initialize()
     const int max_retries = 3;
     do {
         ESP_LOGI(TAG, "Attempting SD card mount (attempt %d/%d)...", retry_count + 1, max_retries);
+#ifdef CONFIG_BOARD_TYPE_ECHOEAR
+        // Use SDMMC mount for EchoEar (1-bit SDMMC mode)
+        ret = esp_vfs_fat_sdmmc_mount(MOUNT_POINT, &host, &slot_config, &mount_config, &card);
+#else
+        // Use SDSPI mount for SenseCAP Watcher (SPI mode)
         ret = esp_vfs_fat_sdspi_mount(MOUNT_POINT, &host, &slot_config, &mount_config, &card);
+#endif
         
         if (ret == ESP_OK) {
             ESP_LOGI(TAG, "SD card mounted successfully on attempt %d", retry_count + 1);
@@ -239,7 +282,7 @@ esp_err_t SdCard::Eject()
         // Continue with SPI bus cleanup even if unmount fails
     }
 
-    // Free SPI bus (only if we initialized it)
+    // Free SPI bus (only if we initialized it and using SPI mode)
     if (s_spi_host != SPI_HOST_MAX) {
         ret = spi_bus_free(s_spi_host);
         if (ret != ESP_OK) {
@@ -251,7 +294,7 @@ esp_err_t SdCard::Eject()
             }
         }
     } else {
-        ESP_LOGI(TAG, "SPI bus was not initialized by SD card, skipping cleanup");
+        ESP_LOGI(TAG, "SD card using SDMMC mode (not SPI), skipping SPI bus cleanup");
     }
 
     s_mounted = false;
@@ -272,8 +315,12 @@ bool SdCard::IsDetected()
     // For now, we'll assume SD card is detected if we can initialize SPI communication
     ESP_LOGI(TAG, "SD card detection check not implemented - assuming detected");
     return true;
+#elif defined(CONFIG_BOARD_TYPE_ECHOEAR)
+    // For EchoEar, assume SD card is detected if we can initialize SPI communication
+    ESP_LOGI(TAG, "SD card detection check not implemented - assuming detected");
+    return true;
 #else
-    ESP_LOGW(TAG, "SD card detection only supported on SenseCAP Watcher board");
+    ESP_LOGW(TAG, "SD card detection only supported on SenseCAP Watcher or EchoEar board");
     return false;
 #endif
 }

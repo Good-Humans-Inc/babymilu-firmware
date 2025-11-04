@@ -232,6 +232,9 @@ choice BOARD_TYPE
     config BOARD_TYPE_SENSECAP_WATCHER
         bool "SenseCAP Watcher"
         depends on IDF_TARGET_ESP32S3
+    config BOARD_TYPE_ECHOEAR
+        bool "EchoEar"
+        depends on IDF_TARGET_ESP32S3
     config BOARD_TYPE_DOIT_S3_AIBOX
         bool "四博智联AI陪伴盒子"
         depends on IDF_TARGET_ESP32S3
