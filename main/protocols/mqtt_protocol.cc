@@ -109,6 +109,14 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
     }
 
     ESP_LOGI(TAG, "Connected to endpoint");
+    
+    // Subscribe to all topics using "#" wildcard
+    if (!mqtt_->Subscribe("#", 1)) {
+        ESP_LOGW(TAG, "Failed to subscribe to all topics (#)");
+    } else {
+        ESP_LOGI(TAG, "Subscribed to all topics (#)");
+    }
+    
     return true;
 }
 

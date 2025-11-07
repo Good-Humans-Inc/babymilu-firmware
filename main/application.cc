@@ -683,6 +683,20 @@ void Application::Start()
             } else {
                 ESP_LOGW(TAG, "Alert command requires status, message and emotion");
             }
+        } else if (strcmp(type->valuestring, "play_url") == 0) {
+            auto url = cJSON_GetObjectItem(root, "url");
+            auto gain = cJSON_GetObjectItem(root, "gain");
+            if (cJSON_IsString(url)) {
+                float gain_value = 1.0f;
+                if (cJSON_IsNumber(gain)) {
+                    gain_value = (float)gain->valuedouble;
+                }
+                Schedule([this, url_str = std::string(url->valuestring), gain_value]() {
+                    PlayWavFromUrl(url_str, gain_value);
+                });
+            } else {
+                ESP_LOGW(TAG, "play_url command requires url field");
+            }
         } else {
             ESP_LOGW(TAG, "Unknown message type: %s", type->valuestring);
         } });
