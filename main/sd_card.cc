@@ -79,10 +79,6 @@ esp_err_t SdCard::Initialize()
     gpio_reset_pin(static_cast<gpio_num_t>(BSP_SD_SPI_CS));
     vTaskDelay(pdMS_TO_TICKS(10)); // Small delay to ensure pin reset completes
     
-#else
-    ESP_LOGE(TAG, "SD card functionality only supported on SenseCAP Watcher board");
-    return ESP_ERR_NOT_SUPPORTED;
-#endif
 
     // Mount SD card with memory-conservative settings
     const esp_vfs_fat_sdmmc_mount_config_t mount_config = {
@@ -140,6 +136,10 @@ esp_err_t SdCard::Initialize()
     s_mounted = true;
     ESP_LOGI(TAG, "SD card mounted successfully at %s", MOUNT_POINT);
     return ESP_OK;
+#else
+    ESP_LOGE(TAG, "SD card functionality only supported on SenseCAP Watcher board");
+    return ESP_ERR_NOT_SUPPORTED;
+#endif
 }
 
 esp_err_t SdCard::ReadTextFile(const std::string& filename, std::string& content)
