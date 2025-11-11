@@ -1061,7 +1061,95 @@ void LcdDisplay::SetEmotion(const char *emotion)
 #endif
 }
 
-void LcdDisplay::SetEmotionImg(const lv_image_dsc_t *img)
+// Static buffer for composed image (reused for normal2/normal3 overlays)
+static lv_image_dsc_t* composed_img_dsc = nullptr;
+static uint8_t* composed_img_data = nullptr;
+
+// Helper function to create composed image with green square overlay (Option 2: Canvas-based)
+static lv_image_dsc_t* compose_image_with_overlay(const lv_image_dsc_t* base_img, int frame_index) {
+    if (base_img == nullptr || base_img->data == nullptr) {
+        ESP_LOGE(TAG, "Invalid base image for composition");
+        return nullptr;
+    }
+    
+    // Only compose for normal2 (frame_index 1) and normal3 (frame_index 2)
+    if (frame_index != 1 && frame_index != 2) {
+        return nullptr; // No composition needed
+    }
+    
+    lv_coord_t img_width = base_img->header.w;
+    lv_coord_t img_height = base_img->header.h;
+    
+    if (img_width <= 0 || img_height <= 0) {
+        ESP_LOGE(TAG, "Invalid image dimensions: %dx%d", img_width, img_height);
+        return nullptr;
+    }
+    
+    // Calculate buffer size for RGB565 (2 bytes per pixel)
+    size_t data_size = img_width * img_height * 2;
+    
+    // Free previous composed image if it exists
+    if (composed_img_data != nullptr) {
+        heap_caps_free(composed_img_data);
+        composed_img_data = nullptr;
+    }
+    if (composed_img_dsc != nullptr) {
+        heap_caps_free(composed_img_dsc);
+        composed_img_dsc = nullptr;
+    }
+    
+    // Allocate memory for composed image
+    composed_img_data = (uint8_t*)heap_caps_malloc(data_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (composed_img_data == nullptr) {
+        ESP_LOGE(TAG, "Failed to allocate memory for composed image data");
+        return nullptr;
+    }
+    
+    composed_img_dsc = (lv_image_dsc_t*)heap_caps_malloc(sizeof(lv_image_dsc_t), MALLOC_CAP_8BIT);
+    if (composed_img_dsc == nullptr) {
+        ESP_LOGE(TAG, "Failed to allocate memory for composed image descriptor");
+        heap_caps_free(composed_img_data);
+        composed_img_data = nullptr;
+        return nullptr;
+    }
+    
+    // Copy base image data
+    memcpy(composed_img_data, base_img->data, data_size);
+    
+    // Draw 100x100 green square in the center
+    // Green color in RGB565: 0x07E0 (0b0000011111100000)
+    uint16_t green_color = 0x07E0; // RGB565 green
+    
+    // Calculate center position
+    int center_x = img_width / 2;
+    int center_y = img_height / 2;
+    int square_size = 100;
+    int start_x = center_x - square_size / 2;
+    int start_y = center_y - square_size / 2;
+    
+    // Draw the green square
+    for (int y = start_y; y < start_y + square_size && y < img_height; y++) {
+        for (int x = start_x; x < start_x + square_size && x < img_width; x++) {
+            if (x >= 0 && y >= 0) {
+                int offset = (y * img_width + x) * 2;
+                if (offset + 1 < (int)data_size) {
+                    composed_img_data[offset] = green_color & 0xFF;
+                    composed_img_data[offset + 1] = (green_color >> 8) & 0xFF;
+                }
+            }
+        }
+    }
+    
+    // Set up composed image descriptor
+    composed_img_dsc->header = base_img->header;
+    composed_img_dsc->data_size = data_size;
+    composed_img_dsc->data = composed_img_data;
+    
+    ESP_LOGD(TAG, "Composed image with green square overlay for frame %d", frame_index);
+    return composed_img_dsc;
+}
+
+void LcdDisplay::SetEmotionImg(const lv_image_dsc_t *img, int frame_index)
 {
     DisplayLockGuard lock(this);
     
@@ -1085,9 +1173,20 @@ void LcdDisplay::SetEmotionImg(const lv_image_dsc_t *img)
         return;
     }
     
-    lv_img_set_src(emotion_label_, img);
+    // For normal2 (frame_index 1) and normal3 (frame_index 2), compose with green square overlay
+    const lv_image_dsc_t* img_to_display = img;
+    if (frame_index == 1 || frame_index == 2) {
+        lv_image_dsc_t* composed = compose_image_with_overlay(img, frame_index);
+        if (composed != nullptr) {
+            img_to_display = composed;
+        }
+    }
+    
+    lv_img_set_src(emotion_label_, img_to_display);
     
     // Scale animation to fit display better - 128x128 -> 412x412 FULL SCREEN SCALING
+    // COMMENTED OUT: Keep original image size (no scaling)
+    /*
     if (img != nullptr) {
         // Safety checks to prevent division by zero
         lv_coord_t img_width = img->header.w;
@@ -1181,6 +1280,7 @@ void LcdDisplay::SetEmotionImg(const lv_image_dsc_t *img)
             lv_img_set_zoom(emotion_label_, 256);  // Default 100% scale
         }
     }
+    */
 }
 
 void LcdDisplay::SetIcon(const char *icon)

@@ -257,7 +257,8 @@ void plat_animation_task(void *arg)
         {
             pos = 0;
         }
-        display->SetEmotionImg(current_anim->imges[current_anim->animations[pos]]);
+        // Pass frame index for canvas-based composition (normal2/normal3 overlay)
+        display->SetEmotionImg(current_anim->imges[current_anim->animations[pos]], current_anim->animations[pos]);
         vTaskDelay(pdMS_TO_TICKS(500));
     }
 }
@@ -1108,12 +1109,25 @@ bool animation_load_sleep_from_spiffs(void)
 void animation_cleanup_spiffs_animation(Animation_t* anim)
 {
     if (anim && anim->use_spiffs && anim->spiffs_imgs) {
+        // Track which pointers we've already freed to avoid double-free
+        // (needed for normal animation where normal2/normal3 reuse normal1's descriptor)
         for (int i = 0; i < anim->len; i++) {
-            if (anim->spiffs_imgs[i] && anim->spiffs_imgs[i]->data) {
-                free((void*)anim->spiffs_imgs[i]->data);
-            }
             if (anim->spiffs_imgs[i]) {
-                free(anim->spiffs_imgs[i]);
+                // Check if we've already freed this pointer (duplicate pointer check)
+                bool already_freed = false;
+                for (int j = 0; j < i; j++) {
+                    if (anim->spiffs_imgs[j] == anim->spiffs_imgs[i]) {
+                        already_freed = true;
+                        break;
+                    }
+                }
+                
+                if (!already_freed) {
+                    if (anim->spiffs_imgs[i]->data) {
+                        free((void*)anim->spiffs_imgs[i]->data);
+                    }
+                    free(anim->spiffs_imgs[i]);
+                }
             }
         }
         free(anim->spiffs_imgs);
@@ -1412,6 +1426,10 @@ bool animation_load_all_from_mega_file(void)
         }
         
         // Load frames for this animation
+        // Special handling for normal animation (anim_idx == 0): reuse normal1's image descriptor for normal2 and normal3
+        bool is_normal_animation = (anim_idx == 0);  // Normal animation is first (index 0)
+        lv_image_dsc_t* normal1_base_frame = NULL;  // Will store normal1's descriptor for reuse
+        
         for (int frame_idx = 0; frame_idx < frame_count && success; frame_idx++) {
             ESP_LOGD("animation", "Loading frame %d from mega file", current_frame);
             
@@ -1436,7 +1454,24 @@ bool animation_load_all_from_mega_file(void)
             uint32_t stride = header_data[5];
             size_t data_size = height * stride;
             
-            // Set up the LVGL image descriptor
+            // For normal animation: reuse normal1's descriptor for normal2 and normal3 (Option 2: Canvas-based approach)
+            if (is_normal_animation && frame_idx > 0) {
+                // Skip loading data for normal2 and normal3, just advance file position
+                if (fseek(f, data_size, SEEK_CUR) != 0) {
+                    ESP_LOGE("animation", "Failed to skip pixel data for frame %d", current_frame);
+                    success = false;
+                    break;
+                }
+                
+                // Reuse normal1's image descriptor (no cloning, just pointer reuse)
+                anim->spiffs_imgs[frame_idx] = normal1_base_frame;
+                
+                ESP_LOGI("animation", "Reusing normal1's image descriptor for normal%d (frame %d)", frame_idx + 1, current_frame);
+                current_frame++;
+                continue;
+            }
+            
+            // Set up the LVGL image descriptor (for normal1 or other animations)
             lv_image_dsc_t* img_dsc = all_spiffs_imgs[current_frame];
             img_dsc->header.magic = LV_IMAGE_HEADER_MAGIC;
             img_dsc->header.cf = (lv_color_format_t)header_data[1];
@@ -1463,6 +1498,12 @@ bool animation_load_all_from_mega_file(void)
             
             // Assign to animation
             anim->spiffs_imgs[frame_idx] = img_dsc;
+            
+            // Store normal1's descriptor for reuse by normal2 and normal3
+            if (is_normal_animation && frame_idx == 0) {
+                normal1_base_frame = img_dsc;
+                ESP_LOGI("animation", "Loaded normal1 (base frame) for reuse by normal2 and normal3");
+            }
             
             ESP_LOGD("animation", "Successfully loaded frame %d: %dx%d, %d bytes", current_frame, width, height, data_size);
             current_frame++;
@@ -2037,6 +2078,10 @@ bool animation_load_all_from_sd_card(void)
         }
         
         // Load frames for this animation
+        // Special handling for normal animation (anim_idx == 0): reuse normal1's image descriptor for normal2 and normal3
+        bool is_normal_animation = (anim_idx == 0);  // Normal animation is first (index 0)
+        lv_image_dsc_t* normal1_base_frame = NULL;  // Will store normal1's descriptor for reuse
+        
         for (int frame_idx = 0; frame_idx < frame_count && success; frame_idx++) {
             ESP_LOGD("animation", "Loading frame %d from SD card mega file", current_frame);
             
@@ -2061,7 +2106,24 @@ bool animation_load_all_from_sd_card(void)
             uint32_t stride = header_data[5];
             size_t data_size = height * stride;
             
-            // Set up the LVGL image descriptor
+            // For normal animation: reuse normal1's descriptor for normal2 and normal3 (Option 2: Canvas-based approach)
+            if (is_normal_animation && frame_idx > 0) {
+                // Skip loading data for normal2 and normal3, just advance file position
+                if (fseek(f, data_size, SEEK_CUR) != 0) {
+                    ESP_LOGE("animation", "Failed to skip pixel data for frame %d", current_frame);
+                    success = false;
+                    break;
+                }
+                
+                // Reuse normal1's image descriptor (no cloning, just pointer reuse)
+                anim->spiffs_imgs[frame_idx] = normal1_base_frame;
+                
+                ESP_LOGI("animation", "Reusing normal1's image descriptor for normal%d (frame %d)", frame_idx + 1, current_frame);
+                current_frame++;
+                continue;
+            }
+            
+            // Set up the LVGL image descriptor (for normal1 or other animations)
             lv_image_dsc_t* img_dsc = all_sd_card_imgs[current_frame];
             img_dsc->header.magic = LV_IMAGE_HEADER_MAGIC;
             img_dsc->header.cf = (lv_color_format_t)header_data[1];
@@ -2088,6 +2150,12 @@ bool animation_load_all_from_sd_card(void)
             
             // Assign to animation
             anim->spiffs_imgs[frame_idx] = img_dsc;
+            
+            // Store normal1's descriptor for reuse by normal2 and normal3
+            if (is_normal_animation && frame_idx == 0) {
+                normal1_base_frame = img_dsc;
+                ESP_LOGI("animation", "Loaded normal1 (base frame) for reuse by normal2 and normal3");
+            }
             
             ESP_LOGD("animation", "Successfully loaded frame %d: %dx%d, %d bytes", current_frame, width, height, data_size);
             current_frame++;

@@ -255,4 +255,4 @@ void Display::SetTheme(const std::string& theme_name) {
     settings.SetString("theme", theme_name);
 }
 
-void Display::SetEmotionImg(const lv_image_dsc_t *img){};
+void Display::SetEmotionImg(const lv_image_dsc_t *img, int frame_index){};
