@@ -4,21 +4,37 @@ This guide explains how to play full video files (with audio) on your ESP32-S3 d
 
 ## Overview
 
-Since ESP32-S3 doesn't support standard video formats (MP4, AVI), we use a **frame sequence + audio** approach:
-- Video is converted to a sequence of image frames (JPG format)
-- Audio is extracted as a separate file (WAV or P3/Opus format)
+Since ESP32-S3 doesn't support standard video formats (MP4, AVI, MOV, etc.) directly, we use a **frame sequence + audio** approach:
+- **Input video format**: Any format that FFmpeg can read (MP4, AVI, MOV, MKV, etc.)
+- **Frame output format**: JPG/JPEG (recommended) or BIN (LVGL binary format)
+- **Audio format**: WAV (16kHz, 16-bit, mono) or P3/Opus format
 - Frames are loaded from SD card on-demand (streaming) to handle large files
 - Audio and video are synchronized during playback
+
+## Video Input Format Requirements
+
+**You can use ANY video format** as input - the system doesn't care about the original format because you'll convert it first. Common formats that work:
+- ✅ MP4 (H.264, H.265)
+- ✅ AVI
+- ✅ MOV
+- ✅ MKV
+- ✅ WebM
+- ✅ Any format FFmpeg supports
+
+**The conversion process handles everything** - you just need to extract frames and audio from your video file.
 
 ## Video File Preparation
 
 ### Step 1: Convert Video to Frame Sequence
 
-Use FFmpeg to extract frames from your video:
+Use FFmpeg to extract frames from your video. **FFmpeg supports many input formats**, so you can use MP4, AVI, MOV, MKV, etc.:
 
 ```bash
-# Extract frames at 10 FPS (adjust as needed)
+# Extract frames at 10 FPS from any video format
 ffmpeg -i your_video.mp4 -vf fps=10 -q:v 2 frames/frame_%04d.jpg
+ffmpeg -i your_video.avi -vf fps=10 -q:v 2 frames/frame_%04d.jpg
+ffmpeg -i your_video.mov -vf fps=10 -q:v 2 frames/frame_%04d.jpg
+ffmpeg -i your_video.mkv -vf fps=10 -q:v 2 frames/frame_%04d.jpg
 
 # Or at 15 FPS for smoother playback
 ffmpeg -i your_video.mp4 -vf fps=15 -q:v 2 frames/frame_%04d.jpg
@@ -27,6 +43,20 @@ ffmpeg -i your_video.mp4 -vf fps=15 -q:v 2 frames/frame_%04d.jpg
 ffmpeg -i your_video.mp4 -vf fps=30 -q:v 2 frames/frame_%04d.jpg
 ```
 
+**Frame Output Format Options:**
+
+1. **JPG/JPEG (Recommended)**: 
+   - Most compatible
+   - Smaller file size
+   - ESP32-S3 has built-in JPEG decoder
+   - Use: `frame_%04d.jpg`
+
+2. **BIN (LVGL Binary Format)**:
+   - Faster to load (pre-converted)
+   - Smaller file size
+   - Requires pre-conversion step
+   - Use: `frame_%04d.bin` (after conversion)
+
 **Recommended settings:**
 - **FPS**: 10-15 FPS (balance between smoothness and performance)
 - **Resolution**: Match your display resolution (e.g., 240x240, 320x240)
@@ -34,17 +64,24 @@ ffmpeg -i your_video.mp4 -vf fps=30 -q:v 2 frames/frame_%04d.jpg
 
 ### Step 2: Extract Audio
 
-Extract audio as WAV file:
+Extract audio from your video (works with any video format that has audio):
 
 ```bash
 # Extract audio as 16kHz mono WAV (recommended)
+# Works with MP4, AVI, MOV, MKV, etc.
 ffmpeg -i your_video.mp4 -ar 16000 -ac 1 -sample_fmt s16 audio.wav
+ffmpeg -i your_video.avi -ar 16000 -ac 1 -sample_fmt s16 audio.wav
+ffmpeg -i your_video.mov -ar 16000 -ac 1 -sample_fmt s16 audio.wav
 
 # Or convert to P3/Opus format (smaller file size)
 # First extract as WAV, then use the p3_tools scripts
 ffmpeg -i your_video.mp4 -ar 16000 -ac 1 -sample_fmt s16 temp.wav
 python scripts/p3_tools/convert_audio_to_p3.py temp.wav audio.p3
 ```
+
+**Audio Format Requirements:**
+- **WAV**: 16kHz sample rate, 16-bit, mono (PCM)
+- **P3**: Opus-encoded format (smaller, same quality)
 
 ### Step 3: Organize Files on SD Card
 

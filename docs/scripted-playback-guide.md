@@ -2,6 +2,8 @@
 
 This guide explains how to use the scripted playback system to pre-record interaction animations and conversations for video shooting purposes.
 
+> **Note**: For full video playback with audio (frame sequences), see [Video Playback Guide](video-playback-guide.md).
+
 ## Overview
 
 The scripted playback system allows you to:
