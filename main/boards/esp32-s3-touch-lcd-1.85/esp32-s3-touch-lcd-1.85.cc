@@ -19,6 +19,7 @@
 #include "esp_io_expander_tca9554.h"
 #include "animation/animation.h"
 #include "sd_card.h"
+#include "QMI8658.h"
 
 #define TAG "waveshare_lcd_1_85"
 
@@ -219,6 +220,24 @@ static const st77916_lcd_init_cmd_t vendor_specific_init_new[] = {
 class CustomBoard : public WifiBoard {
 private:
     i2c_master_bus_handle_t i2c_bus_;
+    esp_timer_handle_t sensor_timer_;
+    
+    // Timer callback for periodic sensor reading
+    static void sensor_timer_callback(void* arg) {
+        CustomBoard* board = static_cast<CustomBoard*>(arg);
+        board->ReadSensorData();
+    }
+    
+    void ReadSensorData() {
+        getGyroscope();
+        getAccelerometer();
+        ESP_LOGI(TAG, "Sensor Update - Gyro: X:%.3f Y:%.3f Z:%.3f, Accel: X:%.3f Y:%.3f Z:%.3f", 
+                 Gyro.x, Gyro.y, Gyro.z, Accel.x, Accel.y, Accel.z);
+    }
+    
+public:
+    // Getter for I2C bus handle to be used by QMI8658
+    i2c_master_bus_handle_t GetI2CBus() const { return i2c_bus_; }
     esp_io_expander_handle_t io_expander = NULL;
     LcdDisplay* display_;
     button_handle_t boot_btn, pwr_btn;
@@ -460,6 +479,50 @@ public:
         } else {
             ESP_LOGW(TAG, "SD card initialization failed: %s", esp_err_to_name(ret));
             ESP_LOGW(TAG, "Animations will not be loaded from SD card");
+        }
+        
+        // Initialize QMI8658 gyroscope sensor
+        ESP_LOGI(TAG, "Initializing QMI8658 gyroscope sensor...");
+        esp_err_t i2c_ret = I2C_Init(i2c_bus_);
+        if (i2c_ret == ESP_OK) {
+            QMI8658_Init();
+            ESP_LOGI(TAG, "QMI8658 sensor initialized successfully");
+            
+            // Read and log gyroscope data
+            ESP_LOGI(TAG, "Reading gyroscope data...");
+            getGyroscope();
+            ESP_LOGI(TAG, "Gyroscope readings - X: %.3f, Y: %.3f, Z: %.3f", Gyro.x, Gyro.y, Gyro.z);
+            
+            // Also read accelerometer data for completeness
+            getAccelerometer();
+            ESP_LOGI(TAG, "Accelerometer readings - X: %.3f, Y: %.3f, Z: %.3f", Accel.x, Accel.y, Accel.z);
+        } else {
+            ESP_LOGW(TAG, "Failed to initialize I2C for QMI8658: %s", esp_err_to_name(i2c_ret));
+        }
+        
+        // Start periodic sensor reading timer (every 1 second)
+        if (i2c_ret == ESP_OK) {
+            esp_timer_create_args_t timer_args = {
+                .callback = &sensor_timer_callback,
+                .arg = this,
+                .name = "sensor_timer"
+            };
+            
+            esp_err_t timer_ret = esp_timer_create(&timer_args, &sensor_timer_);
+            if (timer_ret == ESP_OK) {
+                esp_timer_start_periodic(sensor_timer_, 1000000); // 1 second in microseconds
+                ESP_LOGI(TAG, "Started periodic sensor reading timer (1 second interval)");
+            } else {
+                ESP_LOGW(TAG, "Failed to create sensor timer: %s", esp_err_to_name(timer_ret));
+            }
+        }
+    }
+    
+    ~CustomBoard() {
+        // Clean up timer if it was created
+        if (sensor_timer_) {
+            esp_timer_stop(sensor_timer_);
+            esp_timer_delete(sensor_timer_);
         }
     }
 

@@ -27,9 +27,11 @@ set(SOURCES "audio_codecs/audio_codec.cc"
             "sd_card.cc"
             "sd_card_startup.cc"
             "main.cc"
+            "../QMI8658/QMI8658.c"
+            "../QMI8658/I2C_Driver.c"
             )
 
-set(INCLUDE_DIRS "." "display" "audio_codecs" "protocols" "audio_processing")
+set(INCLUDE_DIRS "." "display" "audio_codecs" "protocols" "audio_processing" "../QMI8658")
 
 # 添加 IOT 相关文件
 file(GLOB IOT_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/iot/things/*.cc)
