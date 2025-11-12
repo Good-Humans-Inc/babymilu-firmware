@@ -10,6 +10,7 @@
 #include "animation.h"
 #include "sd_card.h"
 #include "sd_card_startup.h"
+#include "scripted_playback.h"
 #include "custom_logging.h"
 #include "animation/animation_updater.h"
 
@@ -56,6 +57,18 @@ extern "C" void app_main(void)
     }
     
     ESP_LOGI(TAG, "=== SD card initialization process completed ===");
+
+    // Initialize scripted playback system
+    ESP_LOGI(TAG, "Initializing scripted playback system...");
+    ret = ScriptedPlayback::Initialize();
+    if (ret == ESP_OK) {
+        ESP_LOGI(TAG, "Scripted playback system initialized");
+        if (ScriptedPlayback::HasScript()) {
+            ESP_LOGI(TAG, "Script file (playback.json) found on SD card - will play on boot button press");
+        }
+    } else {
+        ESP_LOGW(TAG, "Scripted playback initialization failed: %s", esp_err_to_name(ret));
+    }
 
     // Setup custom logging to write ERROR logs to SD card
     ESP_LOGI(TAG, "Setting up custom logging for ERROR logs...");

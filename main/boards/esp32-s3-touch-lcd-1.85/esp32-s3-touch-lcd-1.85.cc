@@ -400,7 +400,7 @@ private:
             if (app.GetDeviceState() == kDeviceStateStarting && !WifiStation::GetInstance().IsConnected()) {
                 self->ResetWifiConfiguration();
             }
-            app.ToggleChatState();
+            app.HandleBootButtonPress();
         }, this);
 
         // Power Button

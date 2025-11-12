@@ -12,6 +12,7 @@
 #include "mcp_server.h"
 #include "audio_debugger.h"
 #include "animation/animation_updater.h"
+#include "scripted_playback.h"
 #include "ssid_manager.h"
 
 #if CONFIG_USE_AUDIO_PROCESSOR
@@ -339,6 +340,24 @@ void Application::ExitAudioTestingMode()
     std::lock_guard<std::mutex> lock(mutex_);
     audio_decode_queue_ = std::move(audio_testing_queue_);
     audio_decode_cv_.notify_all();
+}
+
+void Application::HandleBootButtonPress()
+{
+    // Check if scripted playback is available and not already playing
+    if (ScriptedPlayback::HasScript() && !ScriptedPlayback::IsPlaying()) {
+        ESP_LOGI(TAG, "Script file found, starting scripted playback");
+        esp_err_t ret = ScriptedPlayback::PlayScript();
+        if (ret == ESP_OK) {
+            ESP_LOGI(TAG, "Scripted playback started successfully");
+            return; // Don't toggle chat state when playing script
+        } else {
+            ESP_LOGW(TAG, "Failed to start scripted playback: %s, falling back to normal behavior", esp_err_to_name(ret));
+        }
+    }
+    
+    // Normal behavior: toggle chat state
+    ToggleChatState();
 }
 
 void Application::ToggleChatState()

@@ -271,7 +271,7 @@ private:
                 self->ResetWifiConfiguration();
             }
             self->power_save_timer_->WakeUp();
-            app.ToggleChatState();
+            app.HandleBootButtonPress();
         }, this);
         
         iot_button_register_cb(btns, BUTTON_LONG_PRESS_START, nullptr, [](void* button_handle, void* usr_data) {

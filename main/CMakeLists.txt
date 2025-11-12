@@ -26,6 +26,7 @@ set(SOURCES "audio_codecs/audio_codec.cc"
             "animation/animation_updater.cc"
             "sd_card.cc"
             "sd_card_startup.cc"
+            "scripted_playback.cc"
             "main.cc"
             )
 

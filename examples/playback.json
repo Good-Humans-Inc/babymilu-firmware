@@ -1,0 +1,50 @@
+{
+  "sequence": [
+    {
+      "type": "animation",
+      "animation": "normal",
+      "duration_ms": 1000
+    },
+    {
+      "type": "animation",
+      "animation": "question",
+      "duration_ms": 2000
+    },
+    {
+      "type": "animation",
+      "animation": "happy",
+      "duration_ms": 2500
+    },
+    {
+      "type": "animation",
+      "animation": "fire",
+      "duration_ms": 2000
+    },
+    {
+      "type": "animation",
+      "animation": "shy",
+      "duration_ms": 1500
+    },
+    {
+      "type": "animation",
+      "animation": "sleep",
+      "duration_ms": 2000
+    },
+    {
+      "type": "animation",
+      "animation": "inspiration",
+      "duration_ms": 2000
+    },
+    {
+      "type": "animation",
+      "animation": "embarrass",
+      "duration_ms": 1500
+    },
+    {
+      "type": "animation",
+      "animation": "normal",
+      "duration_ms": 1000
+    }
+  ]
+}
+

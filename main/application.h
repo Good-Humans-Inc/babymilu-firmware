@@ -71,6 +71,7 @@ public:
     void DismissAlert();
     void AbortSpeaking(AbortReason reason);
     void ToggleChatState();
+    void HandleBootButtonPress();
     void StartListening();
     void StopListening();
     void UpdateIotStates();
