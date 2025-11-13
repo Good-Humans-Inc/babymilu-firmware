@@ -12,6 +12,7 @@
 #include "settings.h"
 #include "animation.h"
 #include "board.h"
+#include "overlay_pixels.h"
 
 #define TAG "LcdDisplay"
 
@@ -1065,7 +1066,8 @@ void LcdDisplay::SetEmotion(const char *emotion)
 static lv_image_dsc_t* composed_img_dsc = nullptr;
 static uint8_t* composed_img_data = nullptr;
 
-// Helper function to create composed image with green square overlay (Option 2: Canvas-based)
+// Helper function to create composed image with sparse overlay pixels
+// Only applies to normal2 (frame_index 1) and normal3 (frame_index 2)
 static lv_image_dsc_t* compose_image_with_overlay(const lv_image_dsc_t* base_img, int frame_index) {
     if (base_img == nullptr || base_img->data == nullptr) {
         ESP_LOGE(TAG, "Invalid base image for composition");
@@ -1116,27 +1118,24 @@ static lv_image_dsc_t* compose_image_with_overlay(const lv_image_dsc_t* base_img
     // Copy base image data
     memcpy(composed_img_data, base_img->data, data_size);
     
-    // Draw 100x100 green square in the center
-    // Green color in RGB565: 0x07E0 (0b0000011111100000)
-    uint16_t green_color = 0x07E0; // RGB565 green
-    
-    // Calculate center position
-    int center_x = img_width / 2;
-    int center_y = img_height / 2;
-    int square_size = 100;
-    int start_x = center_x - square_size / 2;
-    int start_y = center_y - square_size / 2;
-    
-    // Draw the green square
-    for (int y = start_y; y < start_y + square_size && y < img_height; y++) {
-        for (int x = start_x; x < start_x + square_size && x < img_width; x++) {
-            if (x >= 0 && y >= 0) {
-                int offset = (y * img_width + x) * 2;
-                if (offset + 1 < (int)data_size) {
-                    composed_img_data[offset] = green_color & 0xFF;
-                    composed_img_data[offset + 1] = (green_color >> 8) & 0xFF;
-                }
-            }
+    // Apply sparse overlay pixels from overlay_pixels.h
+    // Only apply pixels that are within image bounds
+    for (size_t i = 0; i < OVERLAY_PIXEL_COUNT; i++) {
+        uint16_t x = overlay_pixels[i].x;
+        uint16_t y = overlay_pixels[i].y;
+        uint16_t color = overlay_pixels[i].color;
+        
+        // Check bounds
+        if (x >= (uint16_t)img_width || y >= (uint16_t)img_height) {
+            continue; // Skip pixels outside image bounds
+        }
+        
+        // Calculate pixel offset (RGB565: 2 bytes per pixel)
+        int offset = (y * img_width + x) * 2;
+        if (offset + 1 < (int)data_size) {
+            // Write pixel in little-endian format (low byte, then high byte)
+            composed_img_data[offset] = color & 0xFF;
+            composed_img_data[offset + 1] = (color >> 8) & 0xFF;
         }
     }
     
@@ -1145,7 +1144,7 @@ static lv_image_dsc_t* compose_image_with_overlay(const lv_image_dsc_t* base_img
     composed_img_dsc->data_size = data_size;
     composed_img_dsc->data = composed_img_data;
     
-    ESP_LOGD(TAG, "Composed image with green square overlay for frame %d", frame_index);
+    ESP_LOGD(TAG, "Composed image with sparse overlay pixels for frame %d (%zu pixels)", frame_index, OVERLAY_PIXEL_COUNT);
     return composed_img_dsc;
 }
 
@@ -1173,7 +1172,8 @@ void LcdDisplay::SetEmotionImg(const lv_image_dsc_t *img, int frame_index)
         return;
     }
     
-    // For normal2 (frame_index 1) and normal3 (frame_index 2), compose with green square overlay
+    // For normal2 (frame_index 1) and normal3 (frame_index 2), compose with sparse overlay pixels
+    // normal1 (frame_index 0) remains unchanged
     const lv_image_dsc_t* img_to_display = img;
     if (frame_index == 1 || frame_index == 2) {
         lv_image_dsc_t* composed = compose_image_with_overlay(img, frame_index);
