@@ -25,6 +25,7 @@ import os
 import glob
 import struct
 import argparse
+import re
 from pathlib import Path
 from enum import Enum
 
@@ -51,6 +52,46 @@ class ColorFormat(Enum):
     A2 = 0x0C
     A4 = 0x0D
     A8 = 0x0E
+    OVERLAY_PIXELS = 0x4F50584C  # "OPXL" - sparse overlay pixel payload
+
+LVGL_MAGIC = 0x4C56474C
+OVERLAY_ENTRY_SIZE_BYTES = 6  # uint16 x, uint16 y, uint16 color
+
+def get_default_overlay_header_path():
+    """Return default path to overlay_pixels.h relative to repo root."""
+    script_dir = Path(__file__).resolve().parent
+    return script_dir.parent / "main" / "display" / "overlay_pixels.h"
+
+def load_overlay_pixels(header_path):
+    """Parse overlay pixel data from overlay_pixels.h"""
+    path = Path(header_path)
+    if not path.exists():
+        print(f"Warning: Overlay header not found at {path}")
+        return []
+    
+    overlay_pixels = []
+    pattern = re.compile(r"\{(\d+)\s*,\s*(\d+)\s*,\s*(0x[0-9A-Fa-f]+|\d+)\s*\}")
+    
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            for line in f:
+                match = pattern.search(line)
+                if not match:
+                    continue
+                x = int(match.group(1))
+                y = int(match.group(2))
+                color_str = match.group(3)
+                color = int(color_str, 16) if color_str.lower().startswith("0x") else int(color_str)
+                overlay_pixels.append((x, y, color))
+    except Exception as exc:
+        print(f"Warning: Failed to parse overlay header {path}: {exc}")
+        return []
+    
+    if overlay_pixels:
+        print(f"Loaded {len(overlay_pixels)} overlay pixels from {path}")
+    else:
+        print(f"Warning: No overlay pixels found in {path}")
+    return overlay_pixels
 
 class LVGLImage:
     def __init__(self):
@@ -111,12 +152,9 @@ class LVGLImage:
     
     def to_binary_frame(self):
         """Convert to binary frame data (header + pixel data)"""
-        # LVGL magic number
-        magic = 0x4C56474C  # "LVGL" in little endian
-        
         # Pack header
         header = struct.pack('<IIIIII', 
-            magic,                    # magic
+            LVGL_MAGIC,               # magic
             self.color_format.value,  # color_format
             0,                        # flags
             self.width,               # w
@@ -127,16 +165,20 @@ class LVGLImage:
         return header + self.data
 
 class AnimationSet:
-    def __init__(self, name, frame_count, merged_file=None, individual_pattern=None):
+    def __init__(self, name, frame_count, merged_file=None, individual_pattern=None,
+                 min_individual_files=None, overlay_config=None):
         self.name = name
         self.frame_count = frame_count
         self.merged_file = merged_file
         self.individual_pattern = individual_pattern
         self.frames = []
+        self.min_individual_files = min_individual_files if min_individual_files is not None else frame_count
+        self.overlay_config = overlay_config
     
     def load_from_directory(self, input_dir, target_size=(256, 256), force_format=None):
         """Load animation frames from directory"""
         print(f"\n--- Loading {self.name} Animation ({self.frame_count} frames) ---")
+        self.frames = []
         
         # Try merged file first
         if self.merged_file:
@@ -144,7 +186,7 @@ class AnimationSet:
             if os.path.exists(merged_path):
                 print(f"  Found merged file: {self.merged_file}")
                 if self._load_from_merged_file(merged_path):
-                    return True
+                    return self._finalize_load()
                 else:
                     print(f"  Failed to load merged file, trying individual files...")
         
@@ -156,7 +198,12 @@ class AnimationSet:
             
             if len(individual_files) >= self.frame_count:
                 print(f"  Found {len(individual_files)} individual files")
-                return self._load_from_individual_files(individual_files[:self.frame_count], target_size, force_format)
+                if self._load_from_individual_files(individual_files[:self.frame_count], target_size, force_format):
+                    return self._finalize_load()
+            elif len(individual_files) >= self.min_individual_files:
+                print(f"  Found {len(individual_files)} files (minimum required: {self.min_individual_files})")
+                if self._load_from_individual_files(individual_files[:self.min_individual_files], target_size, force_format):
+                    return self._finalize_load()
             else:
                 print(f"  Found only {len(individual_files)} files, need {self.frame_count}")
         
@@ -201,8 +248,94 @@ class AnimationSet:
             print(f"    ❌ Error loading merged file: {e}")
             return False
     
+    def _finalize_load(self):
+        """Apply any post-processing (like overlays) and validate frame count"""
+        if not self._apply_overlay_config():
+            return False
+        
+        if len(self.frames) != self.frame_count:
+            print(f"  ❌ {self.name}: Expected {self.frame_count} frames, got {len(self.frames)}")
+            return False
+        
+        return True
+    
+    def _apply_overlay_config(self):
+        """Apply overlay configuration if provided"""
+        if not self.overlay_config:
+            return True
+        
+        overlay_type = self.overlay_config.get("type")
+        if overlay_type == "overlay_pixels":
+            return self._generate_overlay_frames_from_pixels()
+        
+        print(f"  ⚠️  Unknown overlay type '{overlay_type}' for {self.name}")
+        return False
+    
+    def _generate_overlay_frames_from_pixels(self):
+        """Use sparse overlay pixels to build additional frames"""
+        pixels = self.overlay_config.get("pixels")
+        target_frames = self.overlay_config.get("target_frames", [])
+        base_index = self.overlay_config.get("base_frame_index", 0)
+        
+        if not pixels:
+            print(f"  ⚠️  No overlay pixels provided for {self.name}")
+            return False
+        
+        if not target_frames:
+            print(f"  ⚠️  No target frames specified for {self.name} overlay")
+            return False
+        
+        if base_index >= len(self.frames):
+            print(f"  ⚠️  Base frame index {base_index} unavailable for {self.name}")
+            return False
+        
+        base_frame = self.frames[base_index]
+        if len(base_frame) < 24:
+            print(f"  ⚠️  Base frame data too small for {self.name}")
+            return False
+        
+        _, cf, _, width, height, stride = struct.unpack('<IIIIII', base_frame[:24])
+        
+        if cf != ColorFormat.RGB565.value:
+            print(f"  ⚠️  Unsupported color format {cf} for overlay in {self.name}")
+            return False
+        
+        if width == 0 or height == 0 or stride == 0:
+            print(f"  ⚠️  Invalid dimensions ({width}x{height}) for {self.name}")
+            return False
+        
+        for frame_idx in target_frames:
+            entry_count = 0
+            overlay_payload = bytearray()
+            
+            for x, y, color in pixels:
+                if x >= width or y >= height:
+                    continue
+                overlay_payload.extend(struct.pack('<HHH', x, y, color & 0xFFFF))
+                entry_count += 1
+            
+            stride_bytes = entry_count * OVERLAY_ENTRY_SIZE_BYTES
+            overlay_header = struct.pack(
+                '<IIIIII',
+                LVGL_MAGIC,
+                ColorFormat.OVERLAY_PIXELS.value,
+                frame_idx,               # flags: target frame index for reference
+                entry_count,             # width field repurposed for entry count
+                1,                       # height set to 1 (not used)
+                stride_bytes             # stride stores total payload bytes
+            )
+            
+            while len(self.frames) <= frame_idx:
+                self.frames.append(None)
+            
+            self.frames[frame_idx] = overlay_header + bytes(overlay_payload)
+            print(f"    ✅ Stored {entry_count} sparse overlay pixels for frame {frame_idx}")
+        
+        return True
+    
     def _load_from_individual_files(self, file_paths, target_size, force_format):
         """Load frames from individual image files"""
+        initial_count = len(self.frames)
         for i, file_path in enumerate(file_paths):
             print(f"  Processing frame {i}: {os.path.basename(file_path)}")
             
@@ -222,13 +355,15 @@ class AnimationSet:
                 print(f"    ❌ Error processing {file_path}: {e}")
                 return False
         
-        return len(self.frames) == self.frame_count
+        expected_total = initial_count + len(file_paths)
+        return len(self.frames) == expected_total
     
     def get_total_size(self):
         """Get total size of all frames"""
         return sum(len(frame) for frame in self.frames)
 
-def create_mega_animations(input_dir, output_file, target_size=(256, 256), force_format=None):
+def create_mega_animations(input_dir, output_file, target_size=(256, 256), force_format=None,
+                           overlay_pixels=None):
     """Create mega animation file with all animations"""
     
     print("=== Creating Mega Animation File ===")
@@ -236,9 +371,29 @@ def create_mega_animations(input_dir, output_file, target_size=(256, 256), force
     print(f"Output file: {output_file}")
     print(f"Target size: {target_size[0]}x{target_size[1]}")
     
+    # Configure normal animation overlay usage if pixels are provided
+    normal_overlay_config = None
+    normal_min_files = 3
+    if overlay_pixels:
+        normal_overlay_config = {
+            "type": "overlay_pixels",
+            "pixels": overlay_pixels,
+            "base_frame_index": 0,
+            "target_frames": [1, 2],
+        }
+        normal_min_files = 1
+        print("Normal animation will reuse base frame with overlay pixels for frames 2 and 3")
+    
     # Define all animation sets
     animation_sets = [
-        AnimationSet("Normal", 3, merged_file="normal_all.bin", individual_pattern="normal*.jpg"),
+        AnimationSet(
+            "Normal",
+            3,
+            merged_file="normal_all.bin",
+            individual_pattern="normal*.jpg",
+            min_individual_files=normal_min_files,
+            overlay_config=normal_overlay_config,
+        ),
         AnimationSet("Embarrass", 3, individual_pattern="embarrass*.jpg"),
         AnimationSet("Fire", 4, individual_pattern="fire*.jpg"),
         AnimationSet("Happy", 4, individual_pattern="happy*.jpg"),
@@ -324,6 +479,10 @@ Examples:
                        help='Target image size (default: 256 256)')
     parser.add_argument('--format', choices=['RGB565', 'RGB565A8', 'RGB888', 'ARGB8888'], 
                        help='Force color format (auto-detect if not specified)')
+    parser.add_argument('--overlay-header',
+                        default=str(get_default_overlay_header_path()),
+                        help='Path to overlay_pixels.h for deriving Normal frame overlays (default: %(default)s). '
+                             'Set to "none" to disable overlay-based frames.')
     
     return parser.parse_args()
 
@@ -348,12 +507,22 @@ def main():
     else:
         print("Using automatic color format detection")
     
+    # Load overlay pixels if requested
+    overlay_pixels = None
+    if args.overlay_header and args.overlay_header.lower() != "none":
+        overlay_pixels = load_overlay_pixels(args.overlay_header)
+        if not overlay_pixels:
+            overlay_pixels = None
+    else:
+        print("Overlay-based frame generation disabled by user request")
+    
     # Create mega animations
     success = create_mega_animations(
         args.input_dir, 
         args.output_file, 
         target_size=tuple(args.size),
-        force_format=force_format
+        force_format=force_format,
+        overlay_pixels=overlay_pixels
     )
     
     if success:

@@ -8,9 +8,8 @@
 #include "application.h"
 #include "system_info.h"
 #include "animation.h"
-// COMMENTED OUT: SD card includes - no longer needed for SPIFFS-only animations
-// #include "sd_card.h"
-// #include "sd_card_startup.h"
+#include "sd_card.h"
+#include "sd_card_startup.h"
 
 #define TAG "main"
 
@@ -33,34 +32,31 @@ extern "C" void app_main(void)
     ESP_ERROR_CHECK(ret);
     ESP_LOGI(TAG, "NVS flash initialized successfully");
 
-    // COMMENTED OUT: SD card initialization - no longer needed for SPIFFS-only animations
-    // ESP_LOGI(TAG, "=== Starting SD card initialization process ===");
-    // 
-    // // Process SD card startup (initialize, read test.bin, keep mounted for animations)
-    // ESP_LOGI(TAG, "Processing SD card startup...");
-    // ret = SdCardStartup::ProcessStartup();
-    // ESP_LOGI(TAG, "SdCardStartup::ProcessStartup() returned: %s", esp_err_to_name(ret));
-    // 
-    // if (ret == ESP_OK) {
-    //     const std::string& hello_content = SdCardStartup::GetHelloContent();
-    //     if (!hello_content.empty()) {
-    //         ESP_LOGI(TAG, "SD card file read successfully (%zu bytes)", hello_content.size());
-    //         ESP_LOGI(TAG, "Content length: %zu", hello_content.length());
-    //     } else {
-    //         ESP_LOGI(TAG, "SD card processed but content is empty");
-    //     }
-    //     ESP_LOGI(TAG, "SD card initialized and ready for animation loading");
-    // } else {
-    //     ESP_LOGW(TAG, "SD card startup failed: %s", esp_err_to_name(ret));
-    //     ESP_LOGW(TAG, "Will fall back to SPIFFS animations");
-    // }
-    // 
-    // ESP_LOGI(TAG, "=== SD card initialization process completed ===");
-
-    ESP_LOGI(TAG, "=== Skipping SD card initialization - using SPIFFS-only animations ===");
+    ESP_LOGI(TAG, "=== Starting SD card initialization process ===");
+    
+    // Process SD card startup (initialize, optional test read, keep mounted for animations)
+    ESP_LOGI(TAG, "Processing SD card startup...");
+    ret = SdCardStartup::ProcessStartup();
+    ESP_LOGI(TAG, "SdCardStartup::ProcessStartup() returned: %s", esp_err_to_name(ret));
+    
+    if (ret == ESP_OK) {
+        const std::string& hello_content = SdCardStartup::GetHelloContent();
+        if (!hello_content.empty()) {
+            ESP_LOGI(TAG, "SD card file read successfully (%zu bytes)", hello_content.size());
+            ESP_LOGI(TAG, "Content length: %zu", hello_content.length());
+        } else {
+            ESP_LOGI(TAG, "SD card processed but content is empty");
+        }
+        ESP_LOGI(TAG, "SD card initialized and ready for animation loading");
+    } else {
+        ESP_LOGW(TAG, "SD card startup failed: %s", esp_err_to_name(ret));
+        ESP_LOGW(TAG, "Will fall back to SPIFFS animations if SD unavailable");
+    }
+    
+    ESP_LOGI(TAG, "=== SD card initialization process completed ===");
 
     // NOTE: animation_init_spiffs() is now called from SensecapWatcher constructor
-    // after SD card initialization to ensure proper timing
+    // after SD card (if available) initialization to ensure proper timing
 
     // Launch the application
     ESP_LOGI(TAG, "Launching Application::GetInstance().Start()...");

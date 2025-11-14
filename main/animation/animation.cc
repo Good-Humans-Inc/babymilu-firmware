@@ -21,6 +21,59 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include <errno.h>
+
+static constexpr uint32_t LV_IMAGE_CF_OVERLAY_PIXELS = 0x4F50584C; // "OPXL"
+static constexpr size_t NORMAL_OVERLAY_FRAME_COUNT = 2;
+
+static animation_overlay_pixel_t* normal_overlay_pixels_runtime[NORMAL_OVERLAY_FRAME_COUNT] = {nullptr, nullptr};
+static size_t normal_overlay_pixel_counts[NORMAL_OVERLAY_FRAME_COUNT] = {0, 0};
+static animation_overlay_frame_t normal_overlay_frame_views[NORMAL_OVERLAY_FRAME_COUNT] = {};
+
+static_assert(sizeof(animation_overlay_pixel_t) == 6, "animation_overlay_pixel_t must remain 6 bytes");
+
+static void animation_clear_normal_overlay_frames(void)
+{
+    for (size_t i = 0; i < NORMAL_OVERLAY_FRAME_COUNT; ++i) {
+        if (normal_overlay_pixels_runtime[i] != nullptr) {
+            free(normal_overlay_pixels_runtime[i]);
+            normal_overlay_pixels_runtime[i] = nullptr;
+        }
+        normal_overlay_pixel_counts[i] = 0;
+        normal_overlay_frame_views[i].pixels = nullptr;
+        normal_overlay_frame_views[i].count = 0;
+    }
+}
+
+static bool animation_set_normal_overlay_frame(int frame_index, animation_overlay_pixel_t* pixels, size_t count)
+{
+    if (frame_index < 1 || frame_index > 2) {
+        if (pixels != nullptr) {
+            free(pixels);
+        }
+        return false;
+    }
+    
+    size_t idx = static_cast<size_t>(frame_index - 1);
+    if (normal_overlay_pixels_runtime[idx] != nullptr) {
+        free(normal_overlay_pixels_runtime[idx]);
+    }
+    
+    normal_overlay_pixels_runtime[idx] = pixels;
+    normal_overlay_pixel_counts[idx] = count;
+    return true;
+}
+
+const animation_overlay_frame_t* animation_get_normal_overlay_frame(int frame_index)
+{
+    if (frame_index < 1 || frame_index > 2) {
+        return nullptr;
+    }
+    
+    size_t idx = static_cast<size_t>(frame_index - 1);
+    normal_overlay_frame_views[idx].pixels = normal_overlay_pixels_runtime[idx];
+    normal_overlay_frame_views[idx].count = normal_overlay_pixel_counts[idx];
+    return &normal_overlay_frame_views[idx];
+}
 // extern const lv_image_dsc_t embarrass1;
 // extern const lv_image_dsc_t embarrass2;
 // extern const lv_image_dsc_t embarrass3;
@@ -449,19 +502,19 @@ void animation_load_spiffs_animations(void)
         return; // Success! No need to load individual animations
     }
     
-    // COMMENTED OUT: Try to load ALL animations from SD card
-    // ESP_LOGI("animation", "Attempting to load ALL animations from SD card...");
-    // 
-    // // Debug SD card status before attempting to load
-    // SdCard::DebugStatus();
-    // 
-    // if (animation_load_all_from_sd_card()) {
-    //     ESP_LOGI("animation", "🎉 Successfully loaded ALL animations from SD card!");
-    //     ESP_LOGI("animation", "   - All 8 animation types loaded in one operation");
-    //     ESP_LOGI("animation", "   - Total of 28 frames loaded from test.bin on SD card");
-    //     ESP_LOGI("animation", "   - Ultimate optimization achieved!");
-    //     return; // Success! No need to load individual animations
-    // }
+    // Try to load ALL animations from SD card as fallback
+    ESP_LOGI("animation", "Attempting to load ALL animations from SD card...");
+    
+    // Debug SD card status before attempting to load
+    SdCard::DebugStatus();
+    
+    if (animation_load_all_from_sd_card()) {
+        ESP_LOGI("animation", "🎉 Successfully loaded ALL animations from SD card!");
+        ESP_LOGI("animation", "   - All 8 animation types loaded in one operation");
+        ESP_LOGI("animation", "   - Total of 28 frames loaded from animations_mega.bin on SD card");
+        ESP_LOGI("animation", "   - Ultimate optimization achieved!");
+        return; // Success! No need to load individual animations
+    }
     
     // Fall back to individual animation loading from SPIFFS
     ESP_LOGI("animation", "Mega file not found, loading individual animations from SPIFFS...");
@@ -1411,6 +1464,8 @@ bool animation_load_all_from_mega_file(void)
     int current_frame = 0;
     bool success = true;
     
+    animation_clear_normal_overlay_frames();
+    
     for (int anim_idx = 0; anim_idx < 8 && success; anim_idx++) {
         int frame_count = animation_frame_counts[anim_idx];
         Animation_t* anim = animations[anim_idx];
@@ -1453,19 +1508,93 @@ bool animation_load_all_from_mega_file(void)
             uint32_t height = header_data[4];
             uint32_t stride = header_data[5];
             size_t data_size = height * stride;
+            bool is_overlay_frame = is_normal_animation && (frame_idx > 0) && (header_data[1] == LV_IMAGE_CF_OVERLAY_PIXELS);
             
-            // For normal animation: reuse normal1's descriptor for normal2 and normal3 (Option 2: Canvas-based approach)
+            if (is_overlay_frame) {
+                uint32_t entry_count = width; // width field reused to store entry count
+                
+                animation_overlay_pixel_t* overlay_pixels = nullptr;
+                if (entry_count > 0) {
+                    size_t expected_size = entry_count * sizeof(animation_overlay_pixel_t);
+                    if (expected_size != data_size) {
+                        ESP_LOGW("animation", "Overlay payload size mismatch for frame %d (entries=%u, expected=%zu, actual=%zu)",
+                                 current_frame, entry_count, expected_size, data_size);
+                    }
+                }
+                
+                if (entry_count > 0) {
+                    overlay_pixels = (animation_overlay_pixel_t*)malloc(entry_count * sizeof(animation_overlay_pixel_t));
+                    if (overlay_pixels == nullptr) {
+                        ESP_LOGE("animation", "Failed to allocate memory for overlay pixels (frame %d, count=%u)", current_frame, entry_count);
+                        success = false;
+                        break;
+                    }
+                    
+                    for (uint32_t i = 0; i < entry_count; ++i) {
+                        uint16_t components[3];
+                        if (fread(components, sizeof(uint16_t), 3, f) != 3) {
+                            ESP_LOGE("animation", "Failed to read overlay pixel %u for frame %d", i, current_frame);
+                            free(overlay_pixels);
+                            success = false;
+                            break;
+                        }
+                        overlay_pixels[i].x = components[0];
+                        overlay_pixels[i].y = components[1];
+                        overlay_pixels[i].color = components[2];
+                    }
+                    
+                    if (!success) {
+                        break;
+                    }
+                    
+                    size_t consumed = entry_count * sizeof(animation_overlay_pixel_t);
+                    if (data_size > consumed) {
+                        size_t remaining = data_size - consumed;
+                        if (fseek(f, remaining, SEEK_CUR) != 0) {
+                            ESP_LOGE("animation", "Failed to skip overlay padding for frame %d", current_frame);
+                            free(overlay_pixels);
+                            success = false;
+                            break;
+                        }
+                    }
+                } else if (data_size > 0) {
+                    if (fseek(f, data_size, SEEK_CUR) != 0) {
+                        ESP_LOGE("animation", "Failed to skip overlay payload for frame %d", current_frame);
+                        success = false;
+                        break;
+                    }
+                }
+                
+                if (!animation_set_normal_overlay_frame(frame_idx, overlay_pixels, entry_count)) {
+                    ESP_LOGE("animation", "Failed to store overlay pixels for frame %d", current_frame);
+                    if (overlay_pixels != nullptr) {
+                        free(overlay_pixels);
+                    }
+                    success = false;
+                    break;
+                }
+                
+                if (normal1_base_frame == nullptr) {
+                    ESP_LOGE("animation", "Overlay frame %d encountered before base normal frame loaded", frame_idx);
+                    success = false;
+                    break;
+                }
+                
+                anim->spiffs_imgs[frame_idx] = normal1_base_frame;
+                ESP_LOGI("animation", "Loaded %u sparse overlay pixels for normal%d (frame %d)", entry_count, frame_idx + 1, current_frame);
+                current_frame++;
+                continue;
+            }
+            
+            // For normal animation (legacy mega files): reuse normal1's descriptor for normal2 and normal3
             if (is_normal_animation && frame_idx > 0) {
-                // Skip loading data for normal2 and normal3, just advance file position
                 if (fseek(f, data_size, SEEK_CUR) != 0) {
                     ESP_LOGE("animation", "Failed to skip pixel data for frame %d", current_frame);
                     success = false;
                     break;
                 }
                 
-                // Reuse normal1's image descriptor (no cloning, just pointer reuse)
                 anim->spiffs_imgs[frame_idx] = normal1_base_frame;
-                
                 ESP_LOGI("animation", "Reusing normal1's image descriptor for normal%d (frame %d)", frame_idx + 1, current_frame);
                 current_frame++;
                 continue;
@@ -1538,6 +1667,7 @@ bool animation_load_all_from_mega_file(void)
         return true;
     } else {
         ESP_LOGE("animation", "❌ Failed to load animations from mega file");
+        animation_clear_normal_overlay_frames();
         
         // Clean up on failure
         for (int i = 0; i < total_frames; i++) {
@@ -1920,6 +2050,8 @@ bool animation_load_all_from_sd_card(void)
     ESP_LOGI("animation", "✅ SD card is mounted, proceeding with animation loading...");
     ESP_LOGI("animation", "Attempting to load ALL animations from SD card mega file...");
     
+    animation_clear_normal_overlay_frames();
+    
     // First, let's list what files are actually on the SD card
     ESP_LOGI("animation", "Listing files on SD card to debug...");
     DIR* dir = opendir("/sdcard");
@@ -2105,19 +2237,92 @@ bool animation_load_all_from_sd_card(void)
             uint32_t height = header_data[4];
             uint32_t stride = header_data[5];
             size_t data_size = height * stride;
+            bool is_overlay_frame = is_normal_animation && (frame_idx > 0) && (header_data[1] == LV_IMAGE_CF_OVERLAY_PIXELS);
             
-            // For normal animation: reuse normal1's descriptor for normal2 and normal3 (Option 2: Canvas-based approach)
+            if (is_overlay_frame) {
+                uint32_t entry_count = width;
+                
+                animation_overlay_pixel_t* overlay_pixels = nullptr;
+                if (entry_count > 0) {
+                    size_t expected_size = entry_count * sizeof(animation_overlay_pixel_t);
+                    if (expected_size != data_size) {
+                        ESP_LOGW("animation", "Overlay payload size mismatch for SD frame %d (entries=%u, expected=%zu, actual=%zu)",
+                                 current_frame, entry_count, expected_size, data_size);
+                    }
+                }
+                
+                if (entry_count > 0) {
+                    overlay_pixels = (animation_overlay_pixel_t*)malloc(entry_count * sizeof(animation_overlay_pixel_t));
+                    if (overlay_pixels == nullptr) {
+                        ESP_LOGE("animation", "Failed to allocate memory for SD overlay pixels (frame %d, count=%u)", current_frame, entry_count);
+                        success = false;
+                        break;
+                    }
+                    
+                    for (uint32_t i = 0; i < entry_count; ++i) {
+                        uint16_t components[3];
+                        if (fread(components, sizeof(uint16_t), 3, f) != 3) {
+                            ESP_LOGE("animation", "Failed to read SD overlay pixel %u for frame %d", i, current_frame);
+                            free(overlay_pixels);
+                            success = false;
+                            break;
+                        }
+                        overlay_pixels[i].x = components[0];
+                        overlay_pixels[i].y = components[1];
+                        overlay_pixels[i].color = components[2];
+                    }
+                    
+                    if (!success) {
+                        break;
+                    }
+                    
+                    size_t consumed = entry_count * sizeof(animation_overlay_pixel_t);
+                    if (data_size > consumed) {
+                        size_t remaining = data_size - consumed;
+                        if (fseek(f, remaining, SEEK_CUR) != 0) {
+                            ESP_LOGE("animation", "Failed to skip SD overlay padding for frame %d", current_frame);
+                            free(overlay_pixels);
+                            success = false;
+                            break;
+                        }
+                    }
+                } else if (data_size > 0) {
+                    if (fseek(f, data_size, SEEK_CUR) != 0) {
+                        ESP_LOGE("animation", "Failed to skip SD overlay payload for frame %d", current_frame);
+                        success = false;
+                        break;
+                    }
+                }
+                
+                if (!animation_set_normal_overlay_frame(frame_idx, overlay_pixels, entry_count)) {
+                    ESP_LOGE("animation", "Failed to store SD overlay pixels for frame %d", current_frame);
+                    if (overlay_pixels != nullptr) {
+                        free(overlay_pixels);
+                    }
+                    success = false;
+                    break;
+                }
+                
+                if (normal1_base_frame == nullptr) {
+                    ESP_LOGE("animation", "SD overlay frame %d encountered before base normal frame loaded", frame_idx);
+                    success = false;
+                    break;
+                }
+                
+                anim->spiffs_imgs[frame_idx] = normal1_base_frame;
+                ESP_LOGI("animation", "Loaded %u sparse SD overlay pixels for normal%d (frame %d)", entry_count, frame_idx + 1, current_frame);
+                current_frame++;
+                continue;
+            }
+            
             if (is_normal_animation && frame_idx > 0) {
-                // Skip loading data for normal2 and normal3, just advance file position
                 if (fseek(f, data_size, SEEK_CUR) != 0) {
                     ESP_LOGE("animation", "Failed to skip pixel data for frame %d", current_frame);
                     success = false;
                     break;
                 }
                 
-                // Reuse normal1's image descriptor (no cloning, just pointer reuse)
                 anim->spiffs_imgs[frame_idx] = normal1_base_frame;
-                
                 ESP_LOGI("animation", "Reusing normal1's image descriptor for normal%d (frame %d)", frame_idx + 1, current_frame);
                 current_frame++;
                 continue;
@@ -2190,6 +2395,7 @@ bool animation_load_all_from_sd_card(void)
         return true;
     } else {
         ESP_LOGE("animation", "❌ Failed to load animations from SD card mega file");
+        animation_clear_normal_overlay_frames();
         
         // Clean up on failure
         for (int i = 0; i < total_frames; i++) {

@@ -1118,12 +1118,25 @@ static lv_image_dsc_t* compose_image_with_overlay(const lv_image_dsc_t* base_img
     // Copy base image data
     memcpy(composed_img_data, base_img->data, data_size);
     
-    // Apply sparse overlay pixels from overlay_pixels.h
-    // Only apply pixels that are within image bounds
-    for (size_t i = 0; i < OVERLAY_PIXEL_COUNT; i++) {
-        uint16_t x = overlay_pixels[i].x;
-        uint16_t y = overlay_pixels[i].y;
-        uint16_t color = overlay_pixels[i].color;
+    const animation_overlay_frame_t* runtime_overlay = animation_get_normal_overlay_frame(frame_index);
+    const animation_overlay_pixel_t* overlay_list = nullptr;
+    size_t overlay_count = 0;
+    
+    if (runtime_overlay != nullptr && runtime_overlay->pixels != nullptr && runtime_overlay->count > 0) {
+        overlay_list = runtime_overlay->pixels;
+        overlay_count = runtime_overlay->count;
+        ESP_LOGD(TAG, "Using %zu runtime overlay pixels for frame %d", overlay_count, frame_index);
+    } else {
+        overlay_list = reinterpret_cast<const animation_overlay_pixel_t*>(overlay_pixels);
+        overlay_count = OVERLAY_PIXEL_COUNT;
+        ESP_LOGD(TAG, "Runtime overlay not available, falling back to static overlay (%zu pixels)", overlay_count);
+    }
+    
+    // Apply sparse overlay pixels (runtime or fallback) within image bounds
+    for (size_t i = 0; i < overlay_count; i++) {
+        uint16_t x = overlay_list[i].x;
+        uint16_t y = overlay_list[i].y;
+        uint16_t color = overlay_list[i].color;
         
         // Check bounds
         if (x >= (uint16_t)img_width || y >= (uint16_t)img_height) {
@@ -1144,7 +1157,7 @@ static lv_image_dsc_t* compose_image_with_overlay(const lv_image_dsc_t* base_img
     composed_img_dsc->data_size = data_size;
     composed_img_dsc->data = composed_img_data;
     
-    ESP_LOGD(TAG, "Composed image with sparse overlay pixels for frame %d (%zu pixels)", frame_index, OVERLAY_PIXEL_COUNT);
+    ESP_LOGD(TAG, "Composed image with sparse overlay pixels for frame %d (%zu pixels)", frame_index, overlay_count);
     return composed_img_dsc;
 }
 

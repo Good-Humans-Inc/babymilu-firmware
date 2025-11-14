@@ -1,6 +1,7 @@
 #pragma once
 #include "lvgl.h"
 #include <stdbool.h>
+#include <stddef.h>
 
 typedef struct _Animation_t{
     const lv_image_dsc_t **imges;
@@ -65,3 +66,16 @@ bool animation_load_inspiration_from_sd_card(void);
 bool animation_load_question_from_sd_card(void);
 bool animation_load_shy_from_sd_card(void);
 bool animation_load_sleep_from_sd_card(void);
+
+typedef struct {
+    uint16_t x;
+    uint16_t y;
+    uint16_t color;
+} animation_overlay_pixel_t;
+
+typedef struct {
+    const animation_overlay_pixel_t* pixels;
+    size_t count;
+} animation_overlay_frame_t;
+
+const animation_overlay_frame_t* animation_get_normal_overlay_frame(int frame_index);
