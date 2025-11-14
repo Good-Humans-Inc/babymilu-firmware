@@ -90,7 +90,14 @@ void plat_animation_task(void *arg)
         // Check for NULL animation to prevent crashes
         if (current_anim == NULL) {
             ESP_LOGW("plat_animation_task", "Animation %d is not available, skipping frame", now_animation);
-            vTaskDelay(pdMS_TO_TICKS(500));
+            vTaskDelay(pdMS_TO_TICKS(1000));  // Longer delay when no animation
+            continue;
+        }
+        
+        // Check if animation has valid data
+        if (current_anim->imges == NULL || current_anim->animations == NULL || current_anim->len <= 0) {
+            ESP_LOGW("plat_animation_task", "Animation %d has invalid data, skipping", now_animation);
+            vTaskDelay(pdMS_TO_TICKS(1000));  // Longer delay when invalid
             continue;
         }
         
@@ -98,21 +105,43 @@ void plat_animation_task(void *arg)
         {
             pos = 0;
         }
-        display->SetEmotionImg(current_anim->imges[current_anim->animations[pos]]);
+        
+        // Additional safety check before accessing array
+        if (pos < 0 || pos >= current_anim->len) {
+            ESP_LOGE("plat_animation_task", "Invalid pos %d for animation len %d, resetting", pos, current_anim->len);
+            pos = 0;
+        }
+        
+        const lv_image_dsc_t* img = current_anim->imges[current_anim->animations[pos]];
+        if (img != NULL) {
+            display->SetEmotionImg(img);
+        } else {
+            ESP_LOGW("plat_animation_task", "Image at pos %d is NULL, skipping", pos);
+        }
         vTaskDelay(pdMS_TO_TICKS(500));
     }
 }
 
 void animation_set_now_animation(int animation)
 {
-    if (animation_task_handle == nullptr)
-    {
-        xTaskCreatePinnedToCore(plat_animation_task, "plat_animation_task", 2048, nullptr, 4, &animation_task_handle, 0);
-    }
     if (animation < 0 || animation >= ANIMATION_NUM)
     {
         ESP_LOGW("animation_set_now_animation", "Invalid animation index: %d, using neutral", animation);
         animation = ANIMATION_STATIC_NORMAL;
+    }
+    
+    // Check if animation is available before starting task
+    Animation_t* anim = get_animation(animation);
+    if (anim == NULL || anim->imges == NULL || anim->len <= 0) {
+        ESP_LOGW("animation_set_now_animation", "Animation %d is not available, not starting task", animation);
+        // Don't start task if no valid animation
+        return;
+    }
+    
+    if (animation_task_handle == nullptr)
+    {
+        // Increased stack size from 2048 to 4096 to prevent stack overflow
+        xTaskCreatePinnedToCore(plat_animation_task, "plat_animation_task", 4096, nullptr, 4, &animation_task_handle, 0);
     }
     
     ESP_LOGI("animation_set_now_animation", "Set now animation: %d", animation);

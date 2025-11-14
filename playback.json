@@ -1,0 +1,15 @@
+{
+  "type": "video",
+  "video": {
+    "frame_directory": "frames",
+    "frame_prefix": "frame_",
+    "frame_format": "jpg",
+    "frame_count": 124,
+    "fps": 10
+  },
+  "audio": {
+    "file": "audio.wav",
+    "sync": true
+  }
+}
+

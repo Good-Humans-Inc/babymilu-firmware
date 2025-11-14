@@ -344,8 +344,15 @@ void Application::ExitAudioTestingMode()
 
 void Application::HandleBootButtonPress()
 {
+    ESP_LOGI(TAG, "Boot button pressed - checking for scripted playback");
+    
     // Check if scripted playback is available and not already playing
-    if (ScriptedPlayback::HasScript() && !ScriptedPlayback::IsPlaying()) {
+    bool has_script = ScriptedPlayback::HasScript();
+    bool is_playing = ScriptedPlayback::IsPlaying();
+    
+    ESP_LOGI(TAG, "Script check: has_script=%d, is_playing=%d", has_script, is_playing);
+    
+    if (has_script && !is_playing) {
         ESP_LOGI(TAG, "Script file found, starting scripted playback");
         esp_err_t ret = ScriptedPlayback::PlayScript();
         if (ret == ESP_OK) {
@@ -353,6 +360,12 @@ void Application::HandleBootButtonPress()
             return; // Don't toggle chat state when playing script
         } else {
             ESP_LOGW(TAG, "Failed to start scripted playback: %s, falling back to normal behavior", esp_err_to_name(ret));
+        }
+    } else {
+        if (!has_script) {
+            ESP_LOGI(TAG, "No script file found, using normal boot button behavior");
+        } else {
+            ESP_LOGI(TAG, "Script already playing, using normal boot button behavior");
         }
     }
     

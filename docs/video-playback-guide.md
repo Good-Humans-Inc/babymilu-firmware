@@ -2,6 +2,8 @@
 
 This guide explains how to play full video files (with audio) on your ESP32-S3 device using the scripted playback system.
 
+> **Windows Users**: See [Windows Video Setup Guide](windows-video-setup-guide.md) for step-by-step Windows instructions.
+
 ## Overview
 
 Since ESP32-S3 doesn't support standard video formats (MP4, AVI, MOV, etc.) directly, we use a **frame sequence + audio** approach:

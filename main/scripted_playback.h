@@ -91,6 +91,7 @@ private:
 
     static bool s_is_playing;
     static void PlaybackTask(void* arg);
+    static void VideoPlaybackTask(void* arg);
     static int GetAnimationIndex(const std::string& animation_name);
 };
 

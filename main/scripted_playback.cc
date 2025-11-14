@@ -7,10 +7,16 @@
 #include <esp_log.h>
 #include <cJSON.h>
 #include <sys/stat.h>
+#include <dirent.h>
 #include <vector>
 #include <string>
+#include <algorithm>
+#include <cctype>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <esp_jpeg_dec.h>
+#include <esp_heap_caps.h>
+#include <cstring>
 
 #define TAG "ScriptedPlayback"
 #define MOUNT_POINT "/sdcard"
@@ -25,19 +31,97 @@ esp_err_t ScriptedPlayback::Initialize()
 
 bool ScriptedPlayback::HasScript(const std::string& script_filename)
 {
+    ESP_LOGI(TAG, "Checking for script file: %s", script_filename.c_str());
+    
     if (!SdCard::IsMounted()) {
-        ESP_LOGD(TAG, "SD card not mounted");
+        ESP_LOGW(TAG, "SD card not mounted");
         return false;
     }
 
+    // Check for exact filename first
     std::string full_path = std::string(MOUNT_POINT) + "/" + script_filename;
     struct stat st;
     if (stat(full_path.c_str(), &st) == 0) {
-        ESP_LOGI(TAG, "Script file found: %s", full_path.c_str());
+        ESP_LOGI(TAG, "✅ Script file found: %s (%ld bytes)", full_path.c_str(), st.st_size);
         return true;
     }
     
-    ESP_LOGD(TAG, "Script file not found: %s", full_path.c_str());
+    // Also check for common variations (case-insensitive, .txt extension)
+    std::string alt_filename = script_filename;
+    // Replace .json with .txt (Windows sometimes saves as .txt)
+    size_t pos = alt_filename.find(".json");
+    if (pos != std::string::npos) {
+        alt_filename.replace(pos, 5, ".txt");
+        std::string alt_path = std::string(MOUNT_POINT) + "/" + alt_filename;
+        if (stat(alt_path.c_str(), &st) == 0) {
+            ESP_LOGI(TAG, "✅ Script file found (as .txt): %s (%ld bytes)", alt_path.c_str(), st.st_size);
+            return true;
+        }
+    }
+    
+    // Check for uppercase version
+    std::string upper_filename = script_filename;
+    std::transform(upper_filename.begin(), upper_filename.end(), upper_filename.begin(), ::toupper);
+    std::string upper_path = std::string(MOUNT_POINT) + "/" + upper_filename;
+    if (stat(upper_path.c_str(), &st) == 0) {
+        ESP_LOGI(TAG, "✅ Script file found (uppercase): %s (%ld bytes)", upper_path.c_str(), st.st_size);
+        return true;
+    }
+    
+    // Check for playback.json.txt (Windows sometimes adds .txt extension)
+    std::string json_txt_path = std::string(MOUNT_POINT) + "/playback.json.txt";
+    if (stat(json_txt_path.c_str(), &st) == 0) {
+        ESP_LOGI(TAG, "✅ Script file found (as .json.txt): %s (%ld bytes)", json_txt_path.c_str(), st.st_size);
+        return true;
+    }
+    
+    // Search for files matching the pattern (handles Windows short filenames like PLAYBA~1.TXT)
+    ESP_LOGI(TAG, "Searching SD card for script files...");
+    DIR* dir = opendir(MOUNT_POINT);
+    std::string found_script_file;
+    if (dir != NULL) {
+        struct dirent* entry;
+        while ((entry = readdir(dir)) != NULL) {
+            if (entry->d_type == DT_REG) {
+                std::string filename = entry->d_name;
+                std::string lower_filename = filename;
+                std::transform(lower_filename.begin(), lower_filename.end(), lower_filename.begin(), ::tolower);
+                
+                // Check if filename contains "play" and ends with .txt, .json, or is a short filename
+                bool has_play = (lower_filename.find("play") != std::string::npos);
+                bool is_json_or_txt = (lower_filename.find(".json") != std::string::npos || 
+                                       lower_filename.find(".txt") != std::string::npos);
+                bool is_short_name = (filename.length() <= 12 && filename.find("~") != std::string::npos);
+                
+                if (has_play && (is_json_or_txt || is_short_name)) {
+                    char file_path[512];
+                    int written = snprintf(file_path, sizeof(file_path), "%s/%s", MOUNT_POINT, entry->d_name);
+                    if (written >= 0 && written < (int)sizeof(file_path)) {
+                        struct stat file_st;
+                        if (stat(file_path, &file_st) == 0) {
+                            ESP_LOGI(TAG, "  Found potential script file: %s (%ld bytes)", entry->d_name, file_st.st_size);
+                            // Use the first matching file we find
+                            if (found_script_file.empty()) {
+                                found_script_file = entry->d_name;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        closedir(dir);
+    }
+    
+    // If we found a matching file, accept it
+    if (!found_script_file.empty()) {
+        std::string found_path = std::string(MOUNT_POINT) + "/" + found_script_file;
+        if (stat(found_path.c_str(), &st) == 0) {
+            ESP_LOGI(TAG, "✅ Script file found (matched pattern): %s (%ld bytes)", found_path.c_str(), st.st_size);
+            return true;
+        }
+    }
+    
+    ESP_LOGW(TAG, "Script file not found: %s", full_path.c_str());
     return false;
 }
 
@@ -72,8 +156,9 @@ void ScriptedPlayback::PlaybackTask(void* arg)
     
     ESP_LOGI(TAG, "Starting scripted playback with %zu items", sequence->size());
     
-    auto& app = Application::GetInstance();
-    auto display = Board::GetInstance().GetDisplay();
+    // Note: app and display variables reserved for future use
+    (void)Application::GetInstance();
+    (void)Board::GetInstance().GetDisplay();
     
     for (size_t i = 0; i < sequence->size() && s_is_playing; i++) {
         const ScriptItem& item = (*sequence)[i];
@@ -125,12 +210,84 @@ esp_err_t ScriptedPlayback::PlayScript(const std::string& script_filename)
         return ESP_ERR_INVALID_STATE;
     }
     
+    // Try to find the script file (check .json, .txt, and uppercase versions)
     std::string full_path = std::string(MOUNT_POINT) + "/" + script_filename;
-    
-    // Read the script file
     FILE* file = fopen(full_path.c_str(), "r");
+    
+    // If .json not found, try .txt
     if (file == NULL) {
-        ESP_LOGE(TAG, "Failed to open script file: %s", full_path.c_str());
+        std::string alt_filename = script_filename;
+        size_t pos = alt_filename.find(".json");
+        if (pos != std::string::npos) {
+            alt_filename.replace(pos, 5, ".txt");
+            std::string alt_path = std::string(MOUNT_POINT) + "/" + alt_filename;
+            file = fopen(alt_path.c_str(), "r");
+            if (file != NULL) {
+                full_path = alt_path;
+                ESP_LOGI(TAG, "Found script file as .txt: %s", alt_path.c_str());
+            }
+        }
+    }
+    
+    // If still not found, try uppercase
+    if (file == NULL) {
+        std::string upper_filename = script_filename;
+        std::transform(upper_filename.begin(), upper_filename.end(), upper_filename.begin(), ::toupper);
+        std::string upper_path = std::string(MOUNT_POINT) + "/" + upper_filename;
+        file = fopen(upper_path.c_str(), "r");
+        if (file != NULL) {
+            full_path = upper_path;
+            ESP_LOGI(TAG, "Found script file (uppercase): %s", upper_path.c_str());
+        }
+    }
+    
+    // If still not found, try playback.json.txt
+    if (file == NULL) {
+        std::string json_txt_path = std::string(MOUNT_POINT) + "/playback.json.txt";
+        file = fopen(json_txt_path.c_str(), "r");
+        if (file != NULL) {
+            full_path = json_txt_path;
+            ESP_LOGI(TAG, "Found script file (as .json.txt): %s", json_txt_path.c_str());
+        }
+    }
+    
+    // If still not found, search for files matching the pattern (handles Windows short filenames)
+    if (file == NULL) {
+        DIR* dir = opendir(MOUNT_POINT);
+        if (dir != NULL) {
+            struct dirent* entry;
+            while ((entry = readdir(dir)) != NULL && file == NULL) {
+                if (entry->d_type == DT_REG) {
+                    std::string filename = entry->d_name;
+                    std::string lower_filename = filename;
+                    std::transform(lower_filename.begin(), lower_filename.end(), lower_filename.begin(), ::tolower);
+                    
+                    // Check if filename contains "play" and ends with .txt, .json, or is a short filename
+                    bool has_play = (lower_filename.find("play") != std::string::npos);
+                    bool is_json_or_txt = (lower_filename.find(".json") != std::string::npos || 
+                                           lower_filename.find(".txt") != std::string::npos);
+                    bool is_short_name = (filename.length() <= 12 && filename.find("~") != std::string::npos);
+                    
+                    if (has_play && (is_json_or_txt || is_short_name)) {
+                        char file_path[512];
+                        int written = snprintf(file_path, sizeof(file_path), "%s/%s", MOUNT_POINT, entry->d_name);
+                        if (written >= 0 && written < (int)sizeof(file_path)) {
+                            FILE* test_file = fopen(file_path, "r");
+                            if (test_file != NULL) {
+                                file = test_file;
+                                full_path = file_path;
+                                ESP_LOGI(TAG, "Found script file (matched pattern): %s", file_path);
+                            }
+                        }
+                    }
+                }
+            }
+            closedir(dir);
+        }
+    }
+    
+    if (file == NULL) {
+        ESP_LOGE(TAG, "Failed to open script file: %s (tried .txt, uppercase, .json.txt, and pattern matching)", full_path.c_str());
         return ESP_FAIL;
     }
     
@@ -321,7 +478,121 @@ struct VideoPlaybackData {
     std::string audio_file;
 };
 
-void VideoPlaybackTask(void* arg)
+struct DecodedFrameBuffer {
+    uint8_t* data = nullptr;
+    size_t capacity = 0;
+    lv_image_dsc_t image;
+};
+
+// Helper function to load and decode a JPEG frame into a reusable buffer
+static bool DecodeJPEGFrameIntoBuffer(const std::string& file_path,
+                                      jpeg_dec_handle_t* jpeg_dec,
+                                      jpeg_dec_io_t* jpeg_io,
+                                      jpeg_dec_header_info_t* jpeg_out,
+                                      DecodedFrameBuffer& buffer,
+                                      Display* display) {
+    // Open JPEG file
+    FILE* file = fopen(file_path.c_str(), "rb");
+    if (file == NULL) {
+        ESP_LOGE(TAG, "Failed to open frame file: %s", file_path.c_str());
+        return NULL;
+    }
+    
+    // Get file size
+    fseek(file, 0, SEEK_END);
+    size_t file_size = ftell(file);
+    fseek(file, 0, SEEK_SET);
+    
+    if (file_size == 0 || file_size > 1024 * 1024) { // Max 1MB per frame
+        ESP_LOGE(TAG, "Invalid frame file size: %zu", file_size);
+        fclose(file);
+        return NULL;
+    }
+    
+    // Allocate buffer for JPEG data
+    uint8_t* jpeg_buffer = (uint8_t*)heap_caps_malloc(file_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (jpeg_buffer == NULL) {
+        ESP_LOGE(TAG, "Failed to allocate memory for JPEG data (%zu bytes)", file_size);
+        fclose(file);
+        return NULL;
+    }
+    
+    // Read JPEG data
+    size_t bytes_read = fread(jpeg_buffer, 1, file_size, file);
+    fclose(file);
+    
+    if (bytes_read != file_size) {
+        ESP_LOGE(TAG, "Failed to read complete JPEG file: read %zu of %zu bytes", bytes_read, file_size);
+        heap_caps_free(jpeg_buffer);
+        return NULL;
+    }
+    
+    // Parse JPEG header
+    jpeg_io->inbuf = jpeg_buffer;
+    jpeg_io->inbuf_len = file_size;
+    esp_err_t ret = jpeg_dec_parse_header(jpeg_dec, jpeg_io, jpeg_out);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to parse JPEG header: %s", esp_err_to_name(ret));
+        heap_caps_free(jpeg_out);
+        heap_caps_free(jpeg_io);
+        jpeg_dec_close(jpeg_dec);
+        heap_caps_free(jpeg_buffer);
+        return NULL;
+    }
+    
+    // Calculate output buffer size (RGB565 = 2 bytes per pixel)
+    size_t output_size = jpeg_out->width * jpeg_out->height * 2;
+    
+    // Ensure buffer has enough capacity
+    if (buffer.data == nullptr || buffer.capacity < output_size) {
+        if (buffer.data != nullptr) {
+            heap_caps_free(buffer.data);
+        }
+        buffer.data = (uint8_t*)heap_caps_malloc(output_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (buffer.data == NULL) {
+            ESP_LOGE(TAG, "Failed to allocate memory for decoded image (%zu bytes)", output_size);
+            heap_caps_free(jpeg_buffer);
+            return false;
+        }
+        buffer.capacity = output_size;
+    }
+
+    // Initialize LVGL descriptor metadata
+    buffer.image.header.magic = LV_IMAGE_HEADER_MAGIC;
+    buffer.image.header.cf = LV_COLOR_FORMAT_RGB565;
+    buffer.image.header.flags = LV_IMAGE_FLAGS_ALLOCATED;
+    buffer.image.header.stride = jpeg_out->width * 2;
+    
+    // Decode JPEG
+    jpeg_io->outbuf = buffer.data;
+    int inbuf_consumed = jpeg_io->inbuf_len - jpeg_io->inbuf_remain;
+    jpeg_io->inbuf = jpeg_buffer + inbuf_consumed;
+    jpeg_io->inbuf_len = jpeg_io->inbuf_remain;
+    
+    ret = jpeg_dec_process(jpeg_dec, jpeg_io);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to decode JPEG: %s", esp_err_to_name(ret));
+        heap_caps_free(jpeg_buffer);
+        return false;
+    }
+    
+    // Populate LVGL image descriptor fields
+    buffer.image.header.w = jpeg_out->width;
+    buffer.image.header.h = jpeg_out->height;
+    buffer.image.data_size = output_size;
+    buffer.image.data = buffer.data;
+    
+    // Display the frame
+    if (display != NULL) {
+        display->SetEmotionImg(&buffer.image);
+    }
+    
+    heap_caps_free(jpeg_buffer);
+    
+    return true;
+}
+
+void ScriptedPlayback::VideoPlaybackTask(void* arg)
 {
     VideoPlaybackData* data = static_cast<VideoPlaybackData*>(arg);
     
@@ -337,7 +608,40 @@ void VideoPlaybackTask(void* arg)
     int frame_delay_ms = 1000 / data->fps; // Calculate delay between frames
     
     // TODO: Start audio playback in a separate task if audio_file is provided
-    // For now, we'll just play the video frames
+    
+    // Initialize JPEG decoder resources once per playback
+    jpeg_dec_config_t config = {
+        .output_type = JPEG_RAW_TYPE_RGB565_LE,
+        .rotate = JPEG_ROTATE_0D
+    };
+    jpeg_dec_handle_t* jpeg_dec = jpeg_dec_open(&config);
+    jpeg_dec_io_t* jpeg_io = nullptr;
+    jpeg_dec_header_info_t* jpeg_out = nullptr;
+    
+    if (jpeg_dec == nullptr) {
+        ESP_LOGE(TAG, "Failed to open JPEG decoder");
+        delete data;
+        s_is_playing = false;
+        vTaskDelete(NULL);
+        return;
+    }
+    
+    jpeg_io = (jpeg_dec_io_t*)heap_caps_calloc(1, sizeof(jpeg_dec_io_t), MALLOC_CAP_SPIRAM);
+    jpeg_out = (jpeg_dec_header_info_t*)heap_caps_calloc(1, sizeof(jpeg_dec_header_info_t), MALLOC_CAP_SPIRAM);
+    
+    if (jpeg_io == nullptr || jpeg_out == nullptr) {
+        ESP_LOGE(TAG, "Failed to allocate JPEG decoder structures");
+        if (jpeg_io) heap_caps_free(jpeg_io);
+        if (jpeg_out) heap_caps_free(jpeg_out);
+        jpeg_dec_close(jpeg_dec);
+        delete data;
+        s_is_playing = false;
+        vTaskDelete(NULL);
+        return;
+    }
+    
+    // Prepare double buffers
+    DecodedFrameBuffer frame_buffers[2];
     
     for (int frame_num = 1; frame_num <= data->frame_count && s_is_playing; frame_num++) {
         // Construct frame filename
@@ -354,21 +658,20 @@ void VideoPlaybackTask(void* arg)
         
         ESP_LOGD(TAG, "Loading frame %d/%d: %s", frame_num, data->frame_count, full_path.c_str());
         
+        // Select buffer (double buffering)
+        DecodedFrameBuffer& buffer = frame_buffers[(frame_num - 1) % 2];
+        
         // Load and display frame
-        // For JPG format, we'd need to decode it first
-        // For now, this is a placeholder - actual implementation would:
-        // 1. Load frame from SD card
-        // 2. Decode JPG (if needed)
-        // 3. Convert to LVGL image format
-        // 4. Display on screen
-        
-        // TODO: Implement frame loading and display
-        // This requires:
-        // - JPG decoder (ESP32 has built-in JPEG decoder)
-        // - LVGL image creation from decoded frame
-        // - Display update
-        
-        ESP_LOGI(TAG, "Frame %d/%d (would display: %s)", frame_num, data->frame_count, frame_filename);
+        if (data->frame_format == "jpg" || data->frame_format == "jpeg") {
+            if (!DecodeJPEGFrameIntoBuffer(full_path, jpeg_dec, jpeg_io, jpeg_out, buffer, display)) {
+                ESP_LOGW(TAG, "Failed to load frame %d, skipping", frame_num);
+            } else {
+                ESP_LOGI(TAG, "Displayed frame %d/%d", frame_num, data->frame_count);
+            }
+        } else if (data->frame_format == "bin") {
+            // For BIN format, use existing animation loading (if compatible)
+            ESP_LOGW(TAG, "BIN format not yet implemented for video playback");
+        }
         
         // Wait for next frame
         vTaskDelay(pdMS_TO_TICKS(frame_delay_ms));
@@ -379,6 +682,19 @@ void VideoPlaybackTask(void* arg)
             break;
         }
     }
+    
+    // Clean up buffers
+    for (int i = 0; i < 2; ++i) {
+        if (frame_buffers[i].data != nullptr) {
+            heap_caps_free(frame_buffers[i].data);
+            frame_buffers[i].data = nullptr;
+            frame_buffers[i].capacity = 0;
+        }
+    }
+    
+    if (jpeg_io) heap_caps_free(jpeg_io);
+    if (jpeg_out) heap_caps_free(jpeg_out);
+    if (jpeg_dec) jpeg_dec_close(jpeg_dec);
     
     ESP_LOGI(TAG, "Video playback completed");
     
@@ -428,7 +744,7 @@ esp_err_t ScriptedPlayback::PlayVideo(const std::string& frame_directory,
     // Start video playback task
     s_is_playing = true;
     xTaskCreatePinnedToCore(
-        VideoPlaybackTask,
+        ScriptedPlayback::VideoPlaybackTask,
         "video_playback",
         8192,  // Larger stack for video processing
         data,
