@@ -83,6 +83,24 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
                     CloseAudioChannel();
                 });
             }
+        } else if (strcmp(type->valuestring, "ws_start") == 0) {
+            // Server requests the device to open a WebSocket session for live voice
+            auto url = cJSON_GetObjectItem(root, "wss");
+            if (!cJSON_IsString(url)) {
+                url = cJSON_GetObjectItem(root, "url");
+            }
+            auto token = cJSON_GetObjectItem(root, "token");
+            auto version = cJSON_GetObjectItem(root, "version");
+            if (!cJSON_IsString(url)) {
+                ESP_LOGE(TAG, "ws_start missing 'wss'/'url'");
+            } else {
+                std::string url_str = url->valuestring;
+                std::string token_str = cJSON_IsString(token) ? token->valuestring : "";
+                int ver = cJSON_IsNumber(version) ? version->valueint : 0;
+                Application::GetInstance().Schedule([url_str, token_str, ver]() {
+                    Application::GetInstance().OpenWebsocketForCall(url_str, token_str, ver);
+                });
+            }
         } else if (on_incoming_json_ != nullptr) {
             on_incoming_json_(root);
         }

@@ -90,9 +90,13 @@ bool WebsocketProtocol::OpenAudioChannel() {
         delete websocket_;
     }
 
-    // Hardcoded WebSocket endpoint per user request
-    std::string url = "ws://34.136.76.107:8000/xiaozhi/v1/";
     Settings settings("websocket", false);
+    std::string url = settings.GetString("url");
+    if (url.empty()) {
+        ESP_LOGE(TAG, "WebSocket URL not configured");
+        SetError(Lang::Strings::SERVER_NOT_FOUND);
+        return false;
+    }
     std::string token = settings.GetString("token");
     int version = settings.GetInt("version");
     if (version != 0) {
@@ -101,11 +105,6 @@ bool WebsocketProtocol::OpenAudioChannel() {
 
     error_occurred_ = false;
 
-    // Ensure transport selection matches the URL scheme by updating NVS
-    {
-        Settings ws_write("websocket", true);
-        ws_write.SetString("url", url);
-    }
     websocket_ = Board::GetInstance().CreateWebSocket();
     
     if (!token.empty()) {

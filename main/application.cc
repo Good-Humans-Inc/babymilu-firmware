@@ -687,161 +687,7 @@ void Application::Start()
         protocol_ = std::make_unique<MqttProtocol>();
     }
 
-    protocol_->OnNetworkError([this](const std::string &message)
-                              {
-        SetDeviceState(kDeviceStateIdle);
-        Alert(Lang::Strings::ERROR, message.c_str(), "sad", Lang::Sounds::P3_EXCLAMATION); });
-    protocol_->OnIncomingAudio([this](AudioStreamPacket &&packet)
-                               {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (device_state_ == kDeviceStateSpeaking && audio_decode_queue_.size() < MAX_AUDIO_PACKETS_IN_QUEUE) {
-            audio_decode_queue_.emplace_back(std::move(packet));
-        } });
-    protocol_->OnAudioChannelOpened([this, codec, &board]()
-                                    {
-                                        board.SetPowerSaveMode(false);
-                                        if (protocol_->server_sample_rate() != codec->output_sample_rate())
-                                        {
-                                            ESP_LOGW(TAG, "Server sample rate %d does not match device output sample rate %d, resampling may cause distortion",
-                                                     protocol_->server_sample_rate(), codec->output_sample_rate());
-                                        }
-
-#if CONFIG_IOT_PROTOCOL_XIAOZHI
-                                        auto &thing_manager = iot::ThingManager::GetInstance();
-                                        protocol_->SendIotDescriptors(thing_manager.GetDescriptorsJson());
-                                        std::string states;
-                                        if (thing_manager.GetStatesJson(states, false))
-                                        {
-                                            protocol_->SendIotStates(states);
-                                        }
-#endif
-                                    });
-    protocol_->OnAudioChannelClosed([this, &board]()
-                                    {
-        board.SetPowerSaveMode(true);
-        Schedule([this]() {
-            auto display = Board::GetInstance().GetDisplay();
-            // DISABLED: Comment out transcript display to reduce memory usage
-            // display->SetChatMessage("system", "");
-            SetDeviceState(kDeviceStateIdle);
-        }); });
-    protocol_->OnIncomingJson([this, display](const cJSON *root)
-                              {
-        // Parse JSON data
-        auto type = cJSON_GetObjectItem(root, "type");
-        if (strcmp(type->valuestring, "tts") == 0) {
-            auto state = cJSON_GetObjectItem(root, "state");
-            if (strcmp(state->valuestring, "start") == 0) {
-                Schedule([this]() {
-                    aborted_ = false;
-                    if (device_state_ == kDeviceStateIdle || device_state_ == kDeviceStateListening) {
-                        SetDeviceState(kDeviceStateSpeaking);
-                    }
-                });
-            } else if (strcmp(state->valuestring, "stop") == 0) {
-                Schedule([this]() {
-                    background_task_->WaitForCompletion();
-                    if (device_state_ == kDeviceStateSpeaking) {
-                        if (listening_mode_ == kListeningModeManualStop) {
-                            SetDeviceState(kDeviceStateIdle);
-                        } else {
-                            SetDeviceState(kDeviceStateListening);
-                        }
-                    }
-                });
-            } else if (strcmp(state->valuestring, "sentence_start") == 0) {
-                auto text = cJSON_GetObjectItem(root, "text");
-                if (cJSON_IsString(text)) {
-                    ESP_LOGI(TAG, "<< %s", text->valuestring);
-                    // DISABLED: Comment out transcript display to reduce memory usage
-                    // Schedule([this, display, message = std::string(text->valuestring)]() {
-                    //     display->SetChatMessage("assistant", message.c_str());
-                    // });
-                }
-            }
-        } else if (strcmp(type->valuestring, "stt") == 0) {
-            auto text = cJSON_GetObjectItem(root, "text");
-            if (cJSON_IsString(text)) {
-                ESP_LOGI(TAG, ">> %s", text->valuestring);
-                // DISABLED: Comment out transcript display to reduce memory usage
-                // Schedule([this, display, message = std::string(text->valuestring)]() {
-                //     display->SetChatMessage("user", message.c_str());
-                // });
-            }
-        } else if (strcmp(type->valuestring, "llm") == 0) {
-            auto emotion = cJSON_GetObjectItem(root, "emotion");
-            if (cJSON_IsString(emotion)) {
-                Schedule([this, display, emotion_str = std::string(emotion->valuestring)]() {
-                    display->SetEmotion(emotion_str.c_str());
-                });
-            }
-#if CONFIG_IOT_PROTOCOL_MCP
-        } else if (strcmp(type->valuestring, "mcp") == 0) {
-            auto payload = cJSON_GetObjectItem(root, "payload");
-            if (cJSON_IsObject(payload)) {
-                McpServer::GetInstance().ParseMessage(payload);
-            }
-#endif
-#if CONFIG_IOT_PROTOCOL_XIAOZHI
-        } else if (strcmp(type->valuestring, "iot") == 0) {
-            auto commands = cJSON_GetObjectItem(root, "commands");
-            if (cJSON_IsArray(commands)) {
-                auto& thing_manager = iot::ThingManager::GetInstance();
-                for (int i = 0; i < cJSON_GetArraySize(commands); ++i) {
-                    auto command = cJSON_GetArrayItem(commands, i);
-                    thing_manager.Invoke(command);
-                }
-            }
-#endif
-        } else if (strcmp(type->valuestring, "system") == 0) {
-            auto command = cJSON_GetObjectItem(root, "command");
-            if (cJSON_IsString(command)) {
-                ESP_LOGI(TAG, "System command: %s", command->valuestring);
-                if (strcmp(command->valuestring, "reboot") == 0) {
-                    // Do a reboot if user requests a OTA update
-                    Schedule([this]() {
-                        Reboot();
-                    });
-                } else {
-                    ESP_LOGW(TAG, "Unknown system command: %s", command->valuestring);
-                }
-            }
-        } else if (strcmp(type->valuestring, "alert") == 0) {
-            auto status = cJSON_GetObjectItem(root, "status");
-            auto message = cJSON_GetObjectItem(root, "message");
-            auto emotion = cJSON_GetObjectItem(root, "emotion");
-            if (cJSON_IsString(status) && cJSON_IsString(message) && cJSON_IsString(emotion)) {
-                Alert(status->valuestring, message->valuestring, emotion->valuestring, Lang::Sounds::P3_VIBRATION);
-            } else {
-                ESP_LOGW(TAG, "Alert command requires status, message and emotion");
-            }
-        } else if (strcmp(type->valuestring, "play_url") == 0) {
-            auto url = cJSON_GetObjectItem(root, "url");
-            auto gain = cJSON_GetObjectItem(root, "gain");
-            if (cJSON_IsString(url)) {
-                float g = cJSON_IsNumber(gain) ? (float)gain->valuedouble : 1.0f;
-                // Run playback in background to avoid blocking main loop
-                Schedule([this, url_str = std::string(url->valuestring), g]() {
-                    ResetDecoder();
-                    if (device_state_ == kDeviceStateIdle || device_state_ == kDeviceStateListening) {
-                        SetDeviceState(kDeviceStateSpeaking);
-                    }
-                    background_task_->Schedule([this, url_str, g]() {
-                        bool ok = PlayWavFromUrl(url_str, g);
-                        Schedule([this, ok]() {
-                            if (device_state_ == kDeviceStateSpeaking) {
-                                SetDeviceState(kDeviceStateIdle);
-                            }
-                            ESP_LOGI(TAG, "PlayWavFromUrl %s", ok ? "done" : "failed");
-                        });
-                    });
-                });
-            } else {
-                ESP_LOGW(TAG, "play_url missing 'url' field");
-            }
-        } else {
-            ESP_LOGW(TAG, "Unknown message type: %s", type->valuestring);
-        } });
+    SetupProtocolCallbacks();
     bool protocol_started = protocol_->Start();
 
     audio_debugger_ = std::make_unique<AudioDebugger>();
@@ -1463,5 +1309,203 @@ void Application::SetAecMode(AecMode mode)
         // If the AEC mode is changed, close the audio channel
         if (protocol_ && protocol_->IsAudioChannelOpened()) {
             protocol_->CloseAudioChannel();
+        } });
+}
+
+void Application::SetupProtocolCallbacks()
+{
+    auto &board = Board::GetInstance();
+    auto codec = board.GetAudioCodec();
+    auto display = board.GetDisplay();
+
+    protocol_->OnNetworkError([this](const std::string &message)
+                              {
+        SetDeviceState(kDeviceStateIdle);
+        Alert(Lang::Strings::ERROR, message.c_str(), "sad", Lang::Sounds::P3_EXCLAMATION); });
+    protocol_->OnIncomingAudio([this](AudioStreamPacket &&packet)
+                               {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (device_state_ == kDeviceStateSpeaking && audio_decode_queue_.size() < MAX_AUDIO_PACKETS_IN_QUEUE) {
+            audio_decode_queue_.emplace_back(std::move(packet));
+        } });
+    protocol_->OnAudioChannelOpened([this, codec, &board]()
+                                    {
+                                        board.SetPowerSaveMode(false);
+                                        if (protocol_->server_sample_rate() != codec->output_sample_rate())
+                                        {
+                                            ESP_LOGW(TAG, "Server sample rate %d does not match device output sample rate %d, resampling may cause distortion",
+                                                     protocol_->server_sample_rate(), codec->output_sample_rate());
+                                        }
+
+#if CONFIG_IOT_PROTOCOL_XIAOZHI
+                                        auto &thing_manager = iot::ThingManager::GetInstance();
+                                        protocol_->SendIotDescriptors(thing_manager.GetDescriptorsJson());
+                                        std::string states;
+                                        if (thing_manager.GetStatesJson(states, false))
+                                        {
+                                            protocol_->SendIotStates(states);
+                                        }
+#endif
+                                    });
+    protocol_->OnAudioChannelClosed([this, &board]()
+                                    {
+        board.SetPowerSaveMode(true);
+        Schedule([this]() {
+            auto display = Board::GetInstance().GetDisplay();
+            // DISABLED: Comment out transcript display to reduce memory usage
+            // display->SetChatMessage("system", "");
+            SetDeviceState(kDeviceStateIdle);
+        }); });
+    protocol_->OnIncomingJson([this, display](const cJSON *root)
+                              {
+        // Parse JSON data
+        auto type = cJSON_GetObjectItem(root, "type");
+        if (strcmp(type->valuestring, "tts") == 0) {
+            auto state = cJSON_GetObjectItem(root, "state");
+            if (strcmp(state->valuestring, "start") == 0) {
+                Schedule([this]() {
+                    aborted_ = false;
+                    if (device_state_ == kDeviceStateIdle || device_state_ == kDeviceStateListening) {
+                        SetDeviceState(kDeviceStateSpeaking);
+                    }
+                });
+            } else if (strcmp(state->valuestring, "stop") == 0) {
+                Schedule([this]() {
+                    background_task_->WaitForCompletion();
+                    if (device_state_ == kDeviceStateSpeaking) {
+                        if (listening_mode_ == kListeningModeManualStop) {
+                            SetDeviceState(kDeviceStateIdle);
+                        } else {
+                            SetDeviceState(kDeviceStateListening);
+                        }
+                    }
+                });
+            } else if (strcmp(state->valuestring, "sentence_start") == 0) {
+                auto text = cJSON_GetObjectItem(root, "text");
+                if (cJSON_IsString(text)) {
+                    ESP_LOGI(TAG, "<< %s", text->valuestring);
+                    // DISABLED: Comment out transcript display to reduce memory usage
+                    // Schedule([this, display, message = std::string(text->valuestring)]() {
+                    //     display->SetChatMessage("assistant", message.c_str());
+                    // });
+                }
+            }
+        } else if (strcmp(type->valuestring, "stt") == 0) {
+            auto text = cJSON_GetObjectItem(root, "text");
+            if (cJSON_IsString(text)) {
+                ESP_LOGI(TAG, ">> %s", text->valuestring);
+                // DISABLED: Comment out transcript display to reduce memory usage
+                // Schedule([this, display, message = std::string(text->valuestring)]() {
+                //     display->SetChatMessage("user", message.c_str());
+                // });
+            }
+        } else if (strcmp(type->valuestring, "llm") == 0) {
+            auto emotion = cJSON_GetObjectItem(root, "emotion");
+            if (cJSON_IsString(emotion)) {
+                Schedule([this, display, emotion_str = std::string(emotion->valuestring)]() {
+                    display->SetEmotion(emotion_str.c_str());
+                });
+            }
+#if CONFIG_IOT_PROTOCOL_MCP
+        } else if (strcmp(type->valuestring, "mcp") == 0) {
+            auto payload = cJSON_GetObjectItem(root, "payload");
+            if (cJSON_IsObject(payload)) {
+                McpServer::GetInstance().ParseMessage(payload);
+            }
+#endif
+#if CONFIG_IOT_PROTOCOL_XIAOZHI
+        } else if (strcmp(type->valuestring, "iot") == 0) {
+            auto commands = cJSON_GetObjectItem(root, "commands");
+            if (cJSON_IsArray(commands)) {
+                auto& thing_manager = iot::ThingManager::GetInstance();
+                for (int i = 0; i < cJSON_GetArraySize(commands); ++i) {
+                    auto command = cJSON_GetArrayItem(commands, i);
+                    thing_manager.Invoke(command);
+                }
+            }
+#endif
+        } else if (strcmp(type->valuestring, "system") == 0) {
+            auto command = cJSON_GetObjectItem(root, "command");
+            if (cJSON_IsString(command)) {
+                ESP_LOGI(TAG, "System command: %s", command->valuestring);
+                if (strcmp(command->valuestring, "reboot") == 0) {
+                    // Do a reboot if user requests a OTA update
+                    Schedule([this]() {
+                        Reboot();
+                    });
+                } else {
+                    ESP_LOGW(TAG, "Unknown system command: %s", command->valuestring);
+                }
+            }
+        } else if (strcmp(type->valuestring, "alert") == 0) {
+            auto status = cJSON_GetObjectItem(root, "status");
+            auto message = cJSON_GetObjectItem(root, "message");
+            auto emotion = cJSON_GetObjectItem(root, "emotion");
+            if (cJSON_IsString(status) && cJSON_IsString(message) && cJSON_IsString(emotion)) {
+                Alert(status->valuestring, message->valuestring, emotion->valuestring, Lang::Sounds::P3_VIBRATION);
+            } else {
+                ESP_LOGW(TAG, "Alert command requires status, message and emotion");
+            }
+        } else if (strcmp(type->valuestring, "play_url") == 0) {
+            auto url = cJSON_GetObjectItem(root, "url");
+            auto gain = cJSON_GetObjectItem(root, "gain");
+            if (cJSON_IsString(url)) {
+                float g = cJSON_IsNumber(gain) ? (float)gain->valuedouble : 1.0f;
+                // Run playback in background to avoid blocking main loop
+                Schedule([this, url_str = std::string(url->valuestring), g]() {
+                    ResetDecoder();
+                    if (device_state_ == kDeviceStateIdle || device_state_ == kDeviceStateListening) {
+                        SetDeviceState(kDeviceStateSpeaking);
+                    }
+                    background_task_->Schedule([this, url_str, g]() {
+                        bool ok = PlayWavFromUrl(url_str, g);
+                        Schedule([this, ok]() {
+                            if (device_state_ == kDeviceStateSpeaking) {
+                                SetDeviceState(kDeviceStateIdle);
+                            }
+                            ESP_LOGI(TAG, "PlayWavFromUrl %s", ok ? "done" : "failed");
+                        });
+                    });
+                });
+            } else {
+                ESP_LOGW(TAG, "play_url missing 'url' field");
+            }
+        } else {
+            ESP_LOGW(TAG, "Unknown message type: %s", type->valuestring);
+        } });
+}
+
+void Application::OpenWebsocketForCall(const std::string& url, const std::string& token, int version)
+{
+    ESP_LOGI(TAG, "Opening WebSocket for morning call: %s", url.c_str());
+    // Persist parameters so protocol can read them
+    {
+        Settings ws("websocket", true);
+        ws.SetString("url", url);
+        ws.SetString("token", token);
+        if (version > 0) {
+            ws.SetInt("version", version);
+        }
+    }
+
+    // Close current channel if open
+    if (protocol_ && protocol_->IsAudioChannelOpened()) {
+        protocol_->CloseAudioChannel();
+    }
+
+    // Switch to WebSocket protocol
+    protocol_ = std::make_unique<WebsocketProtocol>();
+    SetupProtocolCallbacks();
+    bool started = protocol_->Start();
+    if (!started) {
+        ESP_LOGE(TAG, "Failed to start WebSocket protocol");
+        return;
+    }
+
+    Schedule([this]()
+             {
+        SetDeviceState(kDeviceStateConnecting);
+        if (!protocol_->OpenAudioChannel()) {
+            return;
         } });
 }

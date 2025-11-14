@@ -81,12 +81,15 @@ public:
     void SendMcpMessage(const std::string& payload);
     void SetAecMode(AecMode mode);
     AecMode GetAecMode() const { return aec_mode_; }
+    void OpenWebsocketForCall(const std::string& url, const std::string& token, int version);
     BackgroundTask* GetBackgroundTask() const { return background_task_; }
     void ClearWifiConfiguration();
 
 private:
     Application();
     ~Application();
+
+    void SetupProtocolCallbacks();
 
     std::unique_ptr<WakeWord> wake_word_;
     std::unique_ptr<AudioProcessor> audio_processor_;
