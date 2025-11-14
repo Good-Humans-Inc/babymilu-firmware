@@ -426,7 +426,7 @@ void McpServer::DoToolCall(int id, const std::string& tool_name, const cJSON* to
         return;
     }
 
-    // Start a task to receive data with stack size
+    // Configure pthread defaults (stack size, priority, name) for the upcoming thread
     esp_pthread_cfg_t cfg = esp_pthread_get_default_config();
     cfg.thread_name = "tool_call";
     cfg.stack_size = stack_size;
