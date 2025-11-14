@@ -27,6 +27,7 @@ typedef enum _AnimationType_e {
 void animation_set_now_animation(int animation);
 bool animation_load_from_spiffs(const char* filename, lv_image_dsc_t* img_dsc);
 void animation_init_spiffs(void);
+bool animation_is_spiffs_initialized(void);  // Check if SPIFFS is initialized
 bool animation_create_spiffs_animation(Animation_t* anim, const char* filenames[], int count);
 bool animation_create_spiffs_animation_from_merged(Animation_t* anim, const char* merged_filename, int count);
 bool animation_load_normal_from_spiffs(void);

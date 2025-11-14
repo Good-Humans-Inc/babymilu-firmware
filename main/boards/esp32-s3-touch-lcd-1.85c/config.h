@@ -63,5 +63,14 @@
         .max_transfer_sz = max_trans_sz,                                          \
     }
 
+/* SD Card - Waveshare ESP32-S3-LCD-1.85C uses SPI interface */
+/* Using SPI3_HOST to avoid conflict with display (SPI2_HOST) */
+/* Note: GPIO 10 is used for I2C_SCL, so using GPIO 9 for SD CS */
+/* CRITICAL: SPI0 is reserved for flash/PSRAM, SPI2 is used by display, so use SPI3 */
+#define BSP_SD_SPI_NUM      SPI3_HOST
+#define BSP_SD_SPI_CS       GPIO_NUM_9
+#define BSP_SPI3_HOST_SCLK GPIO_NUM_12
+#define BSP_SPI3_HOST_MOSI GPIO_NUM_13
+#define BSP_SPI3_HOST_MISO GPIO_NUM_14
 
 #endif // _BOARD_CONFIG_H_

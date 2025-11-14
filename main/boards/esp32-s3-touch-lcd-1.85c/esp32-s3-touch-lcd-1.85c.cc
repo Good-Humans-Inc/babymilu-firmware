@@ -6,6 +6,8 @@
 #include "button.h"
 #include "config.h"
 #include "iot/thing_manager.h"
+#include "animation.h"
+#include "sd_card.h"
 
 #include <esp_log.h>
 #include "i2c_device.h"
@@ -391,6 +393,18 @@ public:
         InitializeButtons();
         InitializeIot();
         GetBacklight()->RestoreBrightness();
+        
+        // Initialize SD card for animation storage (Waveshare 1.85C supports SD card)
+        ESP_LOGI(TAG, "Initializing SD card for animations...");
+        esp_err_t sd_ret = SdCard::Initialize();
+        if (sd_ret == ESP_OK) {
+            ESP_LOGI(TAG, "SD card initialized successfully");
+        } else {
+            ESP_LOGW(TAG, "SD card initialization failed: %s, falling back to SPIFFS", esp_err_to_name(sd_ret));
+            // Fall back to SPIFFS if SD card is not available
+            ESP_LOGI(TAG, "Initializing SPIFFS for animations...");
+            animation_init_spiffs();
+        }
     }
 
     virtual AudioCodec* GetAudioCodec() override {

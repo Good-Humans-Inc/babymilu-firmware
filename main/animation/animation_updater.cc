@@ -19,7 +19,7 @@
 #define TAG "AnimationUpdater"
 
 // Select storage mount point by board
-#if defined(CONFIG_BOARD_TYPE_SENSECAP_WATCHER)
+#if defined(CONFIG_BOARD_TYPE_SENSECAP_WATCHER) || defined(CONFIG_BOARD_TYPE_ESP32S3_Touch_LCD_1_85) || defined(CONFIG_BOARD_TYPE_ESP32S3_Touch_LCD_1_85C)
 #define ANIM_STORAGE_PREFIX "/sdcard"
 #else
 #define ANIM_STORAGE_PREFIX "/spiffs"
@@ -806,30 +806,42 @@ bool AnimationUpdater::DownloadAnimationFile(const std::string& url, const std::
 bool AnimationUpdater::DownloadMegaAnimationFile(const std::string& url) {
     try {
         // Only perform SD-specific checks on boards that support SD
-#if defined(CONFIG_BOARD_TYPE_SENSECAP_WATCHER)
+#if defined(CONFIG_BOARD_TYPE_SENSECAP_WATCHER) || defined(CONFIG_BOARD_TYPE_ESP32S3_Touch_LCD_1_85) || defined(CONFIG_BOARD_TYPE_ESP32S3_Touch_LCD_1_85C)
         // Check if SD card is mounted
         if (!SdCard::IsMounted()) {
-            ESP_LOGE(TAG, "SD card is not mounted. Please ensure SD card is properly inserted and formatted as FAT32.");
-            ESP_LOGE(TAG, "SD card should be initialized during system startup in main.cc");
+            ESP_LOGW(TAG, "SD card is not mounted. Attempting to initialize...");
+            ESP_LOGI(TAG, "SD card should be initialized during system startup, but attempting initialization now...");
             
-            // Check if SD card is detected
-            if (!SdCard::IsDetected()) {
-                ESP_LOGE(TAG, "SD card is not detected - please check hardware connection");
-            } else {
-                ESP_LOGW(TAG, "SD card is detected but not mounted - attempting to initialize...");
-                esp_err_t init_ret = SdCard::Initialize();
-                if (init_ret == ESP_OK) {
-                    ESP_LOGI(TAG, "SD card initialized successfully, retrying download...");
-                } else {
-                    ESP_LOGE(TAG, "Failed to initialize SD card: %s", esp_err_to_name(init_ret));
-                    return false;
-                }
+            // Try to initialize SD card
+            esp_err_t init_ret = SdCard::Initialize();
+            if (init_ret != ESP_OK) {
+                ESP_LOGE(TAG, "Failed to initialize SD card: %s", esp_err_to_name(init_ret));
+                ESP_LOGE(TAG, "Please check: 1) SD card is inserted, 2) SD card is formatted as FAT32, 3) SD card is not corrupted");
+                ESP_LOGE(TAG, "For Waveshare 1.85: Check GPIO pins - CS:GPIO9, CLK:GPIO12, MOSI:GPIO13, MISO:GPIO14");
+                return false;
             }
+            
+            // Verify it's actually mounted now
+            if (!SdCard::IsMounted()) {
+                ESP_LOGE(TAG, "SD card initialization returned OK but card is still not mounted");
+                return false;
+            }
+            
+            ESP_LOGI(TAG, "SD card initialized and mounted successfully");
         }
         ESP_LOGI(TAG, "SD card is mounted and ready for animations_mega.bin download");
+#else
+        // For non-SD card boards, check if SPIFFS is initialized
+        extern bool animation_is_spiffs_initialized(void);
+        if (!animation_is_spiffs_initialized()) {
+            ESP_LOGE(TAG, "SPIFFS is not initialized. Cannot download animations.");
+            ESP_LOGE(TAG, "SPIFFS should be initialized during system startup.");
+            return false;
+        }
+        ESP_LOGI(TAG, "SPIFFS is initialized and ready for animations_mega.bin download");
 #endif
         
-        // Debug: List SD card contents and test write access
+        // Debug: List storage contents and test write access
         ESP_LOGI(TAG, "Listing storage contents...");
         DIR* dir = opendir(ANIM_STORAGE_PREFIX);
         if (dir) {
@@ -986,6 +998,34 @@ bool AnimationUpdater::DownloadMegaAnimationFile(const std::string& url) {
         size_t content_length = http->GetBodyLength();
         ESP_LOGI(TAG, "Content-Length: %u", (unsigned int)content_length);
         
+        // Check SPIFFS free space before attempting download (for non-SD card boards)
+#if !defined(CONFIG_BOARD_TYPE_SENSECAP_WATCHER) && !defined(CONFIG_BOARD_TYPE_ESP32S3_Touch_LCD_1_85) && !defined(CONFIG_BOARD_TYPE_ESP32S3_Touch_LCD_1_85C)
+        if (content_length > 0) {
+            size_t spiffs_total = 0, spiffs_used = 0;
+            esp_err_t spiffs_info_ret = esp_spiffs_info("animations", &spiffs_total, &spiffs_used);
+            if (spiffs_info_ret == ESP_OK) {
+                size_t spiffs_free = spiffs_total - spiffs_used;
+                ESP_LOGI(TAG, "SPIFFS space: Total=%zu bytes, Used=%zu bytes, Free=%zu bytes", 
+                         spiffs_total, spiffs_used, spiffs_free);
+                
+                // Estimate required space (add 10% overhead for safety)
+                size_t estimated_required = content_length + (content_length / 10);
+                if (spiffs_free < estimated_required) {
+                    ESP_LOGE(TAG, "Insufficient SPIFFS space: Need ~%zu bytes, but only %zu bytes free", 
+                             estimated_required, spiffs_free);
+                    ESP_LOGE(TAG, "File size: %zu bytes, SPIFFS free: %zu bytes", content_length, spiffs_free);
+                    ESP_LOGE(TAG, "Please free up space or increase SPIFFS partition size");
+                    http->Close();
+                    return false;
+                }
+                ESP_LOGI(TAG, "SPIFFS has sufficient free space for download (%zu bytes free, need ~%zu bytes)", 
+                         spiffs_free, estimated_required);
+            } else {
+                ESP_LOGW(TAG, "Could not check SPIFFS space info: %s", esp_err_to_name(spiffs_info_ret));
+            }
+        }
+#endif
+        
         // Handle case where server doesn't provide Content-Length
         bool unknown_length = (content_length == 0);
         if (unknown_length) {
@@ -1046,7 +1086,29 @@ bool AnimationUpdater::DownloadMegaAnimationFile(const std::string& url) {
             // Write directly to file
             size_t written = fwrite(buffer.get(), 1, bytes_read, file);
             if (written != bytes_read) {
-                ESP_LOGE(TAG, "Failed to write data to file");
+                ESP_LOGE(TAG, "Failed to write data to file (written: %zu, expected: %d)", written, bytes_read);
+                ESP_LOGE(TAG, "Error: %s (errno: %d)", strerror(errno), errno);
+                
+                // Check SPIFFS space if using SPIFFS
+#if !defined(CONFIG_BOARD_TYPE_SENSECAP_WATCHER) && !defined(CONFIG_BOARD_TYPE_ESP32S3_Touch_LCD_1_85) && !defined(CONFIG_BOARD_TYPE_ESP32S3_Touch_LCD_1_85C)
+                size_t spiffs_total = 0, spiffs_used = 0;
+                if (esp_spiffs_info("animations", &spiffs_total, &spiffs_used) == ESP_OK) {
+                    size_t spiffs_free = spiffs_total - spiffs_used;
+                    ESP_LOGE(TAG, "SPIFFS space: Total=%zu, Used=%zu, Free=%zu bytes", 
+                             spiffs_total, spiffs_used, spiffs_free);
+                    if (spiffs_free < 1024) {
+                        ESP_LOGE(TAG, "SPIFFS is nearly full! This is likely the cause of the write failure.");
+                    }
+                }
+#endif
+                
+                // Flush and check for disk full error
+                fflush(file);
+                if (ferror(file)) {
+                    ESP_LOGE(TAG, "File stream error detected");
+                    clearerr(file);
+                }
+                
                 download_success = false;
                 break;
             }

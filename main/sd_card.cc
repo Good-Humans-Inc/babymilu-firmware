@@ -11,15 +11,17 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
-// Include SenseCAP Watcher board configuration
+// Include board-specific configurations
 #ifdef CONFIG_BOARD_TYPE_SENSECAP_WATCHER
 #include "boards/sensecap-watcher/config.h"
+#elif defined(CONFIG_BOARD_TYPE_ESP32S3_Touch_LCD_1_85) || defined(CONFIG_BOARD_TYPE_ESP32S3_Touch_LCD_1_85C)
+#include "boards/esp32-s3-touch-lcd-1.85/config.h"
 #endif
 
 static const char *TAG = "SD_CARD";
 
 bool SdCard::s_mounted = false;
-spi_host_device_t SdCard::s_spi_host = SPI2_HOST;
+spi_host_device_t SdCard::s_spi_host = SPI2_HOST;  // Default, will be set correctly in Initialize() based on board
 
 esp_err_t SdCard::Initialize()
 {
@@ -28,7 +30,7 @@ esp_err_t SdCard::Initialize()
         return ESP_OK;
     }
 
-#ifdef CONFIG_BOARD_TYPE_SENSECAP_WATCHER
+#if defined(CONFIG_BOARD_TYPE_SENSECAP_WATCHER)
     ESP_LOGI(TAG, "Initializing SD card with SenseCAP Watcher configuration");
     ESP_LOGI(TAG, "MOSI: GPIO%d, MISO: GPIO%d, CLK: GPIO%d, CS: GPIO%d", 
              BSP_SPI2_HOST_MOSI, BSP_SPI2_HOST_MISO, BSP_SPI2_HOST_SCLK, BSP_SD_SPI_CS);
@@ -136,8 +138,171 @@ esp_err_t SdCard::Initialize()
     s_mounted = true;
     ESP_LOGI(TAG, "SD card mounted successfully at %s", MOUNT_POINT);
     return ESP_OK;
+#elif defined(CONFIG_BOARD_TYPE_ESP32S3_Touch_LCD_1_85) || defined(CONFIG_BOARD_TYPE_ESP32S3_Touch_LCD_1_85C)
+    ESP_LOGI(TAG, "Initializing SD card with Waveshare ESP32-S3-LCD-1.85 configuration");
+    ESP_LOGI(TAG, "SPI Host: SPI%d (BSP_SD_SPI_NUM=%d)", BSP_SD_SPI_NUM, BSP_SD_SPI_NUM);
+    ESP_LOGI(TAG, "Pins - MOSI: GPIO%d, MISO: GPIO%d, CLK: GPIO%d, CS: GPIO%d", 
+             BSP_SPI3_HOST_MOSI, BSP_SPI3_HOST_MISO, BSP_SPI3_HOST_SCLK, BSP_SD_SPI_CS);
+    
+    // Add a small delay to ensure pins are stable
+    vTaskDelay(pdMS_TO_TICKS(50));
+
+    // Configure SPI bus using Waveshare 1.85 pins
+    sdmmc_host_t host = SDSPI_HOST_DEFAULT();
+    host.slot = BSP_SD_SPI_NUM;  // Use SPI3_HOST to avoid conflict with display (SPI2_HOST)
+    
+    ESP_LOGI(TAG, "SD card host.slot = %d", host.slot);
+    
+    spi_bus_config_t bus_cfg = {
+        .mosi_io_num = BSP_SPI3_HOST_MOSI,
+        .miso_io_num = BSP_SPI3_HOST_MISO,
+        .sclk_io_num = BSP_SPI3_HOST_SCLK,
+        .quadwp_io_num = -1,
+        .quadhd_io_num = -1,
+        .max_transfer_sz = 4096,
+    };
+
+    // For Waveshare boards, SPI3_HOST should be free (display uses SPI2_HOST)
+    // CRITICAL: On ESP32-S3, SPI0 is reserved for flash/PSRAM and CANNOT be used or freed
+    // If host.slot is 0, that means BSP_SD_SPI_NUM is incorrectly set to SPI0, which is invalid
+    if (host.slot == 0) {
+        ESP_LOGE(TAG, "ERROR: SPI0 is reserved for flash/PSRAM and cannot be used for SD card!");
+        ESP_LOGE(TAG, "BSP_SD_SPI_NUM is set to SPI0 (0), which is invalid for ESP32-S3");
+        ESP_LOGE(TAG, "Please use SPI1_HOST (1), SPI2_HOST (2), or SPI3_HOST (3) instead");
+        return ESP_ERR_INVALID_ARG;
+    }
+    
+    ESP_LOGI(TAG, "Initializing SPI%d bus for SD card (host.slot=%d)...", host.slot, host.slot);
+    
+    // Try to initialize the bus - if it's already initialized, we'll get ESP_ERR_INVALID_STATE
+    // and can continue (the bus config must be compatible)
+    esp_err_t ret = spi_bus_initialize(static_cast<spi_host_device_t>(host.slot), &bus_cfg, SDSPI_DEFAULT_DMA);
+    if (ret != ESP_OK) {
+        if (ret == ESP_ERR_INVALID_STATE) {
+            ESP_LOGW(TAG, "SPI%d bus already initialized (likely by board), continuing with SD card initialization", host.slot);
+            ESP_LOGW(TAG, "Assuming existing SPI%d bus configuration is compatible with SD card", host.slot);
+            // Don't track this bus for cleanup since we didn't initialize it
+            s_spi_host = SPI_HOST_MAX;
+        } else {
+            ESP_LOGE(TAG, "Failed to initialize SPI%d bus: %s", host.slot, esp_err_to_name(ret));
+            ESP_LOGE(TAG, "SPI bus initialization failed for SPI%d", host.slot);
+            ESP_LOGE(TAG, "Check if SPI%d is already in use by another peripheral", host.slot);
+            return ret;
+        }
+    } else {
+        ESP_LOGI(TAG, "SPI%d bus initialized successfully for SD card", host.slot);
+        // Track that we initialized this bus
+        s_spi_host = static_cast<spi_host_device_t>(host.slot);
+    }
+    
+    // Verify the SPI host ID is valid before proceeding
+    if (host.slot < 0 || host.slot >= SPI_HOST_MAX) {
+        ESP_LOGE(TAG, "Invalid SPI host ID: %d", host.slot);
+        if (s_spi_host != SPI_HOST_MAX) {
+            spi_bus_free(s_spi_host);
+        }
+        return ESP_ERR_INVALID_ARG;
+    }
+    
+    ESP_LOGI(TAG, "SPI%d bus ready for SD card device attachment", host.slot);
+
+    // Configure SD card using Waveshare 1.85 CS pin
+    sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
+    slot_config.gpio_cs = BSP_SD_SPI_CS;
+    slot_config.host_id = static_cast<spi_host_device_t>(host.slot);
+    
+    ESP_LOGI(TAG, "SD card slot configuration:");
+    ESP_LOGI(TAG, "  CS pin: GPIO%d", BSP_SD_SPI_CS);
+    ESP_LOGI(TAG, "  SPI Host ID: %d (host.slot=%d, BSP_SD_SPI_NUM=%d)", 
+             host.slot, host.slot, BSP_SD_SPI_NUM);
+    ESP_LOGI(TAG, "  slot_config.host_id: %d", slot_config.host_id);
+    ESP_LOGI(TAG, "  MOSI: GPIO%d, MISO: GPIO%d, CLK: GPIO%d", 
+             BSP_SPI3_HOST_MOSI, BSP_SPI3_HOST_MISO, BSP_SPI3_HOST_SCLK);
+    
+    // Verify host_id is valid before mounting
+    if (slot_config.host_id < 0 || slot_config.host_id >= SPI_HOST_MAX) {
+        ESP_LOGE(TAG, "Invalid slot_config.host_id: %d (must be 0-%d)", 
+                 slot_config.host_id, SPI_HOST_MAX - 1);
+        spi_bus_free(s_spi_host);
+        return ESP_ERR_INVALID_ARG;
+    }
+    
+    // Ensure SD card CS pin is properly configured for SPI operation
+    ESP_LOGI(TAG, "Configuring SD card CS pin (GPIO%d) for SPI operation...", BSP_SD_SPI_CS);
+    gpio_reset_pin(static_cast<gpio_num_t>(BSP_SD_SPI_CS));
+    vTaskDelay(pdMS_TO_TICKS(50));  // Increased delay for pin stabilization
+
+    // Mount SD card with memory-conservative settings
+    const esp_vfs_fat_sdmmc_mount_config_t mount_config = {
+        .format_if_mount_failed = false,
+        .max_files = 4,
+        .allocation_unit_size = 0,
+        .disk_status_check_enable = false
+    };
+
+    sdmmc_card_t* card;
+    
+    // Try mounting with retry mechanism
+    int retry_count = 0;
+    const int max_retries = 5;
+    do {
+        ESP_LOGI(TAG, "Attempting SD card mount (attempt %d/%d)...", retry_count + 1, max_retries);
+        ret = esp_vfs_fat_sdspi_mount(MOUNT_POINT, &host, &slot_config, &mount_config, &card);
+        
+        if (ret == ESP_OK) {
+            ESP_LOGI(TAG, "SD card mounted successfully on attempt %d", retry_count + 1);
+            break;
+        }
+        
+        retry_count++;
+        if (retry_count < max_retries) {
+            ESP_LOGW(TAG, "Mount attempt %d failed: %s, retrying in 1000ms...", retry_count, esp_err_to_name(ret));
+            vTaskDelay(pdMS_TO_TICKS(1000));
+        }
+    } while (retry_count < max_retries);
+
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "SD card mount failed after %d attempts. Last error: %s", max_retries, esp_err_to_name(ret));
+        if (ret == ESP_FAIL) {
+            ESP_LOGE(TAG, "Failed to mount filesystem. This usually means:");
+            ESP_LOGE(TAG, "  1) SD card is not properly formatted as FAT32");
+            ESP_LOGE(TAG, "  2) SD card filesystem is corrupted");
+            ESP_LOGE(TAG, "  3) SD card is write-protected");
+            ESP_LOGE(TAG, "Try: Format the SD card as FAT32 on a computer, then reinsert it");
+        } else if (ret == ESP_ERR_NOT_FOUND) {
+            ESP_LOGE(TAG, "SD card not found. Please check:");
+            ESP_LOGE(TAG, "  1) SD card is properly inserted");
+            ESP_LOGE(TAG, "  2) SD card is not damaged");
+            ESP_LOGE(TAG, "  3) SPI connections are correct (CS:GPIO%d, CLK:GPIO%d, MOSI:GPIO%d, MISO:GPIO%d)",
+                     BSP_SD_SPI_CS, BSP_SPI3_HOST_SCLK, BSP_SPI3_HOST_MOSI, BSP_SPI3_HOST_MISO);
+            ESP_LOGE(TAG, "  4) SD card is compatible (some cards may not work)");
+        } else if (ret == ESP_ERR_TIMEOUT) {
+            ESP_LOGE(TAG, "SD card communication timeout. Please check:");
+            ESP_LOGE(TAG, "  1) SD card is not corrupted");
+            ESP_LOGE(TAG, "  2) SPI clock speed is appropriate");
+            ESP_LOGE(TAG, "  3) Wiring connections are secure");
+        } else if (ret == ESP_ERR_NO_MEM) {
+            ESP_LOGE(TAG, "Failed to initialize the card (ESP_ERR_NO_MEM). Reducing buffers and retrying later may help.");
+        } else {
+            ESP_LOGE(TAG, "Failed to initialize the card (%s).", esp_err_to_name(ret));
+            ESP_LOGE(TAG, "Make sure SD card lines have pull-up resistors in place.");
+        }
+        if (s_spi_host != SPI_HOST_MAX) {
+            ESP_LOGI(TAG, "Freeing SPI bus after mount failure...");
+            spi_bus_free(s_spi_host);
+        }
+        s_mounted = false;  // Ensure mount state is cleared on failure
+        return ret;
+    }
+
+    // Print card info
+    sdmmc_card_print_info(stdout, card);
+    
+    s_mounted = true;
+    ESP_LOGI(TAG, "SD card mounted successfully at %s", MOUNT_POINT);
+    return ESP_OK;
 #else
-    ESP_LOGE(TAG, "SD card functionality only supported on SenseCAP Watcher board");
+    ESP_LOGE(TAG, "SD card functionality only supported on SenseCAP Watcher or Waveshare 1.85 boards");
     return ESP_ERR_NOT_SUPPORTED;
 #endif
 }
@@ -274,8 +439,13 @@ bool SdCard::IsDetected()
     // For now, we'll assume SD card is detected if we can initialize SPI communication
     ESP_LOGI(TAG, "SD card detection check not implemented - assuming detected");
     return true;
+#elif defined(CONFIG_BOARD_TYPE_ESP32S3_Touch_LCD_1_85) || defined(CONFIG_BOARD_TYPE_ESP32S3_Touch_LCD_1_85C)
+    // For Waveshare boards, we can't detect SD card presence without trying to initialize
+    // Return true to allow initialization attempt
+    ESP_LOGI(TAG, "SD card detection not available - will attempt initialization");
+    return true;
 #else
-    ESP_LOGW(TAG, "SD card detection only supported on SenseCAP Watcher board");
+    ESP_LOGW(TAG, "SD card detection only supported on SenseCAP Watcher or Waveshare 1.85 boards");
     return false;
 #endif
 }
