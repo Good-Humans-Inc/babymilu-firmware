@@ -13,6 +13,7 @@
 #include "audio_debugger.h"
 #include "animation/animation_updater.h"
 #include "ssid_manager.h"
+#include "settings.h"
 
 #if CONFIG_USE_AUDIO_PROCESSOR
 #include "afe_audio_processor.h"
