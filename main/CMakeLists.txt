@@ -256,8 +256,8 @@ endif()
 idf_component_register(SRCS ${SOURCES}
                     EMBED_FILES ${LANG_SOUNDS} ${COMMON_SOUNDS}
                     INCLUDE_DIRS ${INCLUDE_DIRS}
-                    REQUIRES bt
-                    PRIV_REQUIRES spi_flash esp_partition app_update esp_app_format efuse esp_hw_support esp_system esp_timer esp_event esp_pm fatfs esp_pthread heap nvs_flash driver cJSON
+                    REQUIRES bt pthread
+                    PRIV_REQUIRES spi_flash esp_partition app_update esp_app_format efuse esp_hw_support esp_system esp_timer esp_event esp_pm fatfs heap nvs_flash driver cJSON
                     WHOLE_ARCHIVE
                     )
 
