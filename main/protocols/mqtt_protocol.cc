@@ -18,6 +18,7 @@ MqttProtocol::MqttProtocol() {
 
 MqttProtocol::~MqttProtocol() {
     ESP_LOGI(TAG, "MqttProtocol deinit");
+    mqtt_should_stay_connected_ = false;
     if (udp_ != nullptr) {
         delete udp_;
     }
@@ -28,6 +29,7 @@ MqttProtocol::~MqttProtocol() {
 }
 
 bool MqttProtocol::Start() {
+    mqtt_should_stay_connected_ = true;
     return StartMqttClient(false);
 }
 
@@ -58,6 +60,10 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
 
     mqtt_->OnDisconnected([this]() {
         ESP_LOGI(TAG, "Disconnected from endpoint");
+        // Attempt to reconnect if MQTT should stay connected
+        if (mqtt_should_stay_connected_) {
+            AttemptReconnect();
+        }
     });
 
     mqtt_->OnMessage([this](const std::string& topic, const std::string& payload) {
@@ -105,6 +111,10 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
     if (!mqtt_->Connect(broker_address, broker_port, client_id, username, password)) {
         ESP_LOGE(TAG, "Failed to connect to endpoint");
         SetError(Lang::Strings::SERVER_NOT_CONNECTED);
+        {
+            std::lock_guard<std::mutex> lock(reconnect_mutex_);
+            mqtt_reconnecting_ = false;
+        }
         return false;
     }
 
@@ -115,6 +125,11 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
         ESP_LOGW(TAG, "Failed to subscribe to all topics (#)");
     } else {
         ESP_LOGI(TAG, "Subscribed to all topics (#)");
+    }
+    
+    {
+        std::lock_guard<std::mutex> lock(reconnect_mutex_);
+        mqtt_reconnecting_ = false;
     }
     
     return true;
@@ -352,6 +367,42 @@ std::string MqttProtocol::DecodeHexString(const std::string& hex_string) {
         decoded.push_back(byte);
     }
     return decoded;
+}
+
+void MqttProtocol::AttemptReconnect() {
+    std::lock_guard<std::mutex> lock(reconnect_mutex_);
+    
+    // Prevent multiple reconnection attempts
+    if (mqtt_reconnecting_) {
+        ESP_LOGD(TAG, "Reconnection already in progress");
+        return;
+    }
+    
+    mqtt_reconnecting_ = true;
+    
+    // Schedule reconnection in a background task to avoid blocking
+    Application::GetInstance().Schedule([this]() {
+        ESP_LOGI(TAG, "Attempting to reconnect to MQTT broker...");
+        
+        // Wait a bit before attempting reconnection
+        vTaskDelay(pdMS_TO_TICKS(MQTT_RECONNECT_INTERVAL_MS));
+        
+        // Check if we should still reconnect
+        if (!mqtt_should_stay_connected_) {
+            std::lock_guard<std::mutex> lock(reconnect_mutex_);
+            mqtt_reconnecting_ = false;
+            return;
+        }
+        
+        // Attempt to reconnect
+        if (StartMqttClient(false)) {
+            ESP_LOGI(TAG, "Successfully reconnected to MQTT broker");
+        } else {
+            ESP_LOGW(TAG, "Failed to reconnect, will retry on next disconnection");
+            std::lock_guard<std::mutex> lock(reconnect_mutex_);
+            mqtt_reconnecting_ = false;
+        }
+    });
 }
 
 bool MqttProtocol::IsAudioChannelOpened() const {

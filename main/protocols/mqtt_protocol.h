@@ -46,9 +46,14 @@ private:
     uint32_t local_sequence_;
     uint32_t remote_sequence_;
 
+    bool mqtt_should_stay_connected_ = false;
+    bool mqtt_reconnecting_ = false;
+    std::mutex reconnect_mutex_;
+
     bool StartMqttClient(bool report_error=false);
     void ParseServerHello(const cJSON* root);
     std::string DecodeHexString(const std::string& hex_string);
+    void AttemptReconnect();
 
     bool SendText(const std::string& text) override;
     std::string GetHelloMessage();

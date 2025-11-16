@@ -40,6 +40,9 @@ public:
     // Manual download of animations_mega.bin (for testing/debugging)
     bool DownloadMegaFileNow();
     
+    // Download mega.bin from a specific URL
+    bool DownloadMegaFileFromUrl(const std::string& url);
+    
     // Force immediate update check (bypasses success flag)
     bool ForceUpdateCheck();
     

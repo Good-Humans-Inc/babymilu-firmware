@@ -697,6 +697,22 @@ void Application::Start()
             } else {
                 ESP_LOGW(TAG, "play_url command requires url field");
             }
+        } else if (strcmp(type->valuestring, "auto_update") == 0) {
+            auto url = cJSON_GetObjectItem(root, "url");
+            if (cJSON_IsString(url)) {
+                ESP_LOGI(TAG, "Auto update requested with URL: %s", url->valuestring);
+                Schedule([url_str = std::string(url->valuestring)]() {
+                    auto& updater = AnimationUpdater::GetInstance();
+                    bool success = updater.DownloadMegaFileFromUrl(url_str);
+                    if (success) {
+                        ESP_LOGI(TAG, "Auto update completed successfully");
+                    } else {
+                        ESP_LOGE(TAG, "Auto update failed");
+                    }
+                });
+            } else {
+                ESP_LOGW(TAG, "auto_update command requires url field");
+            }
         } else {
             ESP_LOGW(TAG, "Unknown message type: %s", type->valuestring);
         } });

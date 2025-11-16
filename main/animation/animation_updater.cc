@@ -172,6 +172,28 @@ bool AnimationUpdater::DownloadMegaFileNow() {
     return true;
 }
 
+bool AnimationUpdater::DownloadMegaFileFromUrl(const std::string& url) {
+    ESP_LOGI(TAG, "Downloading animations_mega.bin from URL: %s", url.c_str());
+    
+    if (url.empty()) {
+        ESP_LOGE(TAG, "URL is empty, cannot download");
+        return false;
+    }
+    
+    // Download the file using the private method
+    bool success = DownloadMegaAnimationFile(url);
+    
+    if (success) {
+        ESP_LOGI(TAG, "Successfully downloaded animations_mega.bin from URL");
+        first_download_success_.store(true);
+        ReloadAnimations();
+    } else {
+        ESP_LOGE(TAG, "Failed to download animations_mega.bin from URL");
+    }
+    
+    return success;
+}
+
 bool AnimationUpdater::ForceUpdateCheck() {
     ESP_LOGI(TAG, "Force update check requested - bypassing success flag");
     
