@@ -61,6 +61,13 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
     });
 
     mqtt_->OnMessage([this](const std::string& topic, const std::string& payload) {
+        // Log every inbound MQTT message (topic, size, and a short prefix of the payload)
+        const int kPreviewLen = 120;
+        ESP_LOGI(TAG, "MQTT RX topic=%s len=%u prefix=%.*s",
+                 topic.c_str(),
+                 (unsigned)payload.size(),
+                 (int)std::min((int)payload.size(), kPreviewLen),
+                 payload.c_str());
         cJSON* root = cJSON_Parse(payload.c_str());
         if (root == nullptr) {
             ESP_LOGE(TAG, "Failed to parse json message %s", payload.c_str());
@@ -97,6 +104,8 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
                 std::string url_str = url->valuestring;
                 std::string token_str = cJSON_IsString(token) ? token->valuestring : "";
                 int ver = cJSON_IsNumber(version) ? version->valueint : 0;
+                ESP_LOGI(TAG, "ws_start received: url=%s, version=%d, token_present=%s",
+                         url_str.c_str(), ver, token_str.empty() ? "no" : "yes");
                 Application::GetInstance().Schedule([url_str, token_str, ver]() {
                     Application::GetInstance().OpenWebsocketForCall(url_str, token_str, ver);
                 });
