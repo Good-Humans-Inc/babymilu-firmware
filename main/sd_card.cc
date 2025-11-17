@@ -12,6 +12,10 @@
 #include <freertos/task.h>
 
 // Include SenseCAP Watcher board configuration
+    esp_err_t ret = ESP_OK;
+    sdmmc_host_t host = SDSPI_HOST_DEFAULT();
+    sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
+
 #ifdef CONFIG_BOARD_TYPE_SENSECAP_WATCHER
 #include "boards/sensecap-watcher/config.h"
 #endif
@@ -38,9 +42,7 @@ esp_err_t SdCard::Initialize()
     vTaskDelay(pdMS_TO_TICKS(100)); // 100ms delay for power stabilization
 
     // Configure SPI bus using SenseCAP Watcher pins
-    sdmmc_host_t host = SDSPI_HOST_DEFAULT();
     host.slot = SPI2_HOST;  // Use SPI2_HOST
-    
     spi_bus_config_t bus_cfg = {
         .mosi_io_num = BSP_SPI2_HOST_MOSI,
         .miso_io_num = BSP_SPI2_HOST_MISO,
@@ -50,7 +52,7 @@ esp_err_t SdCard::Initialize()
         .max_transfer_sz = 2048,
     };
 
-    esp_err_t ret = spi_bus_initialize(static_cast<spi_host_device_t>(host.slot), &bus_cfg, SDSPI_DEFAULT_DMA);
+    ret = spi_bus_initialize(static_cast<spi_host_device_t>(host.slot), &bus_cfg, SDSPI_DEFAULT_DMA);
     if (ret != ESP_OK) {
         if (ret == ESP_ERR_INVALID_STATE) {
             ESP_LOGW(TAG, "SPI bus already initialized (likely by board), continuing with SD card initialization");
@@ -67,7 +69,6 @@ esp_err_t SdCard::Initialize()
     }
 
     // Configure SD card using SenseCAP Watcher CS pin
-    sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
     slot_config.gpio_cs = BSP_SD_SPI_CS;
     slot_config.host_id = static_cast<spi_host_device_t>(host.slot);
     

@@ -178,7 +178,6 @@ void SscmaCamera::SetExplainUrl(const std::string& url, const std::string& token
 bool SscmaCamera::Capture() {
 
     SscmaData data;
-    size_t output_len = 0;
     int ret = 0;
     
     if (sscma_client_handle_ == nullptr) {
@@ -206,7 +205,7 @@ bool SscmaCamera::Capture() {
 
     ret = mbedtls_base64_decode(jpeg_data_.buf, IMG_JPEG_BUF_SIZE, &jpeg_data_.len, data.img, data.len);
     if (ret != 0 || jpeg_data_.len == 0) {
-        ESP_LOGE(TAG, "Failed to decode base64 image data, ret: %d, output_len: %zu", ret, jpeg_data_.len);
+        ESP_LOGE(TAG, "Failed to decode base64 image data, ret: %d, decoded_len: %zu", ret, jpeg_data_.len);
         heap_caps_free(data.img);
         return false;
     }

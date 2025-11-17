@@ -91,7 +91,7 @@ bool WebsocketProtocol::OpenAudioChannel() {
     }
 
     // Hardcoded WebSocket endpoint per user request
-    std::string url = "ws://34.136.76.107:8000/xiaozhi/v1/";
+    std::string url = "ws://136.117.60.16:8000/xiaozhi/v1/";
     Settings settings("websocket", false);
     std::string token = settings.GetString("token");
     int version = settings.GetInt("version");
