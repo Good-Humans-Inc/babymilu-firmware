@@ -1687,9 +1687,20 @@ void Application::OpenWebSocketConnection() {
     
     ESP_LOGI(TAG, "WebSocket connection opened successfully");
     
+    // For remote wakeup (ws_start): If device is idle, automatically enter listening state
+    // This ensures the red light turns on and audio streaming starts
+    if (device_state_ == kDeviceStateIdle) {
+        ESP_LOGI(TAG, "Remote wakeup: WebSocket opened via ws_start, automatically entering listening state");
+        // Set listening mode to manual for remote wakeup (button will control stop)
+        SetListeningMode(kListeningModeManualStop);
+        // SetListeningMode() calls SetDeviceState(kDeviceStateListening) which will:
+        // - Turn on red light (via led->OnStateChanged())
+        // - Send listen start message
+        // - Start audio capture
+    }
     // If we're already in listening state (e.g., user pressed button before ws_start),
     // send the listen start message now that the connection is ready
-    if (device_state_ == kDeviceStateListening && !audio_processor_->IsRunning()) {
+    else if (device_state_ == kDeviceStateListening && !audio_processor_->IsRunning()) {
         ESP_LOGI(TAG, "Already in listening state, sending listen start to new WebSocket connection");
         websocket_protocol_->SendStartListening(listening_mode_);
         // Small delay to ensure server processes the message
