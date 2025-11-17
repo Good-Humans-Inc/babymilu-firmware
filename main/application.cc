@@ -485,10 +485,27 @@ void Application::ToggleChatState()
     {
         Schedule([this]()
                  {
-            if (!protocol_->IsAudioChannelOpened()) {
+            auto* active_protocol = GetActiveProtocol();
+            if (!active_protocol->IsAudioChannelOpened()) {
                 SetDeviceState(kDeviceStateConnecting);
-                if (!protocol_->OpenAudioChannel()) {
-                    return;
+                
+                // Try to use WebSocket if available (from ws_start message)
+                // Otherwise fall back to primary protocol
+                Settings ws_settings("websocket", false);
+                std::string ws_url = ws_settings.GetString("url");
+                
+                if (!ws_url.empty() && (!websocket_protocol_ || !websocket_protocol_->IsAudioChannelOpened())) {
+                    // WebSocket URL is available, try to open WebSocket connection
+                    ESP_LOGI(TAG, "WebSocket URL available, opening WebSocket connection");
+                    OpenWebSocketConnection();
+                    active_protocol = GetActiveProtocol();
+                }
+                
+                // If still not opened, use primary protocol
+                if (!active_protocol->IsAudioChannelOpened()) {
+                    if (!active_protocol->OpenAudioChannel()) {
+                        return;
+                    }
                 }
             }
 
@@ -502,7 +519,12 @@ void Application::ToggleChatState()
     else if (device_state_ == kDeviceStateListening)
     {
         Schedule([this]()
-                 { protocol_->CloseAudioChannel(); });
+                 { 
+                     auto* active_protocol = GetActiveProtocol();
+                     if (active_protocol) {
+                         active_protocol->CloseAudioChannel();
+                     }
+                 });
     }
 }
 
@@ -529,10 +551,27 @@ void Application::StartListening()
     {
         Schedule([this]()
                  {
-            if (!protocol_->IsAudioChannelOpened()) {
+            auto* active_protocol = GetActiveProtocol();
+            if (!active_protocol->IsAudioChannelOpened()) {
                 SetDeviceState(kDeviceStateConnecting);
-                if (!protocol_->OpenAudioChannel()) {
-                    return;
+                
+                // Try to use WebSocket if available (from ws_start message)
+                // Otherwise fall back to primary protocol
+                Settings ws_settings("websocket", false);
+                std::string ws_url = ws_settings.GetString("url");
+                
+                if (!ws_url.empty() && (!websocket_protocol_ || !websocket_protocol_->IsAudioChannelOpened())) {
+                    // WebSocket URL is available, try to open WebSocket connection
+                    ESP_LOGI(TAG, "WebSocket URL available, opening WebSocket connection");
+                    OpenWebSocketConnection();
+                    active_protocol = GetActiveProtocol();
+                }
+                
+                // If still not opened, use primary protocol
+                if (!active_protocol->IsAudioChannelOpened()) {
+                    if (!active_protocol->OpenAudioChannel()) {
+                        return;
+                    }
                 }
             }
 
@@ -569,7 +608,11 @@ void Application::StopListening()
     Schedule([this]()
              {
         if (device_state_ == kDeviceStateListening) {
-            protocol_->SendStopListening();
+            auto* active_protocol = GetActiveProtocol();
+            if (active_protocol) {
+                ESP_LOGI(TAG, "Sending listen stop message");
+                active_protocol->SendStopListening();
+            }
             SetDeviceState(kDeviceStateIdle);
         } });
 }
@@ -674,12 +717,15 @@ void Application::Start()
     McpServer::GetInstance().AddCommonTools();
 #endif
 
+    // Always initialize MQTT protocol for listening to ws_start messages
+    // WebSocket protocol will be created on-demand for conversations
     if (ota_.HasMqttConfig())
     {
         protocol_ = std::make_unique<MqttProtocol>();
     }
     else if (ota_.HasWebsocketConfig())
     {
+        // If only WebSocket is configured, use it as primary
         protocol_ = std::make_unique<WebsocketProtocol>();
     }
     else
@@ -687,6 +733,9 @@ void Application::Start()
         ESP_LOGW(TAG, "No protocol specified in the OTA config, using MQTT");
         protocol_ = std::make_unique<MqttProtocol>();
     }
+    
+    // If MQTT is the primary protocol, we'll create WebSocket on-demand
+    // If WebSocket is the primary, we don't need a separate instance
 
     protocol_->OnNetworkError([this](const std::string &message)
                               {
@@ -910,11 +959,25 @@ void Application::Start()
             if (device_state_ == kDeviceStateIdle) {
                 wake_word_->EncodeWakeWordData();
 
-                if (!protocol_->IsAudioChannelOpened()) {
+                auto* active_protocol = GetActiveProtocol();
+                if (!active_protocol->IsAudioChannelOpened()) {
                     SetDeviceState(kDeviceStateConnecting);
-                    if (!protocol_->OpenAudioChannel()) {
-                        wake_word_->StartDetection();
-                        return;
+                    
+                    // Try to use WebSocket if available (from ws_start message)
+                    Settings ws_settings("websocket", false);
+                    std::string ws_url = ws_settings.GetString("url");
+                    
+                    if (!ws_url.empty() && (!websocket_protocol_ || !websocket_protocol_->IsAudioChannelOpened())) {
+                        ESP_LOGI(TAG, "WebSocket URL available, opening WebSocket connection");
+                        OpenWebSocketConnection();
+                        active_protocol = GetActiveProtocol();
+                    }
+                    
+                    if (!active_protocol->IsAudioChannelOpened()) {
+                        if (!active_protocol->OpenAudioChannel()) {
+                            wake_word_->StartDetection();
+                            return;
+                        }
                     }
                 }
 
@@ -923,10 +986,16 @@ void Application::Start()
                 AudioStreamPacket packet;
                 // Encode and send the wake word data to the server
                 while (wake_word_->GetWakeWordOpus(packet.payload)) {
-                    protocol_->SendAudio(packet);
+                    auto* active_protocol = GetActiveProtocol();
+                    if (active_protocol) {
+                        active_protocol->SendAudio(packet);
+                    }
                 }
                 // Set the chat state to wake word detected
-                protocol_->SendWakeWordDetected(wake_word);
+                // Use primary protocol for wake word detection (MQTT)
+                if (protocol_) {
+                    protocol_->SendWakeWordDetected(wake_word);
+                }
 #else
                 // Play the pop up sound to indicate the wake word is detected
                 // And wait 60ms to make sure the queue has been processed by audio task
@@ -1024,7 +1093,8 @@ void Application::MainEventLoop()
             lock.unlock();
             for (auto &packet : packets)
             {
-                if (!protocol_->SendAudio(packet))
+                auto* active_protocol = GetActiveProtocol();
+                if (!active_protocol || !active_protocol->SendAudio(packet))
                 {
                     break;
                 }
@@ -1294,8 +1364,32 @@ void Application::SetDeviceState(DeviceState state)
         // Make sure the audio processor is running
         if (!audio_processor_->IsRunning())
         {
-            // Send the start listening command
-            protocol_->SendStartListening(listening_mode_);
+            // Send the start listening command FIRST
+            auto* active_protocol = GetActiveProtocol();
+            if (active_protocol && active_protocol->IsAudioChannelOpened()) {
+                // Only send listen start if the connection is actually open and ready
+                // Detect if this is a remote wakeup scenario (WebSocket already open from ws_start)
+                // vs manual connection (opening WebSocket now)
+                bool is_remote_wakeup = (websocket_protocol_ && 
+                                       websocket_protocol_->IsAudioChannelOpened() && 
+                                       previous_state == kDeviceStateIdle);
+                
+                ESP_LOGI(TAG, "Sending listen start message, mode=%d (0=auto, 1=manual, 2=realtime)%s", 
+                        listening_mode_, is_remote_wakeup ? " [remote wakeup]" : "");
+                active_protocol->SendStartListening(listening_mode_);
+                
+                // For remote wakeup ONLY: Add small delay after listen:start to ensure server
+                // has time to process the message before receiving audio frames.
+                // Manual connections don't need this delay as they open the connection fresh.
+                if (is_remote_wakeup) {
+                    ESP_LOGI(TAG, "Remote wakeup: waiting 50ms after listen:start for server to process");
+                    vTaskDelay(pdMS_TO_TICKS(50));
+                }
+            } else {
+                ESP_LOGW(TAG, "Cannot send listen start: protocol not available or connection not open");
+                ESP_LOGW(TAG, "Will send listen start when connection is ready (e.g., after ws_start opens WebSocket)");
+            }
+            
             if (previous_state == kDeviceStateSpeaking)
             {
                 audio_decode_queue_.clear();
@@ -1303,7 +1397,15 @@ void Application::SetDeviceState(DeviceState state)
                 // FIXME: Wait for the speaker to empty the buffer
                 vTaskDelay(pdMS_TO_TICKS(120));
             }
+            
             opus_encoder_->ResetState();
+            
+            // Log Opus encoder configuration
+            auto codec = Board::GetInstance().GetAudioCodec();
+            ESP_LOGI(TAG, "Audio config: input_sample_rate=%d, Opus encoder=16000Hz mono, frame_duration=%dms (960 samples)", 
+                     codec ? codec->input_sample_rate() : 0, OPUS_FRAME_DURATION_MS);
+            
+            ESP_LOGI(TAG, "Starting audio capture and streaming...");
             audio_processor_->Start();
             wake_word_->StopDetection();
         }
@@ -1462,7 +1564,144 @@ void Application::SetAecMode(AecMode mode)
         }
 
         // If the AEC mode is changed, close the audio channel
-        if (protocol_ && protocol_->IsAudioChannelOpened()) {
-            protocol_->CloseAudioChannel();
+        auto* active_protocol = GetActiveProtocol();
+        if (active_protocol && active_protocol->IsAudioChannelOpened()) {
+            active_protocol->CloseAudioChannel();
         } });
+}
+
+Protocol* Application::GetActiveProtocol() {
+    // If WebSocket protocol exists and is opened, use it for conversations
+    // Otherwise, use the primary protocol (MQTT or WebSocket)
+    if (websocket_protocol_ && websocket_protocol_->IsAudioChannelOpened()) {
+        return websocket_protocol_.get();
+    }
+    return protocol_.get();
+}
+
+void Application::OpenWebSocketConnection() {
+    // If WebSocket protocol already exists and is opened, do nothing
+    if (websocket_protocol_ && websocket_protocol_->IsAudioChannelOpened()) {
+        ESP_LOGI(TAG, "WebSocket connection already open");
+        return;
+    }
+    
+    // Create WebSocket protocol if it doesn't exist
+    if (!websocket_protocol_) {
+        ESP_LOGI(TAG, "Creating WebSocket protocol instance");
+        websocket_protocol_ = std::make_unique<WebsocketProtocol>();
+        
+        // Set up callbacks same as primary protocol
+        websocket_protocol_->OnNetworkError([this](const std::string &message) {
+            SetDeviceState(kDeviceStateIdle);
+            Alert(Lang::Strings::ERROR, message.c_str(), "sad", Lang::Sounds::P3_EXCLAMATION);
+        });
+        
+        websocket_protocol_->OnIncomingAudio([this](AudioStreamPacket &&packet) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (device_state_ == kDeviceStateSpeaking && audio_decode_queue_.size() < MAX_AUDIO_PACKETS_IN_QUEUE) {
+                audio_decode_queue_.emplace_back(std::move(packet));
+            }
+        });
+        
+        websocket_protocol_->OnAudioChannelOpened([this, codec = Board::GetInstance().GetAudioCodec(), &board = Board::GetInstance()]() {
+            board.SetPowerSaveMode(false);
+            if (websocket_protocol_->server_sample_rate() != codec->output_sample_rate()) {
+                ESP_LOGW(TAG, "Server sample rate %d does not match device output sample rate %d, resampling may cause distortion",
+                         websocket_protocol_->server_sample_rate(), codec->output_sample_rate());
+            }
+        });
+        
+        websocket_protocol_->OnAudioChannelClosed([this, &board = Board::GetInstance()]() {
+            board.SetPowerSaveMode(true);
+            Schedule([this]() {
+                SetDeviceState(kDeviceStateIdle);
+            });
+        });
+        
+        // Set up JSON handler - use the same handler as primary protocol
+        auto display = Board::GetInstance().GetDisplay();
+        websocket_protocol_->OnIncomingJson([this, display](const cJSON *root) {
+            // Use the same JSON parsing logic as primary protocol
+            auto type = cJSON_GetObjectItem(root, "type");
+            if (!cJSON_IsString(type)) {
+                return;
+            }
+            
+            if (strcmp(type->valuestring, "tts") == 0) {
+                auto state = cJSON_GetObjectItem(root, "state");
+                if (strcmp(state->valuestring, "start") == 0) {
+                    Schedule([this]() {
+                        aborted_ = false;
+                        if (device_state_ == kDeviceStateIdle || device_state_ == kDeviceStateListening) {
+                            SetDeviceState(kDeviceStateSpeaking);
+                        }
+                    });
+                } else if (strcmp(state->valuestring, "stop") == 0) {
+                    Schedule([this]() {
+                        background_task_->WaitForCompletion();
+                        if (device_state_ == kDeviceStateSpeaking) {
+                            if (listening_mode_ == kListeningModeManualStop) {
+                                SetDeviceState(kDeviceStateIdle);
+                            } else {
+                                SetDeviceState(kDeviceStateListening);
+                            }
+                        }
+                    });
+                } else if (strcmp(state->valuestring, "sentence_start") == 0) {
+                    auto text = cJSON_GetObjectItem(root, "text");
+                    if (cJSON_IsString(text)) {
+                        ESP_LOGI(TAG, "<< %s", text->valuestring);
+                    }
+                }
+            } else if (strcmp(type->valuestring, "stt") == 0) {
+                auto text = cJSON_GetObjectItem(root, "text");
+                if (cJSON_IsString(text)) {
+                    ESP_LOGI(TAG, ">> %s", text->valuestring);
+                }
+            } else if (strcmp(type->valuestring, "llm") == 0) {
+                auto emotion = cJSON_GetObjectItem(root, "emotion");
+                if (cJSON_IsString(emotion)) {
+                    Schedule([this, display, emotion_str = std::string(emotion->valuestring)]() {
+                        display->SetEmotion(emotion_str.c_str());
+                    });
+                }
+            }
+            // Add other message type handlers as needed
+        });
+        
+        // Start the WebSocket protocol
+        if (!websocket_protocol_->Start()) {
+            ESP_LOGE(TAG, "Failed to start WebSocket protocol");
+            websocket_protocol_.reset();
+            return;
+        }
+    }
+    
+    // Open the audio channel
+    ESP_LOGI(TAG, "Opening WebSocket audio channel");
+    if (!websocket_protocol_->OpenAudioChannel()) {
+        ESP_LOGE(TAG, "Failed to open WebSocket audio channel");
+        return;
+    }
+    
+    ESP_LOGI(TAG, "WebSocket connection opened successfully");
+    
+    // If we're already in listening state (e.g., user pressed button before ws_start),
+    // send the listen start message now that the connection is ready
+    if (device_state_ == kDeviceStateListening && !audio_processor_->IsRunning()) {
+        ESP_LOGI(TAG, "Already in listening state, sending listen start to new WebSocket connection");
+        websocket_protocol_->SendStartListening(listening_mode_);
+        // Small delay to ensure server processes the message
+        vTaskDelay(pdMS_TO_TICKS(50));
+        // Start audio capture if not already running
+        if (!audio_processor_->IsRunning()) {
+            opus_encoder_->ResetState();
+            auto codec = Board::GetInstance().GetAudioCodec();
+            ESP_LOGI(TAG, "Starting audio capture: input_sample_rate=%d, Opus encoder=16000Hz mono, frame_duration=%dms", 
+                     codec ? codec->input_sample_rate() : 0, OPUS_FRAME_DURATION_MS);
+            audio_processor_->Start();
+            wake_word_->StopDetection();
+        }
+    }
 }

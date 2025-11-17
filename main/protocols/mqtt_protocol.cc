@@ -12,8 +12,31 @@
 
 #define TAG "MQTT"
 
+static bool IsValidWebSocketUrl(const std::string& url) {
+    // Check for empty URL
+    if (url.empty()) {
+        return false;
+    }
+    
+    // Check for localhost or loopback addresses
+    if (url.find("127.0.0.1") != std::string::npos ||
+        url.find("localhost") != std::string::npos ||
+        url.find("::1") != std::string::npos ||
+        url.find("0.0.0.0") != std::string::npos) {
+        return false;
+    }
+    
+    // Basic validation: should start with ws:// or wss://
+    if (url.find("ws://") != 0 && url.find("wss://") != 0) {
+        return false;
+    }
+    
+    return true;
+}
+
 MqttProtocol::MqttProtocol() {
     event_group_handle_ = xEventGroupCreate();
+    server_requested_websocket_ = false;
 }
 
 MqttProtocol::~MqttProtocol() {
@@ -91,6 +114,40 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
         if (strcmp(type->valuestring, "hello") == 0) {
             ESP_LOGI(TAG, "Received server hello message");
             ParseServerHello(root);
+        } else if (strcmp(type->valuestring, "ws_start") == 0) {
+            // Server is redirecting to WebSocket
+            server_requested_websocket_ = true;
+            auto wss_url = cJSON_GetObjectItem(root, "wss");
+            auto version = cJSON_GetObjectItem(root, "version");
+            
+            if (cJSON_IsString(wss_url)) {
+                std::string url = wss_url->valuestring;
+                ESP_LOGI(TAG, "Server requests WebSocket connection: %s", url.c_str());
+                
+                // Validate URL before saving
+                if (!IsValidWebSocketUrl(url)) {
+                    ESP_LOGW(TAG, "Invalid WebSocket URL received (localhost/invalid): %s, will use default URL instead", url.c_str());
+                    // Don't save invalid URL, let WebSocket protocol use default
+                } else {
+                    // Save WebSocket URL and version to settings
+                    Settings ws_settings("websocket", true);
+                    ws_settings.SetString("url", url);
+                    if (cJSON_IsNumber(version)) {
+                        ws_settings.SetInt("version", version->valueint);
+                        ESP_LOGI(TAG, "WebSocket version: %d", version->valueint);
+                    }
+                    ESP_LOGI(TAG, "WebSocket URL saved. Opening WebSocket connection for conversation...");
+                }
+                
+                // Schedule opening WebSocket connection in the application context
+                // (will use default URL if invalid URL was received)
+                Application::GetInstance().Schedule([this]() {
+                    Application::GetInstance().OpenWebSocketConnection();
+                });
+            } else {
+                ESP_LOGE(TAG, "ws_start message missing 'wss' field");
+            }
+            // Don't pass ws_start to on_incoming_json_ as it's a protocol-level message
         } else if (strcmp(type->valuestring, "goodbye") == 0) {
             auto session_id = cJSON_GetObjectItem(root, "session_id");
             ESP_LOGI(TAG, "Received goodbye message, session_id: %s", session_id ? session_id->valuestring : "null");
@@ -208,6 +265,7 @@ bool MqttProtocol::OpenAudioChannel() {
 
     error_occurred_ = false;
     session_id_ = "";
+    server_requested_websocket_ = false;
     xEventGroupClearBits(event_group_handle_, MQTT_PROTOCOL_SERVER_HELLO_EVENT);
 
     auto message = GetHelloMessage();
@@ -220,8 +278,14 @@ bool MqttProtocol::OpenAudioChannel() {
     ESP_LOGI(TAG, "Waiting for server hello response...");
     EventBits_t bits = xEventGroupWaitBits(event_group_handle_, MQTT_PROTOCOL_SERVER_HELLO_EVENT, pdTRUE, pdFALSE, pdMS_TO_TICKS(10000));
     if (!(bits & MQTT_PROTOCOL_SERVER_HELLO_EVENT)) {
-        ESP_LOGE(TAG, "Failed to receive server hello");
-        SetError(Lang::Strings::SERVER_TIMEOUT);
+        if (server_requested_websocket_) {
+            ESP_LOGE(TAG, "Server requested WebSocket instead of MQTT. MQTT audio channels are not supported by this server.");
+            ESP_LOGE(TAG, "Please configure the device to use WebSocket protocol instead of MQTT.");
+            SetError("Server requires WebSocket protocol");
+        } else {
+            ESP_LOGE(TAG, "Failed to receive server hello");
+            SetError(Lang::Strings::SERVER_TIMEOUT);
+        }
         return false;
     }
 
@@ -286,6 +350,14 @@ bool MqttProtocol::OpenAudioChannel() {
 
 std::string MqttProtocol::GetHelloMessage() {
     // 发送 hello 消息申请 UDP 通道
+    // Get the device's actual output sample rate to avoid resampling
+    auto codec = Board::GetInstance().GetAudioCodec();
+    int requested_sample_rate = codec ? codec->output_sample_rate() : 16000;
+    // Fallback to 16000 if codec not available or if it's 0
+    if (requested_sample_rate == 0) {
+        requested_sample_rate = 16000;
+    }
+    
     cJSON* root = cJSON_CreateObject();
     cJSON_AddStringToObject(root, "type", "hello");
     cJSON_AddNumberToObject(root, "version", 3);
@@ -300,7 +372,7 @@ std::string MqttProtocol::GetHelloMessage() {
     cJSON_AddItemToObject(root, "features", features);
     cJSON* audio_params = cJSON_CreateObject();
     cJSON_AddStringToObject(audio_params, "format", "opus");
-    cJSON_AddNumberToObject(audio_params, "sample_rate", 16000);
+    cJSON_AddNumberToObject(audio_params, "sample_rate", requested_sample_rate);
     cJSON_AddNumberToObject(audio_params, "channels", 1);
     cJSON_AddNumberToObject(audio_params, "frame_duration", OPUS_FRAME_DURATION_MS);
     cJSON_AddItemToObject(root, "audio_params", audio_params);

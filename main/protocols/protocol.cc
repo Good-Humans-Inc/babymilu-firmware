@@ -47,6 +47,12 @@ void Protocol::SendWakeWordDetected(const std::string& wake_word) {
 }
 
 void Protocol::SendStartListening(ListeningMode mode) {
+    // Don't send listen message if session_id is empty (connection not ready)
+    if (session_id_.empty()) {
+        ESP_LOGW("Protocol", "Cannot send listen start: session_id is empty (connection not ready)");
+        return;
+    }
+    
     std::string message = "{\"session_id\":\"" + session_id_ + "\"";
     message += ",\"type\":\"listen\",\"state\":\"start\"";
     if (mode == kListeningModeRealtime) {
@@ -57,11 +63,13 @@ void Protocol::SendStartListening(ListeningMode mode) {
         message += ",\"mode\":\"manual\"";
     }
     message += "}";
+    ESP_LOGI("Protocol", "Sending listen start: %s", message.c_str());
     SendText(message);
 }
 
 void Protocol::SendStopListening() {
     std::string message = "{\"session_id\":\"" + session_id_ + "\",\"type\":\"listen\",\"state\":\"stop\"}";
+    ESP_LOGI("Protocol", "Sending listen stop: %s", message.c_str());
     SendText(message);
 }
 

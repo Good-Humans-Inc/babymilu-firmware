@@ -25,6 +25,7 @@ private:
     EventGroupHandle_t event_group_handle_;
     WebSocket* websocket_ = nullptr;
     int version_ = 1;
+    int frame_count_ = 0;  // Counter for Opus frames sent
 
     void ParseServerHello(const cJSON* root);
     bool SendText(const std::string& text) override;

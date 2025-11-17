@@ -29,7 +29,8 @@ bool WebsocketProtocol::Start() {
 }
 
 bool WebsocketProtocol::SendAudio(const AudioStreamPacket& packet) {
-    if (websocket_ == nullptr) {
+    if (websocket_ == nullptr || !websocket_->IsConnected()) {
+        ESP_LOGW(TAG, "Cannot send audio: websocket is null or not connected");
         return false;
     }
 
@@ -46,15 +47,16 @@ bool WebsocketProtocol::SendAudio(const AudioStreamPacket& packet) {
 
         return websocket_->Send(serialized.data(), serialized.size(), true);
     } else if (version_ == 3) {
-        std::string serialized;
-        serialized.resize(sizeof(BinaryProtocol3) + packet.payload.size());
-        auto bp3 = (BinaryProtocol3*)serialized.data();
-        bp3->type = 0;
-        bp3->reserved = 0;
-        bp3->payload_size = htons(packet.payload.size());
-        memcpy(bp3->payload, packet.payload.data(), packet.payload.size());
-
-        return websocket_->Send(serialized.data(), serialized.size(), true);
+        // Version 3: Send raw Opus frames as binary messages (no wrapper)
+        // This matches the server's expectation for version 3
+        frame_count_++;
+        if (frame_count_ % 50 == 0 || frame_count_ <= 5) {
+            // Log every 50th frame or first 5 frames for debugging
+            ESP_LOGI(TAG, "Sending Opus frame %d, bytes=%zu", frame_count_, (size_t)packet.payload.size());
+        } else {
+            ESP_LOGD(TAG, "Sending Opus frame %d, bytes=%zu", frame_count_, (size_t)packet.payload.size());
+        }
+        return websocket_->Send(packet.payload.data(), packet.payload.size(), true);
     } else {
         return websocket_->Send(packet.payload.data(), packet.payload.size(), true);
     }
@@ -85,14 +87,67 @@ void WebsocketProtocol::CloseAudioChannel() {
     }
 }
 
+static bool IsValidWebSocketUrl(const std::string& url) {
+    // Check for empty URL
+    if (url.empty()) {
+        return false;
+    }
+    
+    // Check for localhost or loopback addresses
+    if (url.find("127.0.0.1") != std::string::npos ||
+        url.find("localhost") != std::string::npos ||
+        url.find("::1") != std::string::npos ||
+        url.find("0.0.0.0") != std::string::npos) {
+        return false;
+    }
+    
+    // Basic validation: should start with ws:// or wss://
+    if (url.find("ws://") != 0 && url.find("wss://") != 0) {
+        return false;
+    }
+    
+    return true;
+}
+
 bool WebsocketProtocol::OpenAudioChannel() {
     if (websocket_ != nullptr) {
         delete websocket_;
     }
 
-    // Hardcoded WebSocket endpoint per user request
-    std::string url = "ws://136.117.60.16:8000/xiaozhi/v1/";
     Settings settings("websocket", false);
+    std::string url = settings.GetString("url");
+    
+    // Validate URL and fallback to hardcoded URL if invalid
+    const std::string default_url = "ws://136.117.60.16:8000/xiaozhi/v1/";
+    if (!IsValidWebSocketUrl(url)) {
+        if (!url.empty()) {
+            ESP_LOGW(TAG, "Invalid WebSocket URL in settings (localhost/invalid): %s, using default and clearing invalid URL", url.c_str());
+            // Clear invalid URL from settings
+            settings.SetString("url", "");
+        } else {
+            ESP_LOGW(TAG, "No WebSocket URL in settings, using default: %s", default_url.c_str());
+        }
+        url = default_url;
+    } else {
+        ESP_LOGI(TAG, "Using WebSocket URL from settings: %s", url.c_str());
+    }
+    
+    // Add device-id and client-id as query parameters to the URL
+    // Only add if they're not already present (URL from ws_start may already have them)
+    std::string mac_address = SystemInfo::GetMacAddress();
+    std::string client_id = Board::GetInstance().GetUuid();
+    
+    // Check if URL already has query parameters (if it has '?', assume params are already there)
+    // This prevents duplicate params when ws_start message includes them
+    if (url.find('?') == std::string::npos) {
+        // No query parameters yet, add them
+        url += "?device-id=" + mac_address + "&client-id=" + client_id;
+        ESP_LOGI(TAG, "WebSocket URL with query params added: %s", url.c_str());
+    } else {
+        // URL already has query parameters, use as-is
+        ESP_LOGI(TAG, "WebSocket URL already has query params (using as-is): %s", url.c_str());
+    }
+    
     std::string token = settings.GetString("token");
     int version = settings.GetInt("version");
     if (version != 0) {
@@ -100,12 +155,7 @@ bool WebsocketProtocol::OpenAudioChannel() {
     }
 
     error_occurred_ = false;
-
-    // Ensure transport selection matches the URL scheme by updating NVS
-    {
-        Settings ws_write("websocket", true);
-        ws_write.SetString("url", url);
-    }
+    frame_count_ = 0;  // Reset frame counter for new session
     websocket_ = Board::GetInstance().CreateWebSocket();
     
     if (!token.empty()) {
@@ -116,8 +166,9 @@ bool WebsocketProtocol::OpenAudioChannel() {
         websocket_->SetHeader("Authorization", token.c_str());
     }
     websocket_->SetHeader("Protocol-Version", std::to_string(version_).c_str());
-    websocket_->SetHeader("Device-Id", SystemInfo::GetMacAddress().c_str());
-    websocket_->SetHeader("Client-Id", Board::GetInstance().GetUuid().c_str());
+    // Note: Device-Id and Client-Id are now in URL query params, but keep headers for backward compatibility
+    websocket_->SetHeader("Device-Id", mac_address.c_str());
+    websocket_->SetHeader("Client-Id", client_id.c_str());
 
     websocket_->OnData([this](const char* data, size_t len, bool binary) {
         if (binary) {
@@ -136,16 +187,42 @@ bool WebsocketProtocol::OpenAudioChannel() {
                         .payload = std::vector<uint8_t>(payload, payload + bp2->payload_size)
                     });
                 } else if (version_ == 3) {
-                    BinaryProtocol3* bp3 = (BinaryProtocol3*)data;
-                    bp3->type = bp3->type;
-                    bp3->payload_size = ntohs(bp3->payload_size);
-                    auto payload = (uint8_t*)bp3->payload;
-                    on_incoming_audio_(AudioStreamPacket{
-                        .sample_rate = server_sample_rate_,
-                        .frame_duration = server_frame_duration_,
-                        .timestamp = 0,
-                        .payload = std::vector<uint8_t>(payload, payload + bp3->payload_size)
-                    });
+                    // Version 3: Server may send raw Opus frames or wrapped frames
+                    // Try to detect if it's a wrapped frame by checking for BinaryProtocol3 header
+                    // BinaryProtocol3 has: type (1 byte), reserved (1 byte), payload_size (2 bytes)
+                    if (len >= 4 && len < 10000) {
+                        // Check if it looks like a wrapped frame (small payload_size in first 2 bytes after type/reserved)
+                        uint16_t payload_size = ntohs(*(uint16_t*)(data + 2));
+                        if (payload_size > 0 && payload_size <= len - 4 && payload_size < 4000) {
+                            // Likely a wrapped frame
+                            BinaryProtocol3* bp3 = (BinaryProtocol3*)data;
+                            bp3->type = bp3->type;
+                            bp3->payload_size = ntohs(bp3->payload_size);
+                            auto payload = (uint8_t*)bp3->payload;
+                            on_incoming_audio_(AudioStreamPacket{
+                                .sample_rate = server_sample_rate_,
+                                .frame_duration = server_frame_duration_,
+                                .timestamp = 0,
+                                .payload = std::vector<uint8_t>(payload, payload + bp3->payload_size)
+                            });
+                        } else {
+                            // Likely a raw Opus frame
+                            on_incoming_audio_(AudioStreamPacket{
+                                .sample_rate = server_sample_rate_,
+                                .frame_duration = server_frame_duration_,
+                                .timestamp = 0,
+                                .payload = std::vector<uint8_t>((uint8_t*)data, (uint8_t*)data + len)
+                            });
+                        }
+                    } else {
+                        // Raw Opus frame
+                        on_incoming_audio_(AudioStreamPacket{
+                            .sample_rate = server_sample_rate_,
+                            .frame_duration = server_frame_duration_,
+                            .timestamp = 0,
+                            .payload = std::vector<uint8_t>((uint8_t*)data, (uint8_t*)data + len)
+                        });
+                    }
                 } else {
                     on_incoming_audio_(AudioStreamPacket{
                         .sample_rate = server_sample_rate_,
@@ -191,6 +268,7 @@ bool WebsocketProtocol::OpenAudioChannel() {
 
     // Send hello message to describe the client
     auto message = GetHelloMessage();
+    ESP_LOGI(TAG, "Sending hello message: %s", message.c_str());
     if (!SendText(message)) {
         return false;
     }
@@ -212,6 +290,10 @@ bool WebsocketProtocol::OpenAudioChannel() {
 
 std::string WebsocketProtocol::GetHelloMessage() {
     // keys: message type, version, audio_params (format, sample_rate, channels)
+    // Always request 16 kHz for WebSocket as per server requirements
+    // The Opus encoder is configured for 16 kHz, and input is resampled to 16 kHz if needed
+    int requested_sample_rate = 16000;
+    
     cJSON* root = cJSON_CreateObject();
     cJSON_AddStringToObject(root, "type", "hello");
     cJSON_AddNumberToObject(root, "version", version_);
@@ -226,7 +308,7 @@ std::string WebsocketProtocol::GetHelloMessage() {
     cJSON_AddStringToObject(root, "transport", "websocket");
     cJSON* audio_params = cJSON_CreateObject();
     cJSON_AddStringToObject(audio_params, "format", "opus");
-    cJSON_AddNumberToObject(audio_params, "sample_rate", 16000);
+    cJSON_AddNumberToObject(audio_params, "sample_rate", requested_sample_rate);
     cJSON_AddNumberToObject(audio_params, "channels", 1);
     cJSON_AddNumberToObject(audio_params, "frame_duration", OPUS_FRAME_DURATION_MS);
     cJSON_AddItemToObject(root, "audio_params", audio_params);

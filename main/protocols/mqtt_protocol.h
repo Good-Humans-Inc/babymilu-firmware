@@ -36,6 +36,7 @@ private:
 
     std::string publish_topic_;
     std::string subscribe_topic_;
+    bool server_requested_websocket_;
 
     std::mutex channel_mutex_;
     Mqtt* mqtt_ = nullptr;

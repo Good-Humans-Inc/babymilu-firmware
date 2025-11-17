@@ -83,6 +83,8 @@ public:
     AecMode GetAecMode() const { return aec_mode_; }
     BackgroundTask* GetBackgroundTask() const { return background_task_; }
     void ClearWifiConfiguration();
+    Protocol* GetActiveProtocol();  // Returns the protocol to use for audio (WebSocket if available, else primary)
+    void OpenWebSocketConnection();  // Opens WebSocket connection for conversations
 
 private:
     Application();
@@ -94,7 +96,8 @@ private:
     Ota ota_;
     std::mutex mutex_;
     std::list<std::function<void()>> main_tasks_;
-    std::unique_ptr<Protocol> protocol_;
+    std::unique_ptr<Protocol> protocol_;  // Primary protocol (MQTT for listening, or WebSocket if configured)
+    std::unique_ptr<Protocol> websocket_protocol_;  // WebSocket protocol for conversations
     EventGroupHandle_t event_group_ = nullptr;
     esp_timer_handle_t clock_timer_handle_ = nullptr;
     volatile DeviceState device_state_ = kDeviceStateUnknown;
