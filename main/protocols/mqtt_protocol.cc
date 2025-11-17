@@ -44,6 +44,19 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
     auto password = settings.GetString("password");
     int keepalive_interval = settings.GetInt("keepalive", 120);
     publish_topic_ = settings.GetString("publish_topic");
+    
+    // Derive subscribe topic from publish topic (replace /up with /down)
+    subscribe_topic_ = settings.GetString("subscribe_topic");
+    if (subscribe_topic_.empty() && !publish_topic_.empty()) {
+        subscribe_topic_ = publish_topic_;
+        size_t pos = subscribe_topic_.rfind("/up");
+        if (pos != std::string::npos) {
+            subscribe_topic_.replace(pos, 3, "/down");
+        } else {
+            // If no /up pattern, append /down
+            subscribe_topic_ += "/down";
+        }
+    }
 
     if (endpoint.empty()) {
         ESP_LOGW(TAG, "MQTT endpoint is not specified");
@@ -61,6 +74,7 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
     });
 
     mqtt_->OnMessage([this](const std::string& topic, const std::string& payload) {
+        ESP_LOGI(TAG, "Received message on topic: %s, payload: %s", topic.c_str(), payload.c_str());
         cJSON* root = cJSON_Parse(payload.c_str());
         if (root == nullptr) {
             ESP_LOGE(TAG, "Failed to parse json message %s", payload.c_str());
@@ -73,7 +87,9 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
             return;
         }
 
+        ESP_LOGI(TAG, "Processing message type: %s", type->valuestring);
         if (strcmp(type->valuestring, "hello") == 0) {
+            ESP_LOGI(TAG, "Received server hello message");
             ParseServerHello(root);
         } else if (strcmp(type->valuestring, "goodbye") == 0) {
             auto session_id = cJSON_GetObjectItem(root, "session_id");
@@ -107,6 +123,20 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
     }
 
     ESP_LOGI(TAG, "Connected to endpoint");
+    
+    // Subscribe to receive messages from server
+    if (!subscribe_topic_.empty()) {
+        ESP_LOGI(TAG, "Subscribing to topic: %s", subscribe_topic_.c_str());
+        if (!mqtt_->Subscribe(subscribe_topic_)) {
+            ESP_LOGE(TAG, "Failed to subscribe to topic: %s", subscribe_topic_.c_str());
+            // Don't fail completely, but log the error
+        } else {
+            ESP_LOGI(TAG, "Successfully subscribed to topic: %s", subscribe_topic_.c_str());
+        }
+    } else {
+        ESP_LOGW(TAG, "Subscribe topic is empty, cannot subscribe to receive messages");
+    }
+    
     return true;
 }
 
@@ -181,11 +211,13 @@ bool MqttProtocol::OpenAudioChannel() {
     xEventGroupClearBits(event_group_handle_, MQTT_PROTOCOL_SERVER_HELLO_EVENT);
 
     auto message = GetHelloMessage();
+    ESP_LOGI(TAG, "Sending hello message to topic: %s", publish_topic_.c_str());
     if (!SendText(message)) {
         return false;
     }
 
     // 等待服务器响应
+    ESP_LOGI(TAG, "Waiting for server hello response...");
     EventBits_t bits = xEventGroupWaitBits(event_group_handle_, MQTT_PROTOCOL_SERVER_HELLO_EVENT, pdTRUE, pdFALSE, pdMS_TO_TICKS(10000));
     if (!(bits & MQTT_PROTOCOL_SERVER_HELLO_EVENT)) {
         ESP_LOGE(TAG, "Failed to receive server hello");

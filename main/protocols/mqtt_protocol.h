@@ -35,6 +35,7 @@ private:
     EventGroupHandle_t event_group_handle_;
 
     std::string publish_topic_;
+    std::string subscribe_topic_;
 
     std::mutex channel_mutex_;
     Mqtt* mqtt_ = nullptr;
