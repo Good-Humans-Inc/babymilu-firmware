@@ -1087,99 +1087,24 @@ void LcdDisplay::SetEmotionImg(const lv_image_dsc_t *img)
     
     lv_img_set_src(emotion_label_, img);
     
-    // Scale animation to fit display better - 128x128 -> 412x412 FULL SCREEN SCALING
+    // Set animation scale to 200% (2x) and apply 66 degree clockwise rotation
     if (img != nullptr) {
-        // Safety checks to prevent division by zero
-        lv_coord_t img_width = img->header.w;
-        lv_coord_t img_height = img->header.h;
+        // Set scale to 200% (512 in LVGL units, where 256 = 100%)
+        lv_coord_t scale = 512;  // 200% = 2x = 512/256
         
-        // Prevent division by zero and invalid image dimensions
-        if (img_width <= 0 || img_height <= 0) {
-            ESP_LOGE(TAG, "Invalid image dimensions: %dx%d", img_width, img_height);
-            return;
-        }
+        // Apply 66 degree clockwise rotation
+        // LVGL uses tenths of degrees, so 66 degrees = 660
+        // Positive values rotate clockwise
+        int16_t angle = 660;  // 66 degrees clockwise
         
-        // Additional safety checks for reasonable image dimensions
-        if (img_width > 2048 || img_height > 2048) {
-            ESP_LOGE(TAG, "Image dimensions too large: %dx%d", img_width, img_height);
-            return;
-        }
+        // Apply zoom/scale
+        lv_img_set_zoom(emotion_label_, scale);
         
-        // For 128x128 image to become 408x408 SPD2010 ALIGNED: scale = 408/128 = 3.1875
-        // In LVGL scale units: 3.1875 * 256 = 816
-        // 408 is perfectly divisible by 4 (SPD2010 requirement): 408 ÷ 4 = 102
-        lv_coord_t target_width = 408;   // 4-pixel aligned for SPD2010 driver
-        lv_coord_t target_height = 408;  // 4-pixel aligned for SPD2010 driver
+        // Apply rotation
+        lv_img_set_angle(emotion_label_, angle);
         
-        // Additional safety check for target dimensions
-        if (target_width <= 0 || target_height <= 0) {
-            ESP_LOGE(TAG, "Invalid target dimensions: %dx%d", target_width, target_height);
-            return;
-        }
-        
-        // Calculate scale factors for both dimensions with additional safety
-        lv_coord_t scale_w = 0;
-        lv_coord_t scale_h = 0;
-        
-        // Safe division with overflow protection
-        if (img_width > 0 && target_width > 0) {
-            // Use 64-bit arithmetic to prevent overflow
-            int64_t scale_w_64 = ((int64_t)target_width * 256) / img_width;
-            if (scale_w_64 > INT32_MAX) {
-                scale_w = INT32_MAX;
-            } else if (scale_w_64 < INT32_MIN) {
-                scale_w = INT32_MIN;
-            } else {
-                scale_w = (lv_coord_t)scale_w_64;
-            }
-        } else {
-            ESP_LOGE(TAG, "Division by zero prevented: img_width=%d, target_width=%d", img_width, target_width);
-            return;
-        }
-        
-        if (img_height > 0 && target_height > 0) {
-            // Use 64-bit arithmetic to prevent overflow
-            int64_t scale_h_64 = ((int64_t)target_height * 256) / img_height;
-            if (scale_h_64 > INT32_MAX) {
-                scale_h = INT32_MAX;
-            } else if (scale_h_64 < INT32_MIN) {
-                scale_h = INT32_MIN;
-            } else {
-                scale_h = (lv_coord_t)scale_h_64;
-            }
-        } else {
-            ESP_LOGE(TAG, "Division by zero prevented: img_height=%d, target_height=%d", img_height, target_height);
-            return;
-        }
-        
-        // Use the smaller scale to ensure image fits within screen bounds
-        lv_coord_t scale = (scale_w < scale_h) ? scale_w : scale_h;
-        
-        // Debug logging - COMMENTED OUT
-        // ESP_LOGI(TAG, "SPD2010 ALIGNED TEST 408x408: %dx%d -> %dx%d, scale_w=%d, scale_h=%d, final_scale=%d", 
-        //          img_width, img_height, target_width, target_height, scale_w, scale_h, scale);
-        // ESP_LOGI(TAG, "SCREEN SIZE: %dx%d, SCALED IMAGE: %dx%d, MARGIN: %dx%d pixels", 
-        //          LV_HOR_RES, LV_VER_RES, target_width, target_height, 
-        //          LV_HOR_RES - target_width, LV_VER_RES - target_height);
-        // ESP_LOGI(TAG, "SPD2010 ALIGNMENT: target_width%%4=%d, target_height%%4=%d", 
-        //          target_width % 4, target_height % 4);
-        
-        // Ensure scale is within safe bounds for full screen
-        if (scale > 1024) scale = 1024;  // Max 400% scale for full screen
-        if (scale < 64) scale = 64;       // Min 25% scale
-        if (scale <= 0) scale = 256;      // Fallback to 100% if calculation failed
-        
-        // ESP_LOGI(TAG, "FINAL SPD2010 ALIGNED SCALE 408x408: %d (%.2fx) - Image has %d pixel margin on each side", 
-        //          scale, (float)scale / 256.0f, (LV_HOR_RES - target_width) / 2);
-        
-        // Use older LVGL API methods for img objects with additional safety
-        if (scale > 0 && scale <= 1024) {  // Ensure scale is within valid LVGL range
-            lv_img_set_zoom(emotion_label_, scale);
-            lv_img_set_antialias(emotion_label_, true);  // Enable anti-aliasing for better quality
-        } else {
-            ESP_LOGW(TAG, "Scale value out of range, using default: %d", scale);
-            lv_img_set_zoom(emotion_label_, 256);  // Default 100% scale
-        }
+        // Enable anti-aliasing for better quality
+        lv_img_set_antialias(emotion_label_, true);
     }
 }
 

@@ -391,18 +391,9 @@ void animation_load_spiffs_animations(void)
     // Debug SPIFFS contents
     test_spiffs_debug();
     
-    // COMMENTED OUT: Load from SPIFFS - now using SD card instead
-    // First try to load ALL animations from mega file
-    // ESP_LOGI("animation", "Attempting to load ALL animations from mega file...");
-    // if (animation_load_all_from_mega_file()) {
-    //     ESP_LOGI("animation", "🎉 Successfully loaded ALL animations from mega file!");
-    //     ESP_LOGI("animation", "   - All 8 animation types loaded in one operation");
-    //     ESP_LOGI("animation", "   - Total of 28 frames loaded from animations_mega.bin");
-    //     ESP_LOGI("animation", "   - Ultimate optimization achieved!");
-    //     return; // Success! No need to load individual animations
-    // }
-    
-    // NEW: Try to load ALL animations from SD card
+    // Check if SD card is supported on this board
+    #if defined(CONFIG_BOARD_TYPE_SENSECAP_WATCHER) || defined(CONFIG_BOARD_TYPE_ESP32S3_Touch_LCD_1_85)
+    // SenseCAP Watcher and Waveshare 1.85 support SD card - try SD card first, then fall back to SPIFFS
     ESP_LOGI("animation", "Attempting to load ALL animations from SD card...");
     
     // Debug SD card status before attempting to load
@@ -533,6 +524,61 @@ void animation_load_spiffs_animations(void)
         ESP_LOGI("animation", "   - Sleep animation uses static images (sleep1, sleep2, sleep3, sleep4)");
         ESP_LOGI("animation", "   - To use SD card animations, place all .bin files on the SD card");
     }
+    #else
+    // Other boards (like waveshare 1.85) don't support SD card - load from SPIFFS
+    ESP_LOGI("animation", "SD card not supported on this board, loading from SPIFFS...");
+    
+    // First try to load ALL animations from SPIFFS mega file
+    ESP_LOGI("animation", "Attempting to load ALL animations from SPIFFS mega file...");
+    if (animation_load_all_from_mega_file()) {
+        ESP_LOGI("animation", "🎉 Successfully loaded ALL animations from SPIFFS!");
+        ESP_LOGI("animation", "   - All 8 animation types loaded in one operation");
+        ESP_LOGI("animation", "   - Total of 28 frames loaded from animations_mega.bin");
+        ESP_LOGI("animation", "   - Ultimate optimization achieved!");
+        return; // Success! No need to load individual animations
+    }
+    
+    // Fall back to individual animation loading from SPIFFS
+    ESP_LOGI("animation", "Mega file not found in SPIFFS, loading individual animations from SPIFFS...");
+    
+    // Try to load normal animation from SPIFFS
+    ESP_LOGI("animation", "Attempting to load normal animation from SPIFFS...");
+    bool normal_loaded = animation_load_normal_from_spiffs();
+    
+    // Try to load embarrass animation from SPIFFS
+    ESP_LOGI("animation", "Attempting to load embarrass animation from SPIFFS...");
+    bool embarrass_loaded = animation_load_embarrass_from_spiffs();
+    
+    // Try to load fire animation from SPIFFS
+    ESP_LOGI("animation", "Attempting to load fire animation from SPIFFS...");
+    bool fire_loaded = animation_load_fire_from_spiffs();
+    
+    // Try to load happy animation from SPIFFS
+    ESP_LOGI("animation", "Attempting to load happy animation from SPIFFS...");
+    bool happy_loaded = animation_load_happy_from_spiffs();
+    
+    // Try to load inspiration animation from SPIFFS
+    ESP_LOGI("animation", "Attempting to load inspiration animation from SPIFFS...");
+    bool inspiration_loaded = animation_load_inspiration_from_spiffs();
+    
+    // Try to load question animation from SPIFFS
+    ESP_LOGI("animation", "Attempting to load question animation from SPIFFS...");
+    bool question_loaded = animation_load_question_from_spiffs();
+    
+    // Try to load shy animation from SPIFFS
+    ESP_LOGI("animation", "Attempting to load shy animation from SPIFFS...");
+    bool shy_loaded = animation_load_shy_from_spiffs();
+    
+    // Try to load sleep animation from SPIFFS
+    ESP_LOGI("animation", "Attempting to load sleep animation from SPIFFS...");
+    bool sleep_loaded = animation_load_sleep_from_spiffs();
+    
+    if (normal_loaded || embarrass_loaded || fire_loaded || happy_loaded || inspiration_loaded || question_loaded || shy_loaded || sleep_loaded) {
+        ESP_LOGI("animation", "✅ SPIFFS animations loaded successfully!");
+    } else {
+        ESP_LOGI("animation", "⚠️  SPIFFS animations not found, using static animations");
+    }
+    #endif
 }
 
 bool animation_load_from_spiffs(const char* filename, lv_image_dsc_t* img_dsc)
@@ -1239,6 +1285,11 @@ void animation_show_current_sources(void)
             "STATIC_NORMAL", "EMBARRESSED", "FIRE", "INSPIRATION", "NORMAL",
             "QUESTION", "SHY", "SLEEP", "HAPPY"
         };
+        
+        if (anim == NULL) {
+            ESP_LOGW("animation", "  %s: NULL (not loaded)", anim_names[i]);
+            continue;
+        }
         
         if (anim->use_spiffs) {
             ESP_LOGI("animation", "  %s: SPIFFS (dynamic, RAM)", anim_names[i]);
