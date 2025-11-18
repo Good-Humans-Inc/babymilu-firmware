@@ -489,20 +489,17 @@ void Application::ToggleChatState()
             if (!active_protocol->IsAudioChannelOpened()) {
                 SetDeviceState(kDeviceStateConnecting);
                 
-                // Try to use WebSocket if available (from ws_start message)
-                // Otherwise fall back to primary protocol
-                Settings ws_settings("websocket", false);
-                std::string ws_url = ws_settings.GetString("url");
-                
-                if (!ws_url.empty() && (!websocket_protocol_ || !websocket_protocol_->IsAudioChannelOpened())) {
-                    // WebSocket URL is available, try to open WebSocket connection
-                    ESP_LOGI(TAG, "WebSocket URL available, opening WebSocket connection");
+                // Always use WebSocket for manual interactions (with default fallback URL)
+                // WebSocket protocol will use default URL if none is configured
+                if (!websocket_protocol_ || !websocket_protocol_->IsAudioChannelOpened()) {
+                    ESP_LOGI(TAG, "Opening WebSocket connection for manual interaction (will use default URL if needed)");
                     OpenWebSocketConnection();
                     active_protocol = GetActiveProtocol();
                 }
                 
-                // If still not opened, use primary protocol
+                // If WebSocket failed, fall back to primary protocol (MQTT)
                 if (!active_protocol->IsAudioChannelOpened()) {
+                    ESP_LOGW(TAG, "WebSocket connection failed, falling back to primary protocol");
                     if (!active_protocol->OpenAudioChannel()) {
                         return;
                     }
@@ -555,20 +552,17 @@ void Application::StartListening()
             if (!active_protocol->IsAudioChannelOpened()) {
                 SetDeviceState(kDeviceStateConnecting);
                 
-                // Try to use WebSocket if available (from ws_start message)
-                // Otherwise fall back to primary protocol
-                Settings ws_settings("websocket", false);
-                std::string ws_url = ws_settings.GetString("url");
-                
-                if (!ws_url.empty() && (!websocket_protocol_ || !websocket_protocol_->IsAudioChannelOpened())) {
-                    // WebSocket URL is available, try to open WebSocket connection
-                    ESP_LOGI(TAG, "WebSocket URL available, opening WebSocket connection");
+                // Always use WebSocket for manual interactions (with default fallback URL)
+                // WebSocket protocol will use default URL if none is configured
+                if (!websocket_protocol_ || !websocket_protocol_->IsAudioChannelOpened()) {
+                    ESP_LOGI(TAG, "Opening WebSocket connection for manual interaction (will use default URL if needed)");
                     OpenWebSocketConnection();
                     active_protocol = GetActiveProtocol();
                 }
                 
-                // If still not opened, use primary protocol
+                // If WebSocket failed, fall back to primary protocol (MQTT)
                 if (!active_protocol->IsAudioChannelOpened()) {
+                    ESP_LOGW(TAG, "WebSocket connection failed, falling back to primary protocol");
                     if (!active_protocol->OpenAudioChannel()) {
                         return;
                     }
@@ -717,8 +711,15 @@ void Application::Start()
     McpServer::GetInstance().AddCommonTools();
 #endif
 
-    // Always initialize MQTT protocol for listening to ws_start messages
-    // WebSocket protocol will be created on-demand for conversations
+    // Protocol initialization strategy:
+    // - MQTT (primary): Always connected for control messages (ws_start, wake word, etc.)
+    // - WebSocket (on-demand): Created when needed for audio conversations
+    // 
+    // Both can be active simultaneously:
+    // - MQTT: Handles server-initiated conversations (receives ws_start, can handle MQTT+UDP audio)
+    // - WebSocket: Handles user-initiated conversations (button press) and server-initiated (via ws_start)
+    // 
+    // Audio routing: WebSocket takes priority when open, otherwise MQTT is used
     if (ota_.HasMqttConfig())
     {
         protocol_ = std::make_unique<MqttProtocol>();
@@ -734,8 +735,8 @@ void Application::Start()
         protocol_ = std::make_unique<MqttProtocol>();
     }
     
-    // If MQTT is the primary protocol, we'll create WebSocket on-demand
-    // If WebSocket is the primary, we don't need a separate instance
+    // WebSocket protocol will be created on-demand for audio conversations
+    // MQTT stays connected for control messages even when WebSocket is active
 
     protocol_->OnNetworkError([this](const std::string &message)
                               {
@@ -963,17 +964,17 @@ void Application::Start()
                 if (!active_protocol->IsAudioChannelOpened()) {
                     SetDeviceState(kDeviceStateConnecting);
                     
-                    // Try to use WebSocket if available (from ws_start message)
-                    Settings ws_settings("websocket", false);
-                    std::string ws_url = ws_settings.GetString("url");
-                    
-                    if (!ws_url.empty() && (!websocket_protocol_ || !websocket_protocol_->IsAudioChannelOpened())) {
-                        ESP_LOGI(TAG, "WebSocket URL available, opening WebSocket connection");
+                    // Always use WebSocket for wake word interactions (with default fallback URL)
+                    // WebSocket protocol will use default URL if none is configured
+                    if (!websocket_protocol_ || !websocket_protocol_->IsAudioChannelOpened()) {
+                        ESP_LOGI(TAG, "Opening WebSocket connection for wake word (will use default URL if needed)");
                         OpenWebSocketConnection();
                         active_protocol = GetActiveProtocol();
                     }
                     
+                    // If WebSocket failed, fall back to primary protocol (MQTT)
                     if (!active_protocol->IsAudioChannelOpened()) {
+                        ESP_LOGW(TAG, "WebSocket connection failed, falling back to primary protocol");
                         if (!active_protocol->OpenAudioChannel()) {
                             wake_word_->StartDetection();
                             return;
@@ -1571,8 +1572,13 @@ void Application::SetAecMode(AecMode mode)
 }
 
 Protocol* Application::GetActiveProtocol() {
-    // If WebSocket protocol exists and is opened, use it for conversations
-    // Otherwise, use the primary protocol (MQTT or WebSocket)
+    // Protocol selection for audio streaming:
+    // - WebSocket: Used for all audio conversations (both user-initiated and server-initiated via ws_start)
+    // - MQTT: Used as fallback if WebSocket is not available, or for control messages only
+    // 
+    // Both protocols can be "live" simultaneously:
+    // - MQTT: Always connected (if configured) for control messages (ws_start, wake word, etc.)
+    // - WebSocket: Opened on-demand for audio streaming, takes priority when available
     if (websocket_protocol_ && websocket_protocol_->IsAudioChannelOpened()) {
         return websocket_protocol_.get();
     }

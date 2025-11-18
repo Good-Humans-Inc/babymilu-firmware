@@ -279,9 +279,12 @@ bool MqttProtocol::OpenAudioChannel() {
     EventBits_t bits = xEventGroupWaitBits(event_group_handle_, MQTT_PROTOCOL_SERVER_HELLO_EVENT, pdTRUE, pdFALSE, pdMS_TO_TICKS(10000));
     if (!(bits & MQTT_PROTOCOL_SERVER_HELLO_EVENT)) {
         if (server_requested_websocket_) {
-            ESP_LOGE(TAG, "Server requested WebSocket instead of MQTT. MQTT audio channels are not supported by this server.");
-            ESP_LOGE(TAG, "Please configure the device to use WebSocket protocol instead of MQTT.");
-            SetError("Server requires WebSocket protocol");
+            // Server requested WebSocket - this is expected for modern servers
+            // Don't treat it as an error, just return false so caller can use WebSocket
+            ESP_LOGI(TAG, "Server requested WebSocket instead of MQTT audio channel. This is normal - WebSocket will be used for audio streaming.");
+            // The ws_start handler already saved the WebSocket URL and will trigger OpenWebSocketConnection()
+            // Return false so the application can fall back to WebSocket
+            return false;
         } else {
             ESP_LOGE(TAG, "Failed to receive server hello");
             SetError(Lang::Strings::SERVER_TIMEOUT);

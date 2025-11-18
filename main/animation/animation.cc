@@ -1953,6 +1953,23 @@ bool animation_load_all_from_sd_card(void)
     fseek(f, 0, SEEK_SET);
     ESP_LOGI("animation", "✅ Successfully opened mega file: %s (%ld bytes)", mega_path, file_size);
     
+    // Validate file size - must be non-zero and large enough for at least one frame header
+    // Each frame header is 6 * sizeof(uint32_t) = 24 bytes minimum
+    const long min_file_size = 24;  // Minimum size for one frame header
+    if (file_size <= 0) {
+        ESP_LOGE("animation", "❌ Animation file is empty (0 bytes) - cannot load animations");
+        ESP_LOGE("animation", "Please ensure test.bin contains valid animation data");
+        fclose(f);
+        return false;
+    }
+    if (file_size < min_file_size) {
+        ESP_LOGE("animation", "❌ Animation file is too small (%ld bytes) - minimum size is %ld bytes", file_size, min_file_size);
+        ESP_LOGE("animation", "File must contain at least one complete frame header");
+        fclose(f);
+        return false;
+    }
+    ESP_LOGI("animation", "File size validation passed: %ld bytes (minimum: %ld bytes)", file_size, min_file_size);
+    
     // Animation frame counts: Normal(3), Embarrass(3), Fire(4), Happy(4), Inspiration(4), Question(4), Shy(2), Sleep(4)
     int animation_frame_counts[] = {3, 3, 4, 4, 4, 4, 2, 4};
     Animation_t* animations[] = {
@@ -2019,6 +2036,11 @@ bool animation_load_all_from_sd_card(void)
             break;
         }
         
+        // Initialize all pointers to NULL to avoid freeing uninitialized pointers on error
+        for (int i = 0; i < frame_count; i++) {
+            anim->spiffs_imgs[i] = NULL;
+        }
+        
         // Load frames for this animation
         for (int frame_idx = 0; frame_idx < frame_count && success; frame_idx++) {
             ESP_LOGD("animation", "Loading frame %d from SD card mega file", current_frame);
@@ -2065,6 +2087,9 @@ bool animation_load_all_from_sd_card(void)
             // Read pixel data
             if (fread((void*)img_dsc->data, 1, data_size, f) != data_size) {
                 ESP_LOGE("animation", "Failed to read pixel data for frame %d", current_frame);
+                // Free the allocated data before breaking
+                free((void*)img_dsc->data);
+                img_dsc->data = NULL;
                 success = false;
                 break;
             }
