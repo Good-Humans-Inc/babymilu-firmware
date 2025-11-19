@@ -65,5 +65,13 @@
         .max_transfer_sz = max_trans_sz,                                          \
     }
 
+// SD Card pins (using SDMMC 1-wire mode)
+// SD_SCLK: GPIO14, SD_MISO: GPIO16, SD_MOSI: GPIO17, SD_CS: Extended IO3 (TCA9554)
+#define SD_SPI_HOST         SPI3_HOST
+#define SD_SPI_MOSI         GPIO_NUM_17
+#define SD_SPI_MISO         GPIO_NUM_16
+#define SD_SPI_SCLK         GPIO_NUM_14
+#define SD_SPI_CS           GPIO_NUM_NC  // CS is on TCA9554 IO expander, handled separately
+#define SD_SPI_CS_IO_EXPANDER_PIN  IO_EXPANDER_PIN_NUM_3  // TCA9554 pin for SD card CS
 
 #endif // _BOARD_CONFIG_H_

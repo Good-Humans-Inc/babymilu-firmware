@@ -41,8 +41,8 @@ AnimationUpdater::~AnimationUpdater() {
 void AnimationUpdater::Initialize() {
     ESP_LOGI(TAG, "Initializing Animation Updater");
     
-    // NOTE: animation_init_spiffs() is now called from main.cc after SD card initialization
-    // This ensures SD card animations are loaded first, then SPIFFS as fallback
+    // NOTE: animation_init() is now called from board constructor after SD card initialization
+    // This ensures SD card animations are loaded when SD card is ready
     
     // Load configuration from NVS
     LoadConfiguration();
@@ -805,106 +805,97 @@ bool AnimationUpdater::DownloadMegaAnimationFile(const std::string& url) {
                 use_sd_card = true;
                 ESP_LOGI(TAG, "SD card initialized successfully, using SD card for animations");
             } else {
-                // SD card not available, use SPIFFS
+                // SD card not available
                 if (init_ret == ESP_ERR_NOT_SUPPORTED) {
-                    ESP_LOGI(TAG, "SD card not supported on this board, using SPIFFS for animations");
+                    ESP_LOGE(TAG, "SD card not supported on this board");
                 } else {
-                    ESP_LOGW(TAG, "Failed to initialize SD card: %s, will use SPIFFS instead", esp_err_to_name(init_ret));
+                    ESP_LOGE(TAG, "Failed to initialize SD card: %s", esp_err_to_name(init_ret));
                 }
                 use_sd_card = false;
             }
         }
         
-        // If using SPIFFS, ensure it's initialized
+        // SD card only - no SPIFFS fallback
         if (!use_sd_card) {
-            // Initialize SPIFFS if not already initialized
-            extern void animation_init_spiffs(void);
-            animation_init_spiffs();
-            
-            // Verify SPIFFS is accessible by trying to open the directory
-            DIR* test_dir = opendir("/spiffs");
-            if (test_dir == NULL) {
-                ESP_LOGE(TAG, "SPIFFS is not accessible - cannot open /spiffs directory");
-                ESP_LOGE(TAG, "Error: %s", strerror(errno));
-                return false;
-            }
-            closedir(test_dir);
-            ESP_LOGI(TAG, "SPIFFS is initialized and accessible");
+            ESP_LOGE(TAG, "SD card is required for animation downloads");
+            ESP_LOGE(TAG, "Please ensure SD card is properly inserted and formatted");
+            return false;
         }
         
-        if (use_sd_card) {
-            ESP_LOGI(TAG, "SD card is mounted and ready for animations_mega.bin download");
-            
-            // Debug: List SD card contents and test write access
-            ESP_LOGI(TAG, "Listing SD card contents...");
-            DIR* dir = opendir("/sdcard");
-            if (dir) {
-                struct dirent* entry;
-                int file_count = 0;
-                while ((entry = readdir(dir)) != NULL) {
-                    if (entry->d_type == DT_REG) {
-                        ESP_LOGI(TAG, "  Found file: %s", entry->d_name);
-                        file_count++;
-                    }
+        ESP_LOGI(TAG, "SD card is mounted and ready for animations_mega.bin download");
+        
+        // Debug: List SD card contents and test write access
+        ESP_LOGI(TAG, "Listing SD card contents...");
+        DIR* dir = opendir("/sdcard");
+        if (dir) {
+            struct dirent* entry;
+            int file_count = 0;
+            while ((entry = readdir(dir)) != NULL) {
+                if (entry->d_type == DT_REG) {
+                    ESP_LOGI(TAG, "  Found file: %s", entry->d_name);
+                    file_count++;
                 }
-                closedir(dir);
-                ESP_LOGI(TAG, "Total files in SD card: %d", file_count);
-            } else {
-                ESP_LOGW(TAG, "Failed to open SD card directory for listing");
             }
-            
-            // Test write access by creating a small test file
-            ESP_LOGI(TAG, "Testing SD card write access...");
-            FILE* test_file = fopen("/sdcard/test_write.txt", "w");
-            if (test_file) {
-                fprintf(test_file, "test");
-                fclose(test_file);
+            closedir(dir);
+            ESP_LOGI(TAG, "Total files in SD card: %d", file_count);
+        } else {
+            ESP_LOGW(TAG, "Failed to open SD card directory for listing");
+        }
+        
+        // Test write access by creating a small test file (use 8.3 format for FAT32 compatibility)
+        ESP_LOGI(TAG, "Testing SD card write access...");
+        FILE* test_file = fopen("/sdcard/TEST.BIN", "wb");
+        if (test_file) {
+            const char* test_data = "TEST";
+            size_t written = fwrite(test_data, 1, 4, test_file);
+            fflush(test_file);
+            fclose(test_file);
+            if (written == 4) {
                 ESP_LOGI(TAG, "SD card write test successful");
                 // Clean up test file
-                unlink("/sdcard/test_write.txt");
+                unlink("/sdcard/TEST.BIN");
             } else {
-                ESP_LOGE(TAG, "SD card write test failed: %s", strerror(errno));
-                ESP_LOGE(TAG, "SD card may need to be reformatted or remounted");
-                ESP_LOGE(TAG, "Error code: %d (EINVAL=%d, EACCES=%d, ENOENT=%d)", errno, EINVAL, EACCES, ENOENT);
-                
-                // Try to remount SD card
-                ESP_LOGW(TAG, "Attempting to remount SD card...");
-                SdCard::Eject();
-                vTaskDelay(pdMS_TO_TICKS(1000)); // Wait 1 second
-                esp_err_t remount_ret = SdCard::Initialize();
-                if (remount_ret != ESP_OK) {
-                    ESP_LOGE(TAG, "Failed to remount SD card: %s", esp_err_to_name(remount_ret));
-                    return false;
-                }
-                ESP_LOGI(TAG, "SD card remounted successfully, retrying write test...");
-                
-                // Retry write test
-                test_file = fopen("/sdcard/test_write.txt", "w");
-                if (test_file) {
-                    fprintf(test_file, "test");
-                    fclose(test_file);
-                    ESP_LOGI(TAG, "SD card write test successful after remount");
-                    unlink("/sdcard/test_write.txt");
-                } else {
-                    ESP_LOGE(TAG, "SD card write test still failing after remount: %s", strerror(errno));
-                    
-                    // Try alternative approach - write to a different filename
-                    ESP_LOGW(TAG, "Trying alternative filename approach...");
-                    test_file = fopen("/sdcard/test123.bin", "w");
-                    if (test_file) {
-                        fprintf(test_file, "test");
-                        fclose(test_file);
-                        ESP_LOGI(TAG, "Alternative filename write successful");
-                        unlink("/sdcard/test123.bin");
-                    } else {
-                        ESP_LOGE(TAG, "All SD card write attempts failed. SD card may be corrupted or write-protected.");
-                        ESP_LOGE(TAG, "Please check: 1) SD card is not write-protected, 2) SD card is properly formatted as FAT32, 3) SD card is not corrupted");
-                        return false;
-                    }
-                }
+                ESP_LOGE(TAG, "SD card write test failed: incomplete write");
+                unlink("/sdcard/TEST.BIN");
+                return false;
             }
         } else {
-            ESP_LOGI(TAG, "Using SPIFFS for animations_mega.bin download");
+            ESP_LOGE(TAG, "SD card write test failed: %s", strerror(errno));
+            ESP_LOGE(TAG, "SD card may need to be reformatted or remounted");
+            ESP_LOGE(TAG, "Error code: %d (EINVAL=%d, EACCES=%d, ENOENT=%d)", errno, EINVAL, EACCES, ENOENT);
+            
+            // Try to remount SD card
+            ESP_LOGW(TAG, "Attempting to remount SD card...");
+            SdCard::Eject();
+            vTaskDelay(pdMS_TO_TICKS(1000)); // Wait 1 second
+            esp_err_t remount_ret = SdCard::Initialize();
+            if (remount_ret != ESP_OK) {
+                ESP_LOGE(TAG, "Failed to remount SD card: %s", esp_err_to_name(remount_ret));
+                return false;
+            }
+            ESP_LOGI(TAG, "SD card remounted successfully, retrying write test...");
+            
+            // Retry write test with 8.3 format
+            test_file = fopen("/sdcard/TEST.BIN", "wb");
+            if (test_file) {
+                const char* test_data = "TEST";
+                size_t written = fwrite(test_data, 1, 4, test_file);
+                fflush(test_file);
+                fclose(test_file);
+                if (written == 4) {
+                    ESP_LOGI(TAG, "SD card write test successful after remount");
+                    unlink("/sdcard/TEST.BIN");
+                } else {
+                    ESP_LOGE(TAG, "SD card write test still failing after remount: incomplete write");
+                    unlink("/sdcard/TEST.BIN");
+                    return false;
+                }
+            } else {
+                ESP_LOGE(TAG, "SD card write test still failing after remount: %s", strerror(errno));
+                ESP_LOGE(TAG, "All SD card write attempts failed. SD card may be corrupted or write-protected.");
+                ESP_LOGE(TAG, "Please check: 1) SD card is not write-protected, 2) SD card is properly formatted as FAT32, 3) SD card is not corrupted");
+                return false;
+            }
         }
         
         auto& board = Board::GetInstance();
@@ -919,8 +910,8 @@ bool AnimationUpdater::DownloadMegaAnimationFile(const std::string& url) {
         http->SetHeader("User-Agent", "Xiaozhi-Animation-Updater/1.0");
         http->SetHeader("Accept", "application/octet-stream");
         http->SetHeader("Accept-Encoding", "identity"); // Disable compression
-        http->SetHeader("Connection", "close"); // Request connection close to avoid waiting
-        http->SetTimeout(300000); // 5 minute timeout for large file downloads
+        // Don't request Connection: close - let server decide, or use keep-alive for large files
+        http->SetTimeout(600000); // 10 minute timeout for large file downloads (increased from 5 min)
         
         ESP_LOGI(TAG, "Downloading animations_mega.bin from: %s", url.c_str());
         ESP_LOGI(TAG, "HTTP client created, attempting connection...");
@@ -947,20 +938,23 @@ bool AnimationUpdater::DownloadMegaAnimationFile(const std::string& url) {
         bool unknown_length = (content_length == 0);
         if (unknown_length) {
             ESP_LOGI(TAG, "Server did not provide Content-Length, will read until connection closes");
+        } else if (content_length < 1000000) {
+            // Warn if Content-Length seems too small (less than 1MB for a 3.87MB file)
+            ESP_LOGW(TAG, "⚠️  Server reported Content-Length (%u bytes) seems too small", 
+                     (unsigned int)content_length);
+            ESP_LOGW(TAG, "⚠️  Expected ~3.87MB, but will ignore Content-Length and read until connection closes");
+            // Treat as unknown length to avoid stopping early
+            unknown_length = true;
         }
         
-        ESP_LOGI(TAG, "Downloading animations_mega.bin (%u bytes) - streaming to %s", 
-                 (unsigned int)content_length, use_sd_card ? "SD card" : "SPIFFS");
+        ESP_LOGI(TAG, "Downloading animations_mega.bin (%u bytes reported, streaming to SD card)", 
+                 (unsigned int)content_length);
         
         // Stream download directly to file (no RAM buffering)
         // Use shorter filename to avoid FAT32 long filename issues
-        const char* filename = use_sd_card ? "test.bin" : "animations_mega.bin";
+        const char* filename = "test.bin";
         char full_path[128];
-        if (use_sd_card) {
-            snprintf(full_path, sizeof(full_path), "/sdcard/%s", filename);
-        } else {
-            snprintf(full_path, sizeof(full_path), "/spiffs/%s", filename);
-        }
+        snprintf(full_path, sizeof(full_path), "/sdcard/%s", filename);
         
         // Remove existing file if it exists
         if (access(full_path, F_OK) == 0) {
@@ -977,35 +971,69 @@ bool AnimationUpdater::DownloadMegaAnimationFile(const std::string& url) {
         if (!file) {
             ESP_LOGE(TAG, "Failed to open file for writing: %s", full_path);
             ESP_LOGE(TAG, "Error: %s", strerror(errno));
-            if (use_sd_card) {
-                ESP_LOGE(TAG, "Please check: 1) SD card is inserted, 2) SD card is formatted as FAT32, 3) SD card is not write-protected");
-            } else {
-                ESP_LOGE(TAG, "Please check: 1) SPIFFS is properly initialized, 2) SPIFFS has enough free space");
-            }
+            ESP_LOGE(TAG, "Please check: 1) SD card is inserted, 2) SD card is formatted as FAT32, 3) SD card is not write-protected");
             http->Close();
             return false;
         }
         
-        // Use 2KB heap buffer to reduce stack usage
-        std::unique_ptr<char[]> buffer(new char[2048]);
-        const size_t buf_size = 2048;
+        // Use larger buffer (8KB) for better performance with large file downloads
+        std::unique_ptr<char[]> buffer(new char[8192]);
+        const size_t buf_size = 8192;
         size_t total_read = 0;
         bool download_success = true;
         uint32_t timeout_start = esp_timer_get_time() / 1000; // Start time in ms
-        uint32_t timeout_duration = 300000; // 5 minutes timeout
+        uint32_t timeout_duration = 600000; // 10 minutes timeout (increased for large files)
+        uint32_t last_read_time = timeout_start;
+        uint32_t read_timeout = 60000; // 1 minute timeout between reads (to detect stalled downloads)
         
         while (download_success) {
-            // Check for timeout
+            // Check for overall timeout
             uint32_t current_time = esp_timer_get_time() / 1000;
             if (current_time - timeout_start > timeout_duration) {
-                ESP_LOGE(TAG, "Download timeout after %u ms", timeout_duration);
+                ESP_LOGE(TAG, "Download timeout after %u ms (read %u bytes)", 
+                         timeout_duration, (unsigned int)total_read);
                 download_success = false;
                 break;
             }
+            
+            // Check for read stall (no data received for too long)
+            if (current_time - last_read_time > read_timeout) {
+                ESP_LOGE(TAG, "Download stalled: no data received for %u ms (read %u bytes so far)", 
+                         current_time - last_read_time, (unsigned int)total_read);
+                download_success = false;
+                break;
+            }
+            
             int bytes_read = http->Read(buffer.get(), buf_size);
+            uint32_t read_complete_time = esp_timer_get_time() / 1000;
+            
+            // Update last read time if we got data
+            if (bytes_read > 0) {
+                last_read_time = read_complete_time;
+            }
             if (bytes_read <= 0) {
                 // End of data or connection closed
-                ESP_LOGI(TAG, "Download completed, read %u bytes total", (unsigned int)total_read);
+                if (bytes_read < 0) {
+                    ESP_LOGE(TAG, "HTTP Read() returned error: %d", bytes_read);
+                    ESP_LOGE(TAG, "Download failed after reading %u bytes", (unsigned int)total_read);
+                    download_success = false;
+                    break;
+                } else {
+                    // bytes_read == 0: connection closed or no more data
+                    ESP_LOGI(TAG, "Download completed (connection closed), read %u bytes total", (unsigned int)total_read);
+                    
+                    // If we expected more data, warn about incomplete download
+                    if (!unknown_length && total_read < content_length) {
+                        ESP_LOGW(TAG, "⚠️  Download stopped early: read %u bytes but server reported %u bytes", 
+                                 (unsigned int)total_read, (unsigned int)content_length);
+                        ESP_LOGW(TAG, "⚠️  This may indicate connection was closed prematurely by server");
+                    } else if (total_read < 1000000) {
+                        // Warn if downloaded file is suspiciously small (less than 1MB)
+                        ESP_LOGW(TAG, "⚠️  Downloaded file is suspiciously small (%u bytes) - expected ~3.87MB", 
+                                 (unsigned int)total_read);
+                        ESP_LOGW(TAG, "⚠️  This may indicate an incomplete download or server issue");
+                    }
+                }
                 break;
             }
             
@@ -1018,28 +1046,37 @@ bool AnimationUpdater::DownloadMegaAnimationFile(const std::string& url) {
             }
             
             total_read += bytes_read;
-
-            // If Content-Length is known, stop precisely when reached
-            if (!unknown_length && total_read >= content_length) {
-                ESP_LOGI(TAG, "Reached Content-Length: %u bytes", (unsigned int)total_read);
-                break;
-            }
             
             // Log progress every 50KB
             if (total_read % 51200 == 0) {
                 if (unknown_length) {
                     ESP_LOGI(TAG, "Download progress: %u bytes downloaded", (unsigned int)total_read);
                 } else {
-                    ESP_LOGI(TAG, "Download progress: %u/%u bytes (%.1f%%)", 
-                             (unsigned int)total_read, (unsigned int)content_length, 
-                             (float)total_read * 100.0f / content_length);
+                    // Log progress, but don't trust Content-Length - continue reading until connection closes
+                    ESP_LOGI(TAG, "Download progress: %u bytes downloaded (server reported %u bytes)", 
+                             (unsigned int)total_read, (unsigned int)content_length);
+                    // Warn if we've exceeded reported Content-Length (likely incorrect header)
+                    if (total_read > content_length) {
+                        ESP_LOGW(TAG, "⚠️  Downloaded %u bytes exceeds reported Content-Length (%u) - server header may be incorrect, continuing...", 
+                                 (unsigned int)total_read, (unsigned int)content_length);
+                    }
                 }
             }
+            
+            // Note: Don't stop at Content-Length - some servers report incorrect Content-Length headers
+            // Continue reading until connection closes (bytes_read <= 0)
         }
         
         // Flush and sync file to ensure all data is written to disk
         fflush(file);
-        // Note: fsync may not be available on all platforms, fflush should be sufficient
+        
+        // Sync file to SD card (important for SD card writes)
+        // ESP-IDF provides fsync through unistd.h
+        int fd = fileno(file);
+        if (fd >= 0) {
+            fsync(fd);
+        }
+        
         fclose(file);
         http->Close();
         
@@ -1049,8 +1086,8 @@ bool AnimationUpdater::DownloadMegaAnimationFile(const std::string& url) {
             return false;
         }
         
-        // Give filesystem time to sync, especially important for SPIFFS
-        vTaskDelay(pdMS_TO_TICKS(200));
+        // Give filesystem time to sync, especially important for SD cards
+        vTaskDelay(pdMS_TO_TICKS(500));
         
         // Verify file was written completely by checking size
         FILE* verify_size = fopen(full_path, "rb");
@@ -1066,18 +1103,20 @@ bool AnimationUpdater::DownloadMegaAnimationFile(const std::string& url) {
                 return false;
             }
             ESP_LOGI(TAG, "File size verified: %u bytes", (unsigned int)actual_size);
+        } else {
+            ESP_LOGE(TAG, "Failed to verify file size - cannot open file for verification");
+            unlink(full_path);
+            return false;
         }
         
-        // Give filesystem time to sync, especially important for SPIFFS
-        vTaskDelay(pdMS_TO_TICKS(200));
+        // Additional sync delay for SD card to ensure data is fully written
+        vTaskDelay(pdMS_TO_TICKS(500));
         
         ESP_LOGI(TAG, "Successfully downloaded and saved %s (%u bytes)", filename, (unsigned int)total_read);
         
-        // If saved to SPIFFS, reload animations
-        if (!use_sd_card) {
-            ESP_LOGI(TAG, "Reloading animations from SPIFFS...");
-            animation_load_spiffs_animations();
-        }
+        // Reload animations from SD card
+        ESP_LOGI(TAG, "Reloading animations from SD card...");
+        animation_load_sd_card_animations();
         
         return true;
         
@@ -1278,22 +1317,33 @@ bool AnimationUpdater::ValidateMegaAnimationFileFromDisk(const char* file_path) 
     
     // Validate each frame in the mega file
     int frame_count = 0;
+    long file_pos = 0;
     
     for (int anim_idx = 0; anim_idx < 8; anim_idx++) {
         int frame_count_for_anim = animation_frame_counts[anim_idx];
         
         for (int frame_idx = 0; frame_idx < frame_count_for_anim; frame_idx++) {
+            file_pos = ftell(f);
+            
             // Read header (6 uint32_t values)
             uint32_t header_data[6];
-            if (fread(header_data, sizeof(uint32_t), 6, f) != 6) {
-                ESP_LOGE(TAG, "Failed to read header for frame %d", frame_count);
+            size_t header_read = fread(header_data, sizeof(uint32_t), 6, f);
+            if (header_read != 6) {
+                ESP_LOGE(TAG, "Failed to read header for frame %d: read %u of 6 uint32_t", 
+                         frame_count, (unsigned int)header_read);
+                ESP_LOGE(TAG, "File position: %ld, file size: %u, EOF: %s", 
+                         ftell(f), (unsigned int)file_size, feof(f) ? "yes" : "no");
+                ESP_LOGE(TAG, "⚠️  File only contains %d frames, but expected %d frames", 
+                         frame_count, total_expected_frames);
                 fclose(f);
                 return false;
             }
             
             // Validate magic number
             if (header_data[0] != 0x4C56474C) {
-                ESP_LOGE(TAG, "Invalid magic number for frame %d: 0x%x", frame_count, header_data[0]);
+                ESP_LOGE(TAG, "Invalid magic number for frame %d: 0x%x (expected 0x%x)", 
+                         frame_count, header_data[0], 0x4C56474C);
+                ESP_LOGE(TAG, "File position: %ld", file_pos);
                 fclose(f);
                 return false;
             }
@@ -1305,6 +1355,10 @@ bool AnimationUpdater::ValidateMegaAnimationFileFromDisk(const char* file_path) 
             size_t frame_data_size = height * stride;
             size_t total_frame_size = 24 + frame_data_size; // 24 bytes header + data
             
+            ESP_LOGD(TAG, "Frame %d: %dx%d, stride=%u, data_size=%u, total_size=%u", 
+                     frame_count, width, height, stride, (unsigned int)frame_data_size, 
+                     (unsigned int)total_frame_size);
+            
             // Check if we have enough data remaining
             long current_pos = ftell(f);
             if (current_pos < 0) {
@@ -1313,29 +1367,53 @@ bool AnimationUpdater::ValidateMegaAnimationFileFromDisk(const char* file_path) 
                 return false;
             }
             
-            if (current_pos + frame_data_size > file_size) {
-                ESP_LOGE(TAG, "Frame %d data extends beyond file end (pos %ld, size %zu, file_size %zu)", 
-                         frame_count, current_pos, frame_data_size, file_size);
+            if ((long)(current_pos + frame_data_size) > (long)file_size) {
+                ESP_LOGE(TAG, "Frame %d data extends beyond file end (pos %ld, need %u bytes, file_size %u)", 
+                         frame_count, current_pos, (unsigned int)frame_data_size, (unsigned int)file_size);
+                ESP_LOGE(TAG, "⚠️  File only contains %d frames, but expected %d frames", 
+                         frame_count, total_expected_frames);
+                ESP_LOGE(TAG, "Expected file size: ~%u bytes, actual: %u bytes", 
+                         (unsigned int)(total_expected_frames * total_frame_size), (unsigned int)file_size);
                 fclose(f);
                 return false;
             }
             
             // Skip the pixel data
             if (fseek(f, frame_data_size, SEEK_CUR) != 0) {
-                ESP_LOGE(TAG, "Failed to skip frame %d data (size %zu)", frame_count, frame_data_size);
+                ESP_LOGE(TAG, "Failed to skip frame %d data (size %u)", 
+                         frame_count, (unsigned int)frame_data_size);
                 fclose(f);
                 return false;
             }
             
-            ESP_LOGD(TAG, "Frame %d: %dx%d, %zu bytes (total frame: %zu bytes)", 
-                     frame_count, width, height, frame_data_size, total_frame_size);
+            ESP_LOGD(TAG, "Frame %d: %dx%d, %u bytes (total frame: %u bytes)", 
+                     frame_count, width, height, (unsigned int)frame_data_size, 
+                     (unsigned int)total_frame_size);
             frame_count++;
         }
     }
     
+    long final_pos = ftell(f);
     fclose(f);
     
-    ESP_LOGI(TAG, "✅ Successfully validated animations_mega.bin with %d frames", frame_count);
+    if (frame_count != total_expected_frames) {
+        ESP_LOGE(TAG, "❌ Validation failed: file contains %d frames, expected %d frames", 
+                 frame_count, total_expected_frames);
+        ESP_LOGE(TAG, "File size: %u bytes, expected ~%u bytes for %d frames", 
+                 (unsigned int)file_size, 
+                 (unsigned int)(total_expected_frames * (24 + 131072)),  // Approx size per frame
+                 total_expected_frames);
+        return false;
+    }
+    
+    if (final_pos != (long)file_size) {
+        ESP_LOGW(TAG, "Validation completed but file position (%ld) != file size (%u)", 
+                 final_pos, (unsigned int)file_size);
+        ESP_LOGW(TAG, "Extra %ld bytes in file (may be padding)", (long)file_size - final_pos);
+    }
+    
+    ESP_LOGI(TAG, "✅ Successfully validated animations_mega.bin with %d frames (expected %d)", 
+             frame_count, total_expected_frames);
     return true;
 }
 
@@ -1343,7 +1421,7 @@ void AnimationUpdater::ReloadAnimations() {
     ESP_LOGI(TAG, "Reloading animations from SD card");
     
     // Reload SD card animations
-    animation_load_spiffs_animations();
+    animation_load_sd_card_animations();
     
     ESP_LOGI(TAG, "Animations reloaded successfully");
     

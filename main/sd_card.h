@@ -59,6 +59,28 @@ public:
      */
     static esp_err_t DebugStatus();
 
+#if defined(CONFIG_BOARD_TYPE_ESP32S3_Touch_LCD_1_85) || defined(CONFIG_BOARD_TYPE_ESP32S3_Touch_LCD_1_85C)
+    /**
+     * @brief Set IO expander handle for SD card CS control (for LCD boards)
+     * @param handle IO expander handle
+     */
+    static void SetIoExpanderHandle(void* handle);
+#endif
+
+    /**
+     * @brief Append content to a file on the SD card
+     * @param filename The name of the file
+     * @param content The content to append
+     * @return ESP_OK on success, error code on failure
+     */
+    static esp_err_t AppendToFile(const std::string& filename, const std::string& content);
+
+    /**
+     * @brief Test write capability of the SD card
+     * @return ESP_OK if write test passes, error code on failure
+     */
+    static esp_err_t TestWriteCapability();
+
 private:
     static bool s_mounted;
     static constexpr const char* MOUNT_POINT = "/sdcard";

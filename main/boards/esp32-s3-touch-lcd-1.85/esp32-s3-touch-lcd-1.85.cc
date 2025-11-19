@@ -6,6 +6,8 @@
 #include "button.h"
 #include "config.h"
 #include "iot/thing_manager.h"
+#include "animation/animation.h"
+#include "sd_card.h"
 
 #include <esp_log.h>
 #include "i2c_device.h"
@@ -441,6 +443,24 @@ public:
         Initializest77916Display();
         InitializeButtons();
         InitializeIot();
+        
+        // Initialize SD card BEFORE animations (following AMOLED pattern)
+        ESP_LOGI(TAG, "Initializing SD card...");
+        // Note: SDMMC mode doesn't require IO expander CS control
+        // SdCard::SetIoExpanderHandle(io_expander);  // Not needed for SDMMC mode
+        esp_err_t ret = SdCard::Initialize();
+        if (ret == ESP_OK) {
+            ESP_LOGI(TAG, "SD card initialized successfully");
+            
+            // Initialize animations immediately after SD card is ready
+            ESP_LOGI(TAG, "Initializing animations from SD card...");
+            animation_init();
+            ESP_LOGI(TAG, "Animations initialized successfully");
+        } else {
+            ESP_LOGW(TAG, "SD card initialization failed: %s", esp_err_to_name(ret));
+            ESP_LOGW(TAG, "Animations will not be loaded from SD card");
+        }
+        
         GetBacklight()->RestoreBrightness();
     }
 
