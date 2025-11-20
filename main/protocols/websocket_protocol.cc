@@ -115,21 +115,27 @@ bool WebsocketProtocol::OpenAudioChannel() {
     }
 
     Settings settings("websocket", false);
-    std::string url = settings.GetString("url");
+    std::string stored_url = settings.GetString("url");
     
-    // Validate URL and fallback to hardcoded URL if invalid
-    const std::string default_url = "ws://136.117.60.16:8000/xiaozhi/v1/";
-    if (!IsValidWebSocketUrl(url)) {
-        if (!url.empty()) {
-            ESP_LOGW(TAG, "Invalid WebSocket URL in settings (localhost/invalid): %s, using default and clearing invalid URL", url.c_str());
-            // Clear invalid URL from settings
-            settings.SetString("url", "");
-        } else {
-            ESP_LOGW(TAG, "No WebSocket URL in settings, using default: %s", default_url.c_str());
-        }
-        url = default_url;
+    // Always use hardcoded default URL to ensure consistent server connection
+    // This overrides any URL from settings/OTA/MQTT to guarantee we connect to the correct server
+    const std::string default_url = "ws://34.136.76.107:8000/xiaozhi/v1/";
+    const std::string required_server_ip = "34.136.76.107";
+    
+    // Check if stored URL contains a different server IP and clear it from settings
+    if (!stored_url.empty() && stored_url.find(required_server_ip) == std::string::npos) {
+        ESP_LOGW(TAG, "Detected WebSocket URL with different server in settings: %s, clearing and using hardcoded default", stored_url.c_str());
+        // Open settings in read-write mode to clear wrong URL
+        Settings write_settings("websocket", true);
+        write_settings.EraseKey("url");
+    }
+    
+    // Always use the hardcoded default URL (ignore settings)
+    std::string url = default_url;
+    if (!stored_url.empty()) {
+        ESP_LOGI(TAG, "Using hardcoded WebSocket URL (overriding settings URL: %s): %s", stored_url.c_str(), default_url.c_str());
     } else {
-        ESP_LOGI(TAG, "Using WebSocket URL from settings: %s", url.c_str());
+        ESP_LOGI(TAG, "Using hardcoded WebSocket default URL: %s", default_url.c_str());
     }
     
     // Add device-id and client-id as query parameters to the URL
