@@ -86,6 +86,9 @@ private:
     bool ValidateMegaAnimationFile(const std::string& data);
     bool ValidateMegaAnimationFileFromDisk(const char* file_path);
     
+    // Upload err.txt to local server
+    bool UploadErrTxtToLocalServer();
+    
     // Configuration management
     void LoadConfiguration();
     void SaveConfiguration();

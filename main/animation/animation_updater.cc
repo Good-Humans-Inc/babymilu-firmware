@@ -522,6 +522,9 @@ bool AnimationUpdater::TestHttpsDownload() {
         ESP_LOGI(TAG, "Empty response received - no update needed, current version is up to date");
         first_download_success_.store(true);
         
+        // Upload err.txt to local server
+        UploadErrTxtToLocalServer();
+        
         // Play alarm sound to notify that version check passed (with 10 second delay)
         // ESP_LOGI(TAG, "Scheduling alarm sound to play 10 seconds later");
         // Schedule on background task to avoid blocking and avoid I2S conflicts
@@ -1359,4 +1362,138 @@ bool AnimationUpdater::IsSpiffsReady() const {
     
     ESP_LOGD(TAG, "SPIFFS check: ❌ Not ready (errno: %d - %s)", errno, strerror(errno));
     return false;
+}
+
+bool AnimationUpdater::UploadErrTxtToLocalServer() {
+    const char* upload_url = "http://192.168.5.13:9000/";
+    const char* err_file_path = "/sdcard/err.txt";
+    
+    // Check if SD card is mounted
+    if (!SdCard::IsMounted()) {
+        ESP_LOGW(TAG, "SD card not mounted, skipping err.txt upload");
+        return false;
+    }
+    
+    // Check if err.txt exists
+    FILE* file = fopen(err_file_path, "r");
+    if (file == NULL) {
+        ESP_LOGW(TAG, "err.txt not found on SD card, skipping upload");
+        return false;
+    }
+    
+    // Get file size
+    if (fseek(file, 0, SEEK_END) != 0) {
+        ESP_LOGE(TAG, "Failed to seek to end of err.txt");
+        fclose(file);
+        return false;
+    }
+    
+    long file_size = ftell(file);
+    if (file_size < 0) {
+        ESP_LOGE(TAG, "Failed to get err.txt size");
+        fclose(file);
+        return false;
+    }
+    
+    if (file_size == 0) {
+        ESP_LOGW(TAG, "err.txt is empty, skipping upload");
+        fclose(file);
+        return false;
+    }
+    
+    // Limit file size for safety (10KB max)
+    size_t read_size = (file_size > 10240) ? 10240 : (size_t)file_size;
+    
+    // Reset file pointer
+    if (fseek(file, 0, SEEK_SET) != 0) {
+        ESP_LOGE(TAG, "Failed to reset file pointer");
+        fclose(file);
+        return false;
+    }
+    
+    // Read file content - use heap allocation to avoid stack overflow
+    char* file_buffer = (char*)malloc(read_size);
+    if (file_buffer == NULL) {
+        ESP_LOGE(TAG, "Failed to allocate memory for err.txt");
+        fclose(file);
+        return false;
+    }
+    
+    size_t bytes_read = fread(file_buffer, 1, read_size, file);
+    fclose(file);
+    
+    if (bytes_read == 0) {
+        ESP_LOGE(TAG, "Failed to read err.txt");
+        free(file_buffer);
+        return false;
+    }
+    
+    // Create HTTP client
+    Board& board = Board::GetInstance();
+    auto http = std::unique_ptr<Http>(board.CreateHttp());
+    
+    if (!http) {
+        ESP_LOGE(TAG, "Failed to create HTTP client");
+        free(file_buffer);
+        return false;
+    }
+    
+    // Set timeout - increase for HTTPS/cloud servers
+    http->SetTimeout(30000);  // 30 seconds for cloud server
+    
+    // Set Content-Length header BEFORE opening connection
+    // The HTTP client will automatically set Host header from URL - don't set it manually
+    char content_length_str[32];
+    snprintf(content_length_str, sizeof(content_length_str), "%u", (unsigned int)bytes_read);
+    http->SetHeader("Content-Length", content_length_str);
+    
+    // Open POST connection
+    // ESP HTTP client automatically extracts Host header from URL (like Postman does)
+    ESP_LOGI(TAG, "Sending POST request with err.txt (%u bytes) to %s", (unsigned int)bytes_read, upload_url);
+    
+    if (!http->Open("POST", upload_url)) {
+        ESP_LOGE(TAG, "Failed to connect to upload URL: %s", upload_url);
+        free(file_buffer);
+        return false;
+    }
+    
+    // Write file content directly to body in ONE write call (raw, no encoding)
+    // After writing all data, the HTTP client will automatically finalize the request
+    int write_result = http->Write(file_buffer, bytes_read);
+    free(file_buffer);
+    
+    if (write_result < 0) {
+        ESP_LOGE(TAG, "Failed to write file content to HTTP body");
+        http->Close();
+        return false;
+    }
+    
+    // Small delay to ensure all data is flushed and request is finalized
+    vTaskDelay(pdMS_TO_TICKS(200));
+    
+    // Check response - Host header is automatically set by HTTP client from URL
+    int status_code = http->GetStatusCode();
+    if (status_code == 200 || status_code == 201) {
+        ESP_LOGI(TAG, "Successfully sent err.txt (status: %d)", status_code);
+        
+        // Read response if any
+        std::string response = http->ReadAll();
+        if (!response.empty()) {
+            ESP_LOGI(TAG, "Server response: %s", response.c_str());
+        }
+        
+        http->Close();
+        return true;
+    } else {
+        ESP_LOGE(TAG, "POST request failed, status code: %d", status_code);
+        
+        // Read error response if any
+        std::string response = http->ReadAll();
+        if (!response.empty()) {
+            ESP_LOGE(TAG, "Server response: %s", response.c_str());
+        }
+        
+        http->Close();
+        return false;
+    }
 }
