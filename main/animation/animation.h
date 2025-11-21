@@ -26,6 +26,7 @@ typedef enum _AnimationType_e {
 }AnimationType_e;
 
 void animation_set_now_animation(int animation);
+int animation_get_now_animation(void);
 bool animation_load_from_spiffs(const char* filename, lv_image_dsc_t* img_dsc);
 void animation_init_spiffs(void);
 bool animation_create_spiffs_animation(Animation_t* anim, const char* filenames[], int count);
@@ -79,3 +80,4 @@ typedef struct {
 } animation_overlay_frame_t;
 
 const animation_overlay_frame_t* animation_get_normal_overlay_frame(int frame_index);
+const animation_overlay_frame_t* animation_get_embarrass_overlay_frame(int frame_index);

@@ -24,10 +24,15 @@
 
 static constexpr uint32_t LV_IMAGE_CF_OVERLAY_PIXELS = 0x4F50584C; // "OPXL"
 static constexpr size_t NORMAL_OVERLAY_FRAME_COUNT = 2;
+static constexpr size_t EMBARRASS_OVERLAY_FRAME_COUNT = 2;
 
 static animation_overlay_pixel_t* normal_overlay_pixels_runtime[NORMAL_OVERLAY_FRAME_COUNT] = {nullptr, nullptr};
 static size_t normal_overlay_pixel_counts[NORMAL_OVERLAY_FRAME_COUNT] = {0, 0};
 static animation_overlay_frame_t normal_overlay_frame_views[NORMAL_OVERLAY_FRAME_COUNT] = {};
+
+static animation_overlay_pixel_t* embarrass_overlay_pixels_runtime[EMBARRASS_OVERLAY_FRAME_COUNT] = {nullptr, nullptr};
+static size_t embarrass_overlay_pixel_counts[EMBARRASS_OVERLAY_FRAME_COUNT] = {0, 0};
+static animation_overlay_frame_t embarrass_overlay_frame_views[EMBARRASS_OVERLAY_FRAME_COUNT] = {};
 
 static_assert(sizeof(animation_overlay_pixel_t) == 6, "animation_overlay_pixel_t must remain 6 bytes");
 
@@ -73,6 +78,50 @@ const animation_overlay_frame_t* animation_get_normal_overlay_frame(int frame_in
     normal_overlay_frame_views[idx].pixels = normal_overlay_pixels_runtime[idx];
     normal_overlay_frame_views[idx].count = normal_overlay_pixel_counts[idx];
     return &normal_overlay_frame_views[idx];
+}
+
+static void animation_clear_embarrass_overlay_frames(void)
+{
+    for (size_t i = 0; i < EMBARRASS_OVERLAY_FRAME_COUNT; ++i) {
+        if (embarrass_overlay_pixels_runtime[i] != nullptr) {
+            free(embarrass_overlay_pixels_runtime[i]);
+            embarrass_overlay_pixels_runtime[i] = nullptr;
+        }
+        embarrass_overlay_pixel_counts[i] = 0;
+        embarrass_overlay_frame_views[i].pixels = nullptr;
+        embarrass_overlay_frame_views[i].count = 0;
+    }
+}
+
+static bool animation_set_embarrass_overlay_frame(int frame_index, animation_overlay_pixel_t* pixels, size_t count)
+{
+    if (frame_index < 1 || frame_index > 2) {
+        if (pixels != nullptr) {
+            free(pixels);
+        }
+        return false;
+    }
+    
+    size_t idx = static_cast<size_t>(frame_index - 1);
+    if (embarrass_overlay_pixels_runtime[idx] != nullptr) {
+        free(embarrass_overlay_pixels_runtime[idx]);
+    }
+    
+    embarrass_overlay_pixels_runtime[idx] = pixels;
+    embarrass_overlay_pixel_counts[idx] = count;
+    return true;
+}
+
+const animation_overlay_frame_t* animation_get_embarrass_overlay_frame(int frame_index)
+{
+    if (frame_index < 1 || frame_index > 2) {
+        return nullptr;
+    }
+    
+    size_t idx = static_cast<size_t>(frame_index - 1);
+    embarrass_overlay_frame_views[idx].pixels = embarrass_overlay_pixels_runtime[idx];
+    embarrass_overlay_frame_views[idx].count = embarrass_overlay_pixel_counts[idx];
+    return &embarrass_overlay_frame_views[idx];
 }
 // extern const lv_image_dsc_t embarrass1;
 // extern const lv_image_dsc_t embarrass2;
@@ -331,6 +380,11 @@ void animation_set_now_animation(int animation)
     ESP_LOGI("animation_set_now_animation", "Set now animation: %d", animation);
     now_animation = animation;
     pos = 0;
+}
+
+int animation_get_now_animation(void)
+{
+    return now_animation;
 }
 
 // SPIFFS Animation Functions
@@ -1465,6 +1519,7 @@ bool animation_load_all_from_mega_file(void)
     bool success = true;
     
     animation_clear_normal_overlay_frames();
+    animation_clear_embarrass_overlay_frames();
     
     for (int anim_idx = 0; anim_idx < 8 && success; anim_idx++) {
         int frame_count = animation_frame_counts[anim_idx];
@@ -1482,8 +1537,11 @@ bool animation_load_all_from_mega_file(void)
         
         // Load frames for this animation
         // Special handling for normal animation (anim_idx == 0): reuse normal1's image descriptor for normal2 and normal3
+        // Special handling for embarrass animation (anim_idx == 1): reuse embarrass1's image descriptor for embarrass2 and embarrass3
         bool is_normal_animation = (anim_idx == 0);  // Normal animation is first (index 0)
+        bool is_embarrass_animation = (anim_idx == 1);  // Embarrass animation is second (index 1)
         lv_image_dsc_t* normal1_base_frame = NULL;  // Will store normal1's descriptor for reuse
+        lv_image_dsc_t* embarrass1_base_frame = NULL;  // Will store embarrass1's descriptor for reuse
         
         for (int frame_idx = 0; frame_idx < frame_count && success; frame_idx++) {
             ESP_LOGD("animation", "Loading frame %d from mega file", current_frame);
@@ -1565,8 +1623,32 @@ bool animation_load_all_from_mega_file(void)
                     }
                 }
                 
-                if (!animation_set_normal_overlay_frame(frame_idx, overlay_pixels, entry_count)) {
-                    ESP_LOGE("animation", "Failed to store overlay pixels for frame %d", current_frame);
+                bool overlay_set = false;
+                if (is_normal_animation) {
+                    overlay_set = animation_set_normal_overlay_frame(frame_idx, overlay_pixels, entry_count);
+                    if (!overlay_set) {
+                        ESP_LOGE("animation", "Failed to store normal overlay pixels for frame %d", current_frame);
+                    } else if (normal1_base_frame == nullptr) {
+                        ESP_LOGE("animation", "Overlay frame %d encountered before base normal frame loaded", frame_idx);
+                        overlay_set = false;
+                    } else {
+                        anim->spiffs_imgs[frame_idx] = normal1_base_frame;
+                        ESP_LOGI("animation", "Loaded %u sparse overlay pixels for normal%d (frame %d)", entry_count, frame_idx + 1, current_frame);
+                    }
+                } else if (is_embarrass_animation) {
+                    overlay_set = animation_set_embarrass_overlay_frame(frame_idx, overlay_pixels, entry_count);
+                    if (!overlay_set) {
+                        ESP_LOGE("animation", "Failed to store embarrass overlay pixels for frame %d", current_frame);
+                    } else if (embarrass1_base_frame == nullptr) {
+                        ESP_LOGE("animation", "Overlay frame %d encountered before base embarrass frame loaded", frame_idx);
+                        overlay_set = false;
+                    } else {
+                        anim->spiffs_imgs[frame_idx] = embarrass1_base_frame;
+                        ESP_LOGI("animation", "Loaded %u sparse overlay pixels for embarrass%d (frame %d)", entry_count, frame_idx + 1, current_frame);
+                    }
+                }
+                
+                if (!overlay_set) {
                     if (overlay_pixels != nullptr) {
                         free(overlay_pixels);
                     }
@@ -1574,14 +1656,6 @@ bool animation_load_all_from_mega_file(void)
                     break;
                 }
                 
-                if (normal1_base_frame == nullptr) {
-                    ESP_LOGE("animation", "Overlay frame %d encountered before base normal frame loaded", frame_idx);
-                    success = false;
-                    break;
-                }
-                
-                anim->spiffs_imgs[frame_idx] = normal1_base_frame;
-                ESP_LOGI("animation", "Loaded %u sparse overlay pixels for normal%d (frame %d)", entry_count, frame_idx + 1, current_frame);
                 current_frame++;
                 continue;
             }
@@ -1632,6 +1706,12 @@ bool animation_load_all_from_mega_file(void)
             if (is_normal_animation && frame_idx == 0) {
                 normal1_base_frame = img_dsc;
                 ESP_LOGI("animation", "Loaded normal1 (base frame) for reuse by normal2 and normal3");
+            }
+            
+            // Store embarrass1's descriptor for reuse by embarrass2 and embarrass3
+            if (is_embarrass_animation && frame_idx == 0) {
+                embarrass1_base_frame = img_dsc;
+                ESP_LOGI("animation", "Loaded embarrass1 (base frame) for reuse by embarrass2 and embarrass3");
             }
             
             ESP_LOGD("animation", "Successfully loaded frame %d: %dx%d, %d bytes", current_frame, width, height, data_size);
@@ -2051,6 +2131,7 @@ bool animation_load_all_from_sd_card(void)
     ESP_LOGI("animation", "Attempting to load ALL animations from SD card mega file...");
     
     animation_clear_normal_overlay_frames();
+    animation_clear_embarrass_overlay_frames();
     
     // First, let's list what files are actually on the SD card
     ESP_LOGI("animation", "Listing files on SD card to debug...");
@@ -2211,8 +2292,11 @@ bool animation_load_all_from_sd_card(void)
         
         // Load frames for this animation
         // Special handling for normal animation (anim_idx == 0): reuse normal1's image descriptor for normal2 and normal3
+        // Special handling for embarrass animation (anim_idx == 1): reuse embarrass1's image descriptor for embarrass2 and embarrass3
         bool is_normal_animation = (anim_idx == 0);  // Normal animation is first (index 0)
+        bool is_embarrass_animation = (anim_idx == 1);  // Embarrass animation is second (index 1)
         lv_image_dsc_t* normal1_base_frame = NULL;  // Will store normal1's descriptor for reuse
+        lv_image_dsc_t* embarrass1_base_frame = NULL;  // Will store embarrass1's descriptor for reuse
         
         for (int frame_idx = 0; frame_idx < frame_count && success; frame_idx++) {
             ESP_LOGD("animation", "Loading frame %d from SD card mega file", current_frame);
@@ -2237,7 +2321,7 @@ bool animation_load_all_from_sd_card(void)
             uint32_t height = header_data[4];
             uint32_t stride = header_data[5];
             size_t data_size = height * stride;
-            bool is_overlay_frame = is_normal_animation && (frame_idx > 0) && (header_data[1] == LV_IMAGE_CF_OVERLAY_PIXELS);
+            bool is_overlay_frame = ((is_normal_animation || is_embarrass_animation) && (frame_idx > 0) && (header_data[1] == LV_IMAGE_CF_OVERLAY_PIXELS));
             
             if (is_overlay_frame) {
                 uint32_t entry_count = width;
@@ -2294,8 +2378,32 @@ bool animation_load_all_from_sd_card(void)
                     }
                 }
                 
-                if (!animation_set_normal_overlay_frame(frame_idx, overlay_pixels, entry_count)) {
-                    ESP_LOGE("animation", "Failed to store SD overlay pixels for frame %d", current_frame);
+                bool overlay_set = false;
+                if (is_normal_animation) {
+                    overlay_set = animation_set_normal_overlay_frame(frame_idx, overlay_pixels, entry_count);
+                    if (!overlay_set) {
+                        ESP_LOGE("animation", "Failed to store SD normal overlay pixels for frame %d", current_frame);
+                    } else if (normal1_base_frame == nullptr) {
+                        ESP_LOGE("animation", "SD overlay frame %d encountered before base normal frame loaded", frame_idx);
+                        overlay_set = false;
+                    } else {
+                        anim->spiffs_imgs[frame_idx] = normal1_base_frame;
+                        ESP_LOGI("animation", "Loaded %u sparse SD overlay pixels for normal%d (frame %d)", entry_count, frame_idx + 1, current_frame);
+                    }
+                } else if (is_embarrass_animation) {
+                    overlay_set = animation_set_embarrass_overlay_frame(frame_idx, overlay_pixels, entry_count);
+                    if (!overlay_set) {
+                        ESP_LOGE("animation", "Failed to store SD embarrass overlay pixels for frame %d", current_frame);
+                    } else if (embarrass1_base_frame == nullptr) {
+                        ESP_LOGE("animation", "SD overlay frame %d encountered before base embarrass frame loaded", frame_idx);
+                        overlay_set = false;
+                    } else {
+                        anim->spiffs_imgs[frame_idx] = embarrass1_base_frame;
+                        ESP_LOGI("animation", "Loaded %u sparse SD overlay pixels for embarrass%d (frame %d)", entry_count, frame_idx + 1, current_frame);
+                    }
+                }
+                
+                if (!overlay_set) {
                     if (overlay_pixels != nullptr) {
                         free(overlay_pixels);
                     }
@@ -2303,14 +2411,6 @@ bool animation_load_all_from_sd_card(void)
                     break;
                 }
                 
-                if (normal1_base_frame == nullptr) {
-                    ESP_LOGE("animation", "SD overlay frame %d encountered before base normal frame loaded", frame_idx);
-                    success = false;
-                    break;
-                }
-                
-                anim->spiffs_imgs[frame_idx] = normal1_base_frame;
-                ESP_LOGI("animation", "Loaded %u sparse SD overlay pixels for normal%d (frame %d)", entry_count, frame_idx + 1, current_frame);
                 current_frame++;
                 continue;
             }
@@ -2360,6 +2460,12 @@ bool animation_load_all_from_sd_card(void)
             if (is_normal_animation && frame_idx == 0) {
                 normal1_base_frame = img_dsc;
                 ESP_LOGI("animation", "Loaded normal1 (base frame) for reuse by normal2 and normal3");
+            }
+            
+            // Store embarrass1's descriptor for reuse by embarrass2 and embarrass3
+            if (is_embarrass_animation && frame_idx == 0) {
+                embarrass1_base_frame = img_dsc;
+                ESP_LOGI("animation", "Loaded embarrass1 (base frame) for reuse by embarrass2 and embarrass3");
             }
             
             ESP_LOGD("animation", "Successfully loaded frame %d: %dx%d, %d bytes", current_frame, width, height, data_size);

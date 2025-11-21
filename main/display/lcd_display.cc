@@ -1067,16 +1067,26 @@ static lv_image_dsc_t* composed_img_dsc = nullptr;
 static uint8_t* composed_img_data = nullptr;
 
 // Helper function to create composed image with sparse overlay pixels
-// Only applies to normal2 (frame_index 1) and normal3 (frame_index 2)
+// Only applies to normal2/normal3 (frame_index 1 and 2) and embarrass2/embarrass3 (frame_index 1 and 2)
 static lv_image_dsc_t* compose_image_with_overlay(const lv_image_dsc_t* base_img, int frame_index) {
     if (base_img == nullptr || base_img->data == nullptr) {
         ESP_LOGE(TAG, "Invalid base image for composition");
         return nullptr;
     }
     
-    // Only compose for normal2 (frame_index 1) and normal3 (frame_index 2)
+    // Only compose for frame_index 1 and 2 (normal2/normal3 or embarrass2/embarrass3)
     if (frame_index != 1 && frame_index != 2) {
         return nullptr; // No composition needed
+    }
+    
+    // Get current animation type to determine which overlay to use
+    int current_animation = animation_get_now_animation();
+    bool is_normal_animation = (current_animation == ANIMATION_NORMAL || current_animation == ANIMATION_STATIC_NORMAL);
+    bool is_embarrass_animation = (current_animation == ANIMATION_EMBARRESSED);
+    
+    // Only apply overlays for normal and embarrass animations
+    if (!is_normal_animation && !is_embarrass_animation) {
+        return nullptr; // No overlay for this animation type
     }
     
     lv_coord_t img_width = base_img->header.w;
@@ -1118,18 +1128,31 @@ static lv_image_dsc_t* compose_image_with_overlay(const lv_image_dsc_t* base_img
     // Copy base image data
     memcpy(composed_img_data, base_img->data, data_size);
     
-    const animation_overlay_frame_t* runtime_overlay = animation_get_normal_overlay_frame(frame_index);
+    // Get the appropriate overlay based on animation type
+    const animation_overlay_frame_t* runtime_overlay = nullptr;
+    if (is_normal_animation) {
+        runtime_overlay = animation_get_normal_overlay_frame(frame_index);
+    } else if (is_embarrass_animation) {
+        runtime_overlay = animation_get_embarrass_overlay_frame(frame_index);
+    }
+    
     const animation_overlay_pixel_t* overlay_list = nullptr;
     size_t overlay_count = 0;
     
     if (runtime_overlay != nullptr && runtime_overlay->pixels != nullptr && runtime_overlay->count > 0) {
         overlay_list = runtime_overlay->pixels;
         overlay_count = runtime_overlay->count;
-        ESP_LOGD(TAG, "Using %zu runtime overlay pixels for frame %d", overlay_count, frame_index);
+        ESP_LOGD(TAG, "Using %zu runtime overlay pixels for animation %d frame %d", overlay_count, current_animation, frame_index);
     } else {
-        overlay_list = reinterpret_cast<const animation_overlay_pixel_t*>(overlay_pixels);
-        overlay_count = OVERLAY_PIXEL_COUNT;
-        ESP_LOGD(TAG, "Runtime overlay not available, falling back to static overlay (%zu pixels)", overlay_count);
+        // Fallback to static overlay only for normal animation
+        if (is_normal_animation) {
+            overlay_list = reinterpret_cast<const animation_overlay_pixel_t*>(overlay_pixels);
+            overlay_count = OVERLAY_PIXEL_COUNT;
+            ESP_LOGD(TAG, "Runtime overlay not available, falling back to static overlay (%zu pixels)", overlay_count);
+        } else {
+            ESP_LOGD(TAG, "No overlay available for animation %d frame %d", current_animation, frame_index);
+            return nullptr; // No overlay available for this animation
+        }
     }
     
     // Apply sparse overlay pixels (runtime or fallback) within image bounds

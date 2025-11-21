@@ -62,6 +62,15 @@ def get_default_overlay_header_path():
     script_dir = Path(__file__).resolve().parent
     return script_dir.parent / "main" / "display" / "overlay_pixels.h"
 
+def get_default_embarrass_overlay_paths():
+    """Return default paths to embarrass overlay headers relative to repo root."""
+    script_dir = Path(__file__).resolve().parent
+    frame_diff_dir = script_dir.parent / "images" / "frame difference"
+    return {
+        2: frame_diff_dir / "embarrass_overlay2.h",
+        3: frame_diff_dir / "embarrass_overlay3.h"
+    }
+
 def load_overlay_pixels(header_path):
     """Parse overlay pixel data from overlay_pixels.h"""
     path = Path(header_path)
@@ -92,6 +101,22 @@ def load_overlay_pixels(header_path):
     else:
         print(f"Warning: No overlay pixels found in {path}")
     return overlay_pixels
+
+def load_embarrass_overlays(overlay_paths):
+    """Load embarrass overlay pixels from multiple header files.
+    
+    Args:
+        overlay_paths: Dict mapping frame index (2, 3) to header file path
+        
+    Returns:
+        Dict mapping frame index to list of (x, y, color) tuples
+    """
+    overlays = {}
+    for frame_idx, path in overlay_paths.items():
+        pixels = load_overlay_pixels(path)
+        if pixels:
+            overlays[frame_idx] = pixels
+    return overlays
 
 class LVGLImage:
     def __init__(self):
@@ -277,7 +302,15 @@ class AnimationSet:
         target_frames = self.overlay_config.get("target_frames", [])
         base_index = self.overlay_config.get("base_frame_index", 0)
         
-        if not pixels:
+        # Support both single pixels list (for normal) and dict of pixels per frame (for embarrass)
+        if isinstance(pixels, dict):
+            # Dict format: {frame_idx: [(x, y, color), ...], ...}
+            pixels_dict = pixels
+        else:
+            # List format: [(x, y, color), ...] - same pixels for all target frames
+            pixels_dict = {frame_idx: pixels for frame_idx in target_frames}
+        
+        if not pixels_dict:
             print(f"  ⚠️  No overlay pixels provided for {self.name}")
             return False
         
@@ -305,10 +338,15 @@ class AnimationSet:
             return False
         
         for frame_idx in target_frames:
+            frame_pixels = pixels_dict.get(frame_idx, [])
+            if not frame_pixels:
+                print(f"  ⚠️  No overlay pixels for frame {frame_idx} in {self.name}")
+                continue
+                
             entry_count = 0
             overlay_payload = bytearray()
             
-            for x, y, color in pixels:
+            for x, y, color in frame_pixels:
                 if x >= width or y >= height:
                     continue
                 overlay_payload.extend(struct.pack('<HHH', x, y, color & 0xFFFF))
@@ -363,7 +401,7 @@ class AnimationSet:
         return sum(len(frame) for frame in self.frames)
 
 def create_mega_animations(input_dir, output_file, target_size=(256, 256), force_format=None,
-                           overlay_pixels=None):
+                           overlay_pixels=None, embarrass_overlays=None):
     """Create mega animation file with all animations"""
     
     print("=== Creating Mega Animation File ===")
@@ -384,6 +422,19 @@ def create_mega_animations(input_dir, output_file, target_size=(256, 256), force
         normal_min_files = 1
         print("Normal animation will reuse base frame with overlay pixels for frames 2 and 3")
     
+    # Configure embarrass animation overlay usage if overlays are provided
+    embarrass_overlay_config = None
+    embarrass_min_files = 3
+    if embarrass_overlays:
+        embarrass_overlay_config = {
+            "type": "overlay_pixels",
+            "pixels": embarrass_overlays,  # Dict format: {2: pixels, 3: pixels}
+            "base_frame_index": 0,
+            "target_frames": [1, 2],  # Frame indices 1 and 2 (embarrass2 and embarrass3)
+        }
+        embarrass_min_files = 1
+        print("Embarrass animation will reuse base frame with overlay pixels for frames 2 and 3")
+    
     # Define all animation sets
     animation_sets = [
         AnimationSet(
@@ -394,7 +445,13 @@ def create_mega_animations(input_dir, output_file, target_size=(256, 256), force
             min_individual_files=normal_min_files,
             overlay_config=normal_overlay_config,
         ),
-        AnimationSet("Embarrass", 3, individual_pattern="embarrass*.jpg"),
+        AnimationSet(
+            "Embarrass",
+            3,
+            individual_pattern="embarrass*.jpg",
+            min_individual_files=embarrass_min_files,
+            overlay_config=embarrass_overlay_config,
+        ),
         AnimationSet("Fire", 4, individual_pattern="fire*.jpg"),
         AnimationSet("Happy", 4, individual_pattern="happy*.jpg"),
         AnimationSet("Inspiration", 4, individual_pattern="inspiration*.jpg"),
@@ -483,6 +540,14 @@ Examples:
                         default=str(get_default_overlay_header_path()),
                         help='Path to overlay_pixels.h for deriving Normal frame overlays (default: %(default)s). '
                              'Set to "none" to disable overlay-based frames.')
+    parser.add_argument('--embarrass-overlay2',
+                        default=None,
+                        help='Path to embarrass_overlay2.h (default: images/frame difference/embarrass_overlay2.h). '
+                             'Set to "none" to disable embarrass overlay frames.')
+    parser.add_argument('--embarrass-overlay3',
+                        default=None,
+                        help='Path to embarrass_overlay3.h (default: images/frame difference/embarrass_overlay3.h). '
+                             'Set to "none" to disable embarrass overlay frames.')
     
     return parser.parse_args()
 
@@ -514,7 +579,30 @@ def main():
         if not overlay_pixels:
             overlay_pixels = None
     else:
-        print("Overlay-based frame generation disabled by user request")
+        print("Normal overlay-based frame generation disabled by user request")
+    
+    # Load embarrass overlays if requested
+    embarrass_overlays = None
+    default_embarrass_paths = get_default_embarrass_overlay_paths()
+    
+    overlay2_path = args.embarrass_overlay2 if args.embarrass_overlay2 is not None else str(default_embarrass_paths[2])
+    overlay3_path = args.embarrass_overlay3 if args.embarrass_overlay3 is not None else str(default_embarrass_paths[3])
+    
+    if overlay2_path.lower() != "none" and overlay3_path.lower() != "none":
+        embarrass_overlays = {}
+        if overlay2_path.lower() != "none":
+            pixels2 = load_overlay_pixels(overlay2_path)
+            if pixels2:
+                embarrass_overlays[1] = pixels2  # Frame index 1 (embarrass2)
+        if overlay3_path.lower() != "none":
+            pixels3 = load_overlay_pixels(overlay3_path)
+            if pixels3:
+                embarrass_overlays[2] = pixels3  # Frame index 2 (embarrass3)
+        
+        if not embarrass_overlays:
+            embarrass_overlays = None
+    else:
+        print("Embarrass overlay-based frame generation disabled by user request")
     
     # Create mega animations
     success = create_mega_animations(
@@ -522,7 +610,8 @@ def main():
         args.output_file, 
         target_size=tuple(args.size),
         force_format=force_format,
-        overlay_pixels=overlay_pixels
+        overlay_pixels=overlay_pixels,
+        embarrass_overlays=embarrass_overlays
     )
     
     if success:
