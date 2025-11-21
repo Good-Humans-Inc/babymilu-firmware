@@ -152,6 +152,83 @@ static bool PlayWavFromUrl(const std::string &url, float gain)
     return true;
 }
 
+// Minimal OPUS-from-HTTP player for POC: expects BinaryProtocol3-framed raw Opus frames
+// Each frame: struct BinaryProtocol3 { uint8_t type; uint8_t reserved; uint16_t payload_size; uint8_t payload[payload_size]; }
+// We convert each payload to AudioStreamPacket and enqueue for decoder
+static bool PlayOpusFromUrl(const std::string &url)
+{
+    auto &board = Board::GetInstance();
+    std::unique_ptr<Http> http(board.CreateHttp());
+    if (!http)
+    {
+        ESP_LOGE(TAG, "Failed to create HTTP client");
+        return false;
+    }
+    http->SetHeader("Accept", "application/octet-stream");
+    http->SetHeader("Accept-Encoding", "identity");
+    http->SetTimeout(10000);
+
+    ESP_LOGI(TAG, "Opening OPUS URL: %s", url.c_str());
+    if (!http->Open("GET", url))
+    {
+        ESP_LOGE(TAG, "HTTP open failed");
+        return false;
+    }
+    int status = http->GetStatusCode();
+    if (status != 200)
+    {
+        ESP_LOGE(TAG, "HTTP status %d", status);
+        http->Close();
+        return false;
+    }
+
+    std::vector<uint8_t> buffer;
+    buffer.reserve(4096);
+    const size_t READ_CHUNK = 1024;
+    std::unique_ptr<uint8_t[]> chunk(new uint8_t[READ_CHUNK]);
+
+    while (true)
+    {
+        int n = http->Read(reinterpret_cast<char *>(chunk.get()), READ_CHUNK);
+        if (n < 0)
+        {
+            ESP_LOGE(TAG, "HTTP read error");
+            http->Close();
+            return false;
+        }
+        if (n == 0)
+        {
+            break; // done
+        }
+        buffer.insert(buffer.end(), chunk.get(), chunk.get() + n);
+
+        // parse BinaryProtocol3 frames
+        while (buffer.size() >= sizeof(BinaryProtocol3))
+        {
+            auto *bp3 = reinterpret_cast<BinaryProtocol3 *>(buffer.data());
+            uint16_t payload_size = ntohs(bp3->payload_size);
+            size_t frame_size = sizeof(BinaryProtocol3) + payload_size;
+            if (buffer.size() < frame_size)
+            {
+                // need more bytes
+                break;
+            }
+            AudioStreamPacket packet;
+            packet.sample_rate = 16000;         // match WS negotiated rate
+            packet.frame_duration = 60;         // 60 ms frames
+            packet.timestamp = 0;
+            packet.payload.resize(payload_size);
+            memcpy(packet.payload.data(), bp3->payload, payload_size);
+
+            Application::GetInstance().EnqueueOpusPacket(std::move(packet));
+            // erase frame from buffer
+            buffer.erase(buffer.begin(), buffer.begin() + frame_size);
+        }
+    }
+    http->Close();
+    return true;
+}
+
 static const char *const STATE_STRINGS[] = {
     "unknown",
     "starting",
@@ -1186,6 +1263,13 @@ void Application::ResetDecoder()
     codec->EnableOutput(true);
 }
 
+void Application::EnqueueOpusPacket(AudioStreamPacket&& packet)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    audio_decode_queue_.emplace_back(std::move(packet));
+    audio_decode_cv_.notify_all();
+}
+
 void Application::SetDecodeSampleRate(int sample_rate, int frame_duration)
 {
     if (opus_decoder_->sample_rate() == sample_rate && opus_decoder_->duration_ms() == frame_duration)
@@ -1470,6 +1554,27 @@ void Application::SetupProtocolCallbacks()
                 });
             } else {
                 ESP_LOGW(TAG, "play_url missing 'url' field");
+            }
+        } else if (strcmp(type->valuestring, "play_opus_url") == 0) {
+            auto url = cJSON_GetObjectItem(root, "url");
+            if (cJSON_IsString(url)) {
+                Schedule([this, url_str = std::string(url->valuestring)]() {
+                    ResetDecoder();
+                    if (device_state_ == kDeviceStateIdle || device_state_ == kDeviceStateListening) {
+                        SetDeviceState(kDeviceStateSpeaking);
+                    }
+                    background_task_->Schedule([this, url_str]() {
+                        bool ok = PlayOpusFromUrl(url_str);
+                        Schedule([this, ok]() {
+                            if (device_state_ == kDeviceStateSpeaking) {
+                                SetDeviceState(kDeviceStateIdle);
+                            }
+                            ESP_LOGI(TAG, "PlayOpusFromUrl %s", ok ? "done" : "failed");
+                        });
+                    });
+                });
+            } else {
+                ESP_LOGW(TAG, "play_opus_url missing 'url' field");
             }
         } else {
             ESP_LOGW(TAG, "Unknown message type: %s", type->valuestring);

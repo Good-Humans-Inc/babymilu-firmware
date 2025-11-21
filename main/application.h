@@ -77,6 +77,8 @@ public:
     void Reboot();
     void WakeWordInvoke(const std::string& wake_word);
     void PlaySound(const std::string_view& sound);
+    // Enqueue a decoded Opus frame payload to the playback queue
+    void EnqueueOpusPacket(AudioStreamPacket&& packet);
     bool CanEnterSleepMode();
     void SendMcpMessage(const std::string& payload);
     void SetAecMode(AecMode mode);
