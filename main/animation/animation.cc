@@ -25,6 +25,9 @@
 static constexpr uint32_t LV_IMAGE_CF_OVERLAY_PIXELS = 0x4F50584C; // "OPXL"
 static constexpr size_t NORMAL_OVERLAY_FRAME_COUNT = 2;
 static constexpr size_t EMBARRASS_OVERLAY_FRAME_COUNT = 2;
+static constexpr size_t FIRE_OVERLAY_FRAME_COUNT = 3;     // Frames 2-4 (indices 1-3)
+static constexpr size_t HAPPY_OVERLAY_FRAME_COUNT = 3;    // Frames 2-4 (indices 1-3)
+static constexpr size_t INSPIRATION_OVERLAY_FRAME_COUNT = 3; // Frames 2-4 (indices 1-3)
 
 static animation_overlay_pixel_t* normal_overlay_pixels_runtime[NORMAL_OVERLAY_FRAME_COUNT] = {nullptr, nullptr};
 static size_t normal_overlay_pixel_counts[NORMAL_OVERLAY_FRAME_COUNT] = {0, 0};
@@ -33,6 +36,18 @@ static animation_overlay_frame_t normal_overlay_frame_views[NORMAL_OVERLAY_FRAME
 static animation_overlay_pixel_t* embarrass_overlay_pixels_runtime[EMBARRASS_OVERLAY_FRAME_COUNT] = {nullptr, nullptr};
 static size_t embarrass_overlay_pixel_counts[EMBARRASS_OVERLAY_FRAME_COUNT] = {0, 0};
 static animation_overlay_frame_t embarrass_overlay_frame_views[EMBARRASS_OVERLAY_FRAME_COUNT] = {};
+
+static animation_overlay_pixel_t* fire_overlay_pixels_runtime[FIRE_OVERLAY_FRAME_COUNT] = {nullptr, nullptr, nullptr};
+static size_t fire_overlay_pixel_counts[FIRE_OVERLAY_FRAME_COUNT] = {0, 0, 0};
+static animation_overlay_frame_t fire_overlay_frame_views[FIRE_OVERLAY_FRAME_COUNT] = {};
+
+static animation_overlay_pixel_t* happy_overlay_pixels_runtime[HAPPY_OVERLAY_FRAME_COUNT] = {nullptr, nullptr, nullptr};
+static size_t happy_overlay_pixel_counts[HAPPY_OVERLAY_FRAME_COUNT] = {0, 0, 0};
+static animation_overlay_frame_t happy_overlay_frame_views[HAPPY_OVERLAY_FRAME_COUNT] = {};
+
+static animation_overlay_pixel_t* inspiration_overlay_pixels_runtime[INSPIRATION_OVERLAY_FRAME_COUNT] = {nullptr, nullptr, nullptr};
+static size_t inspiration_overlay_pixel_counts[INSPIRATION_OVERLAY_FRAME_COUNT] = {0, 0, 0};
+static animation_overlay_frame_t inspiration_overlay_frame_views[INSPIRATION_OVERLAY_FRAME_COUNT] = {};
 
 static_assert(sizeof(animation_overlay_pixel_t) == 6, "animation_overlay_pixel_t must remain 6 bytes");
 
@@ -122,6 +137,138 @@ const animation_overlay_frame_t* animation_get_embarrass_overlay_frame(int frame
     embarrass_overlay_frame_views[idx].pixels = embarrass_overlay_pixels_runtime[idx];
     embarrass_overlay_frame_views[idx].count = embarrass_overlay_pixel_counts[idx];
     return &embarrass_overlay_frame_views[idx];
+}
+
+static void animation_clear_fire_overlay_frames(void)
+{
+    for (size_t i = 0; i < FIRE_OVERLAY_FRAME_COUNT; ++i) {
+        if (fire_overlay_pixels_runtime[i] != nullptr) {
+            free(fire_overlay_pixels_runtime[i]);
+            fire_overlay_pixels_runtime[i] = nullptr;
+        }
+        fire_overlay_pixel_counts[i] = 0;
+        fire_overlay_frame_views[i].pixels = nullptr;
+        fire_overlay_frame_views[i].count = 0;
+    }
+}
+
+static bool animation_set_fire_overlay_frame(int frame_index, animation_overlay_pixel_t* pixels, size_t count)
+{
+    if (frame_index < 1 || frame_index > 3) {
+        if (pixels != nullptr) {
+            free(pixels);
+        }
+        return false;
+    }
+    
+    size_t idx = static_cast<size_t>(frame_index - 1);
+    if (fire_overlay_pixels_runtime[idx] != nullptr) {
+        free(fire_overlay_pixels_runtime[idx]);
+    }
+    
+    fire_overlay_pixels_runtime[idx] = pixels;
+    fire_overlay_pixel_counts[idx] = count;
+    return true;
+}
+
+const animation_overlay_frame_t* animation_get_fire_overlay_frame(int frame_index)
+{
+    if (frame_index < 1 || frame_index > 3) {
+        return nullptr;
+    }
+    
+    size_t idx = static_cast<size_t>(frame_index - 1);
+    fire_overlay_frame_views[idx].pixels = fire_overlay_pixels_runtime[idx];
+    fire_overlay_frame_views[idx].count = fire_overlay_pixel_counts[idx];
+    return &fire_overlay_frame_views[idx];
+}
+
+static void animation_clear_happy_overlay_frames(void)
+{
+    for (size_t i = 0; i < HAPPY_OVERLAY_FRAME_COUNT; ++i) {
+        if (happy_overlay_pixels_runtime[i] != nullptr) {
+            free(happy_overlay_pixels_runtime[i]);
+            happy_overlay_pixels_runtime[i] = nullptr;
+        }
+        happy_overlay_pixel_counts[i] = 0;
+        happy_overlay_frame_views[i].pixels = nullptr;
+        happy_overlay_frame_views[i].count = 0;
+    }
+}
+
+static bool animation_set_happy_overlay_frame(int frame_index, animation_overlay_pixel_t* pixels, size_t count)
+{
+    if (frame_index < 1 || frame_index > 3) {
+        if (pixels != nullptr) {
+            free(pixels);
+        }
+        return false;
+    }
+    
+    size_t idx = static_cast<size_t>(frame_index - 1);
+    if (happy_overlay_pixels_runtime[idx] != nullptr) {
+        free(happy_overlay_pixels_runtime[idx]);
+    }
+    
+    happy_overlay_pixels_runtime[idx] = pixels;
+    happy_overlay_pixel_counts[idx] = count;
+    return true;
+}
+
+const animation_overlay_frame_t* animation_get_happy_overlay_frame(int frame_index)
+{
+    if (frame_index < 1 || frame_index > 3) {
+        return nullptr;
+    }
+    
+    size_t idx = static_cast<size_t>(frame_index - 1);
+    happy_overlay_frame_views[idx].pixels = happy_overlay_pixels_runtime[idx];
+    happy_overlay_frame_views[idx].count = happy_overlay_pixel_counts[idx];
+    return &happy_overlay_frame_views[idx];
+}
+
+static void animation_clear_inspiration_overlay_frames(void)
+{
+    for (size_t i = 0; i < INSPIRATION_OVERLAY_FRAME_COUNT; ++i) {
+        if (inspiration_overlay_pixels_runtime[i] != nullptr) {
+            free(inspiration_overlay_pixels_runtime[i]);
+            inspiration_overlay_pixels_runtime[i] = nullptr;
+        }
+        inspiration_overlay_pixel_counts[i] = 0;
+        inspiration_overlay_frame_views[i].pixels = nullptr;
+        inspiration_overlay_frame_views[i].count = 0;
+    }
+}
+
+static bool animation_set_inspiration_overlay_frame(int frame_index, animation_overlay_pixel_t* pixels, size_t count)
+{
+    if (frame_index < 1 || frame_index > 3) {
+        if (pixels != nullptr) {
+            free(pixels);
+        }
+        return false;
+    }
+    
+    size_t idx = static_cast<size_t>(frame_index - 1);
+    if (inspiration_overlay_pixels_runtime[idx] != nullptr) {
+        free(inspiration_overlay_pixels_runtime[idx]);
+    }
+    
+    inspiration_overlay_pixels_runtime[idx] = pixels;
+    inspiration_overlay_pixel_counts[idx] = count;
+    return true;
+}
+
+const animation_overlay_frame_t* animation_get_inspiration_overlay_frame(int frame_index)
+{
+    if (frame_index < 1 || frame_index > 3) {
+        return nullptr;
+    }
+    
+    size_t idx = static_cast<size_t>(frame_index - 1);
+    inspiration_overlay_frame_views[idx].pixels = inspiration_overlay_pixels_runtime[idx];
+    inspiration_overlay_frame_views[idx].count = inspiration_overlay_pixel_counts[idx];
+    return &inspiration_overlay_frame_views[idx];
 }
 // extern const lv_image_dsc_t embarrass1;
 // extern const lv_image_dsc_t embarrass2;
@@ -1520,6 +1667,9 @@ bool animation_load_all_from_mega_file(void)
     
     animation_clear_normal_overlay_frames();
     animation_clear_embarrass_overlay_frames();
+    animation_clear_fire_overlay_frames();
+    animation_clear_happy_overlay_frames();
+    animation_clear_inspiration_overlay_frames();
     
     for (int anim_idx = 0; anim_idx < 8 && success; anim_idx++) {
         int frame_count = animation_frame_counts[anim_idx];
@@ -1538,10 +1688,19 @@ bool animation_load_all_from_mega_file(void)
         // Load frames for this animation
         // Special handling for normal animation (anim_idx == 0): reuse normal1's image descriptor for normal2 and normal3
         // Special handling for embarrass animation (anim_idx == 1): reuse embarrass1's image descriptor for embarrass2 and embarrass3
+        // Special handling for fire animation (anim_idx == 2): reuse fire1's image descriptor for fire2, fire3, fire4
+        // Special handling for happy animation (anim_idx == 3): reuse happy1's image descriptor for happy2, happy3, happy4
+        // Special handling for inspiration animation (anim_idx == 4): reuse inspiration1's image descriptor for inspiration2, inspiration3, inspiration4
         bool is_normal_animation = (anim_idx == 0);  // Normal animation is first (index 0)
         bool is_embarrass_animation = (anim_idx == 1);  // Embarrass animation is second (index 1)
+        bool is_fire_animation = (anim_idx == 2);  // Fire animation is third (index 2)
+        bool is_happy_animation = (anim_idx == 3);  // Happy animation is fourth (index 3)
+        bool is_inspiration_animation = (anim_idx == 4);  // Inspiration animation is fifth (index 4)
         lv_image_dsc_t* normal1_base_frame = NULL;  // Will store normal1's descriptor for reuse
         lv_image_dsc_t* embarrass1_base_frame = NULL;  // Will store embarrass1's descriptor for reuse
+        lv_image_dsc_t* fire1_base_frame = NULL;  // Will store fire1's descriptor for reuse
+        lv_image_dsc_t* happy1_base_frame = NULL;  // Will store happy1's descriptor for reuse
+        lv_image_dsc_t* inspiration1_base_frame = NULL;  // Will store inspiration1's descriptor for reuse
         
         for (int frame_idx = 0; frame_idx < frame_count && success; frame_idx++) {
             ESP_LOGD("animation", "Loading frame %d from mega file", current_frame);
@@ -1566,7 +1725,9 @@ bool animation_load_all_from_mega_file(void)
             uint32_t height = header_data[4];
             uint32_t stride = header_data[5];
             size_t data_size = height * stride;
-            bool is_overlay_frame = is_normal_animation && (frame_idx > 0) && (header_data[1] == LV_IMAGE_CF_OVERLAY_PIXELS);
+            bool is_overlay_frame = ((is_normal_animation || is_embarrass_animation || is_fire_animation || 
+                                     is_happy_animation || is_inspiration_animation) && 
+                                    (frame_idx > 0) && (header_data[1] == LV_IMAGE_CF_OVERLAY_PIXELS));
             
             if (is_overlay_frame) {
                 uint32_t entry_count = width; // width field reused to store entry count
@@ -1645,6 +1806,39 @@ bool animation_load_all_from_mega_file(void)
                     } else {
                         anim->spiffs_imgs[frame_idx] = embarrass1_base_frame;
                         ESP_LOGI("animation", "Loaded %u sparse overlay pixels for embarrass%d (frame %d)", entry_count, frame_idx + 1, current_frame);
+                    }
+                } else if (is_fire_animation) {
+                    overlay_set = animation_set_fire_overlay_frame(frame_idx, overlay_pixels, entry_count);
+                    if (!overlay_set) {
+                        ESP_LOGE("animation", "Failed to store fire overlay pixels for frame %d", current_frame);
+                    } else if (fire1_base_frame == nullptr) {
+                        ESP_LOGE("animation", "Overlay frame %d encountered before base fire frame loaded", frame_idx);
+                        overlay_set = false;
+                    } else {
+                        anim->spiffs_imgs[frame_idx] = fire1_base_frame;
+                        ESP_LOGI("animation", "Loaded %u sparse overlay pixels for fire%d (frame %d)", entry_count, frame_idx + 1, current_frame);
+                    }
+                } else if (is_happy_animation) {
+                    overlay_set = animation_set_happy_overlay_frame(frame_idx, overlay_pixels, entry_count);
+                    if (!overlay_set) {
+                        ESP_LOGE("animation", "Failed to store happy overlay pixels for frame %d", current_frame);
+                    } else if (happy1_base_frame == nullptr) {
+                        ESP_LOGE("animation", "Overlay frame %d encountered before base happy frame loaded", frame_idx);
+                        overlay_set = false;
+                    } else {
+                        anim->spiffs_imgs[frame_idx] = happy1_base_frame;
+                        ESP_LOGI("animation", "Loaded %u sparse overlay pixels for happy%d (frame %d)", entry_count, frame_idx + 1, current_frame);
+                    }
+                } else if (is_inspiration_animation) {
+                    overlay_set = animation_set_inspiration_overlay_frame(frame_idx, overlay_pixels, entry_count);
+                    if (!overlay_set) {
+                        ESP_LOGE("animation", "Failed to store inspiration overlay pixels for frame %d", current_frame);
+                    } else if (inspiration1_base_frame == nullptr) {
+                        ESP_LOGE("animation", "Overlay frame %d encountered before base inspiration frame loaded", frame_idx);
+                        overlay_set = false;
+                    } else {
+                        anim->spiffs_imgs[frame_idx] = inspiration1_base_frame;
+                        ESP_LOGI("animation", "Loaded %u sparse overlay pixels for inspiration%d (frame %d)", entry_count, frame_idx + 1, current_frame);
                     }
                 }
                 
@@ -1748,6 +1942,10 @@ bool animation_load_all_from_mega_file(void)
     } else {
         ESP_LOGE("animation", "❌ Failed to load animations from mega file");
         animation_clear_normal_overlay_frames();
+        animation_clear_embarrass_overlay_frames();
+        animation_clear_fire_overlay_frames();
+        animation_clear_happy_overlay_frames();
+        animation_clear_inspiration_overlay_frames();
         
         // Clean up on failure
         for (int i = 0; i < total_frames; i++) {
@@ -2132,6 +2330,9 @@ bool animation_load_all_from_sd_card(void)
     
     animation_clear_normal_overlay_frames();
     animation_clear_embarrass_overlay_frames();
+    animation_clear_fire_overlay_frames();
+    animation_clear_happy_overlay_frames();
+    animation_clear_inspiration_overlay_frames();
     
     // First, let's list what files are actually on the SD card
     ESP_LOGI("animation", "Listing files on SD card to debug...");
@@ -2293,10 +2494,19 @@ bool animation_load_all_from_sd_card(void)
         // Load frames for this animation
         // Special handling for normal animation (anim_idx == 0): reuse normal1's image descriptor for normal2 and normal3
         // Special handling for embarrass animation (anim_idx == 1): reuse embarrass1's image descriptor for embarrass2 and embarrass3
+        // Special handling for fire animation (anim_idx == 2): reuse fire1's image descriptor for fire2, fire3, fire4
+        // Special handling for happy animation (anim_idx == 3): reuse happy1's image descriptor for happy2, happy3, happy4
+        // Special handling for inspiration animation (anim_idx == 4): reuse inspiration1's image descriptor for inspiration2, inspiration3, inspiration4
         bool is_normal_animation = (anim_idx == 0);  // Normal animation is first (index 0)
         bool is_embarrass_animation = (anim_idx == 1);  // Embarrass animation is second (index 1)
+        bool is_fire_animation = (anim_idx == 2);  // Fire animation is third (index 2)
+        bool is_happy_animation = (anim_idx == 3);  // Happy animation is fourth (index 3)
+        bool is_inspiration_animation = (anim_idx == 4);  // Inspiration animation is fifth (index 4)
         lv_image_dsc_t* normal1_base_frame = NULL;  // Will store normal1's descriptor for reuse
         lv_image_dsc_t* embarrass1_base_frame = NULL;  // Will store embarrass1's descriptor for reuse
+        lv_image_dsc_t* fire1_base_frame = NULL;  // Will store fire1's descriptor for reuse
+        lv_image_dsc_t* happy1_base_frame = NULL;  // Will store happy1's descriptor for reuse
+        lv_image_dsc_t* inspiration1_base_frame = NULL;  // Will store inspiration1's descriptor for reuse
         
         for (int frame_idx = 0; frame_idx < frame_count && success; frame_idx++) {
             ESP_LOGD("animation", "Loading frame %d from SD card mega file", current_frame);
@@ -2321,7 +2531,9 @@ bool animation_load_all_from_sd_card(void)
             uint32_t height = header_data[4];
             uint32_t stride = header_data[5];
             size_t data_size = height * stride;
-            bool is_overlay_frame = ((is_normal_animation || is_embarrass_animation) && (frame_idx > 0) && (header_data[1] == LV_IMAGE_CF_OVERLAY_PIXELS));
+            bool is_overlay_frame = ((is_normal_animation || is_embarrass_animation || is_fire_animation || 
+                                     is_happy_animation || is_inspiration_animation) && 
+                                    (frame_idx > 0) && (header_data[1] == LV_IMAGE_CF_OVERLAY_PIXELS));
             
             if (is_overlay_frame) {
                 uint32_t entry_count = width;
@@ -2401,6 +2613,39 @@ bool animation_load_all_from_sd_card(void)
                         anim->spiffs_imgs[frame_idx] = embarrass1_base_frame;
                         ESP_LOGI("animation", "Loaded %u sparse SD overlay pixels for embarrass%d (frame %d)", entry_count, frame_idx + 1, current_frame);
                     }
+                } else if (is_fire_animation) {
+                    overlay_set = animation_set_fire_overlay_frame(frame_idx, overlay_pixels, entry_count);
+                    if (!overlay_set) {
+                        ESP_LOGE("animation", "Failed to store SD fire overlay pixels for frame %d", current_frame);
+                    } else if (fire1_base_frame == nullptr) {
+                        ESP_LOGE("animation", "SD overlay frame %d encountered before base fire frame loaded", frame_idx);
+                        overlay_set = false;
+                    } else {
+                        anim->spiffs_imgs[frame_idx] = fire1_base_frame;
+                        ESP_LOGI("animation", "Loaded %u sparse SD overlay pixels for fire%d (frame %d)", entry_count, frame_idx + 1, current_frame);
+                    }
+                } else if (is_happy_animation) {
+                    overlay_set = animation_set_happy_overlay_frame(frame_idx, overlay_pixels, entry_count);
+                    if (!overlay_set) {
+                        ESP_LOGE("animation", "Failed to store SD happy overlay pixels for frame %d", current_frame);
+                    } else if (happy1_base_frame == nullptr) {
+                        ESP_LOGE("animation", "SD overlay frame %d encountered before base happy frame loaded", frame_idx);
+                        overlay_set = false;
+                    } else {
+                        anim->spiffs_imgs[frame_idx] = happy1_base_frame;
+                        ESP_LOGI("animation", "Loaded %u sparse SD overlay pixels for happy%d (frame %d)", entry_count, frame_idx + 1, current_frame);
+                    }
+                } else if (is_inspiration_animation) {
+                    overlay_set = animation_set_inspiration_overlay_frame(frame_idx, overlay_pixels, entry_count);
+                    if (!overlay_set) {
+                        ESP_LOGE("animation", "Failed to store SD inspiration overlay pixels for frame %d", current_frame);
+                    } else if (inspiration1_base_frame == nullptr) {
+                        ESP_LOGE("animation", "SD overlay frame %d encountered before base inspiration frame loaded", frame_idx);
+                        overlay_set = false;
+                    } else {
+                        anim->spiffs_imgs[frame_idx] = inspiration1_base_frame;
+                        ESP_LOGI("animation", "Loaded %u sparse SD overlay pixels for inspiration%d (frame %d)", entry_count, frame_idx + 1, current_frame);
+                    }
                 }
                 
                 if (!overlay_set) {
@@ -2466,6 +2711,24 @@ bool animation_load_all_from_sd_card(void)
             if (is_embarrass_animation && frame_idx == 0) {
                 embarrass1_base_frame = img_dsc;
                 ESP_LOGI("animation", "Loaded embarrass1 (base frame) for reuse by embarrass2 and embarrass3");
+            }
+            
+            // Store fire1's descriptor for reuse by fire2, fire3, and fire4
+            if (is_fire_animation && frame_idx == 0) {
+                fire1_base_frame = img_dsc;
+                ESP_LOGI("animation", "Loaded fire1 (base frame) for reuse by fire2, fire3, and fire4");
+            }
+            
+            // Store happy1's descriptor for reuse by happy2, happy3, and happy4
+            if (is_happy_animation && frame_idx == 0) {
+                happy1_base_frame = img_dsc;
+                ESP_LOGI("animation", "Loaded happy1 (base frame) for reuse by happy2, happy3, and happy4");
+            }
+            
+            // Store inspiration1's descriptor for reuse by inspiration2, inspiration3, and inspiration4
+            if (is_inspiration_animation && frame_idx == 0) {
+                inspiration1_base_frame = img_dsc;
+                ESP_LOGI("animation", "Loaded inspiration1 (base frame) for reuse by inspiration2, inspiration3, and inspiration4");
             }
             
             ESP_LOGD("animation", "Successfully loaded frame %d: %dx%d, %d bytes", current_frame, width, height, data_size);

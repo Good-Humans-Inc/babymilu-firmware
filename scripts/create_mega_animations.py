@@ -71,6 +71,36 @@ def get_default_embarrass_overlay_paths():
         3: frame_diff_dir / "embarrass_overlay3.h"
     }
 
+def get_default_fire_overlay_paths():
+    """Return default paths to fire overlay headers relative to repo root."""
+    script_dir = Path(__file__).resolve().parent
+    frame_diff_dir = script_dir.parent / "images" / "frame difference"
+    return {
+        2: frame_diff_dir / "fire_overlay2.h",
+        3: frame_diff_dir / "fire_overlay3.h",
+        4: frame_diff_dir / "fire_overlay4.h"
+    }
+
+def get_default_happy_overlay_paths():
+    """Return default paths to happy overlay headers relative to repo root."""
+    script_dir = Path(__file__).resolve().parent
+    frame_diff_dir = script_dir.parent / "images" / "frame difference"
+    return {
+        2: frame_diff_dir / "happy_overlay2.h",
+        3: frame_diff_dir / "happy_overlay3.h",
+        4: frame_diff_dir / "happy_overlay4.h"
+    }
+
+def get_default_inspiration_overlay_paths():
+    """Return default paths to inspiration overlay headers relative to repo root."""
+    script_dir = Path(__file__).resolve().parent
+    frame_diff_dir = script_dir.parent / "images" / "frame difference"
+    return {
+        2: frame_diff_dir / "inspiration_overlay2.h",
+        3: frame_diff_dir / "inspiration_overlay3.h",
+        4: frame_diff_dir / "inspiration_overlay4.h"
+    }
+
 def load_overlay_pixels(header_path):
     """Parse overlay pixel data from overlay_pixels.h"""
     path = Path(header_path)
@@ -116,6 +146,29 @@ def load_embarrass_overlays(overlay_paths):
         pixels = load_overlay_pixels(path)
         if pixels:
             overlays[frame_idx] = pixels
+    return overlays
+
+def load_animation_overlays(overlay_paths):
+    """Load animation overlay pixels from multiple header files (for fire, happy, inspiration).
+    
+    Args:
+        overlay_paths: Dict mapping frame index (2, 3, 4) to header file path
+        
+    Returns:
+        Dict mapping frame index to list of (x, y, color) tuples
+    """
+    overlays = {}
+    for frame_idx, path in overlay_paths.items():
+        pixels = load_overlay_pixels(path)
+        if pixels:
+            overlays[frame_idx] = pixels
+    
+    # Special case for happy: if overlay4 is missing/empty, reuse overlay3
+    # This happens when happy3 and happy4 are the same image
+    if 4 not in overlays and 3 in overlays:
+        overlays[4] = overlays[3]
+        print(f"Note: Reusing overlay3 for overlay4 (frames 3 and 4 are identical)")
+    
     return overlays
 
 class LVGLImage:
@@ -401,7 +454,8 @@ class AnimationSet:
         return sum(len(frame) for frame in self.frames)
 
 def create_mega_animations(input_dir, output_file, target_size=(256, 256), force_format=None,
-                           overlay_pixels=None, embarrass_overlays=None):
+                           overlay_pixels=None, embarrass_overlays=None, fire_overlays=None,
+                           happy_overlays=None, inspiration_overlays=None):
     """Create mega animation file with all animations"""
     
     print("=== Creating Mega Animation File ===")
@@ -426,14 +480,61 @@ def create_mega_animations(input_dir, output_file, target_size=(256, 256), force
     embarrass_overlay_config = None
     embarrass_min_files = 3
     if embarrass_overlays:
+        # Convert frame numbers (2, 3) to frame indices (1, 2)
+        embarrass_overlays_indices = {idx - 1: pixels for idx, pixels in embarrass_overlays.items() if idx in [2, 3]}
         embarrass_overlay_config = {
             "type": "overlay_pixels",
-            "pixels": embarrass_overlays,  # Dict format: {2: pixels, 3: pixels}
+            "pixels": embarrass_overlays_indices,  # Dict format: {1: pixels, 2: pixels}
             "base_frame_index": 0,
             "target_frames": [1, 2],  # Frame indices 1 and 2 (embarrass2 and embarrass3)
         }
         embarrass_min_files = 1
         print("Embarrass animation will reuse base frame with overlay pixels for frames 2 and 3")
+    
+    # Configure fire animation overlay usage if overlays are provided
+    fire_overlay_config = None
+    fire_min_files = 4
+    if fire_overlays:
+        # Convert frame indices 2,3,4 to animation frame indices 1,2,3
+        fire_overlays_indices = {idx - 1: pixels for idx, pixels in fire_overlays.items() if idx in [2, 3, 4]}
+        fire_overlay_config = {
+            "type": "overlay_pixels",
+            "pixels": fire_overlays_indices,  # Dict format: {1: pixels, 2: pixels, 3: pixels}
+            "base_frame_index": 0,
+            "target_frames": [1, 2, 3],  # Frame indices 1, 2, 3 (fire2, fire3, fire4)
+        }
+        fire_min_files = 1
+        print("Fire animation will reuse base frame with overlay pixels for frames 2, 3, and 4")
+    
+    # Configure happy animation overlay usage if overlays are provided
+    happy_overlay_config = None
+    happy_min_files = 4
+    if happy_overlays:
+        # Convert frame indices 2,3,4 to animation frame indices 1,2,3
+        happy_overlays_indices = {idx - 1: pixels for idx, pixels in happy_overlays.items() if idx in [2, 3, 4]}
+        happy_overlay_config = {
+            "type": "overlay_pixels",
+            "pixels": happy_overlays_indices,  # Dict format: {1: pixels, 2: pixels, 3: pixels}
+            "base_frame_index": 0,
+            "target_frames": [1, 2, 3],  # Frame indices 1, 2, 3 (happy2, happy3, happy4)
+        }
+        happy_min_files = 1
+        print("Happy animation will reuse base frame with overlay pixels for frames 2, 3, and 4")
+    
+    # Configure inspiration animation overlay usage if overlays are provided
+    inspiration_overlay_config = None
+    inspiration_min_files = 4
+    if inspiration_overlays:
+        # Convert frame indices 2,3,4 to animation frame indices 1,2,3
+        inspiration_overlays_indices = {idx - 1: pixels for idx, pixels in inspiration_overlays.items() if idx in [2, 3, 4]}
+        inspiration_overlay_config = {
+            "type": "overlay_pixels",
+            "pixels": inspiration_overlays_indices,  # Dict format: {1: pixels, 2: pixels, 3: pixels}
+            "base_frame_index": 0,
+            "target_frames": [1, 2, 3],  # Frame indices 1, 2, 3 (inspiration2, inspiration3, inspiration4)
+        }
+        inspiration_min_files = 1
+        print("Inspiration animation will reuse base frame with overlay pixels for frames 2, 3, and 4")
     
     # Define all animation sets
     animation_sets = [
@@ -452,9 +553,9 @@ def create_mega_animations(input_dir, output_file, target_size=(256, 256), force
             min_individual_files=embarrass_min_files,
             overlay_config=embarrass_overlay_config,
         ),
-        AnimationSet("Fire", 4, individual_pattern="fire*.jpg"),
-        AnimationSet("Happy", 4, individual_pattern="happy*.jpg"),
-        AnimationSet("Inspiration", 4, individual_pattern="inspiration*.jpg"),
+        AnimationSet("Fire", 4, individual_pattern="fire*.jpg", min_individual_files=fire_min_files, overlay_config=fire_overlay_config),
+        AnimationSet("Happy", 4, individual_pattern="happy*.jpg", min_individual_files=happy_min_files, overlay_config=happy_overlay_config),
+        AnimationSet("Inspiration", 4, individual_pattern="inspiration*.jpg", min_individual_files=inspiration_min_files, overlay_config=inspiration_overlay_config),
         AnimationSet("Question", 4, individual_pattern="question*.jpg"),
         AnimationSet("Shy", 2, individual_pattern="shy*.jpg"),
         AnimationSet("Sleep", 4, individual_pattern="sleep*.jpg"),
@@ -593,16 +694,31 @@ def main():
         if overlay2_path.lower() != "none":
             pixels2 = load_overlay_pixels(overlay2_path)
             if pixels2:
-                embarrass_overlays[1] = pixels2  # Frame index 1 (embarrass2)
+                embarrass_overlays[2] = pixels2  # Frame number 2 (embarrass2)
         if overlay3_path.lower() != "none":
             pixels3 = load_overlay_pixels(overlay3_path)
             if pixels3:
-                embarrass_overlays[2] = pixels3  # Frame index 2 (embarrass3)
+                embarrass_overlays[3] = pixels3  # Frame number 3 (embarrass3)
         
         if not embarrass_overlays:
             embarrass_overlays = None
     else:
         print("Embarrass overlay-based frame generation disabled by user request")
+    
+    # Load fire overlays (default paths)
+    fire_overlays = load_animation_overlays(get_default_fire_overlay_paths())
+    if not fire_overlays:
+        fire_overlays = None
+    
+    # Load happy overlays (default paths)
+    happy_overlays = load_animation_overlays(get_default_happy_overlay_paths())
+    if not happy_overlays:
+        happy_overlays = None
+    
+    # Load inspiration overlays (default paths)
+    inspiration_overlays = load_animation_overlays(get_default_inspiration_overlay_paths())
+    if not inspiration_overlays:
+        inspiration_overlays = None
     
     # Create mega animations
     success = create_mega_animations(
@@ -611,7 +727,10 @@ def main():
         target_size=tuple(args.size),
         force_format=force_format,
         overlay_pixels=overlay_pixels,
-        embarrass_overlays=embarrass_overlays
+        embarrass_overlays=embarrass_overlays,
+        fire_overlays=fire_overlays,
+        happy_overlays=happy_overlays,
+        inspiration_overlays=inspiration_overlays
     )
     
     if success:

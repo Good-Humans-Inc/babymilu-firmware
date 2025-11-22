@@ -81,3 +81,6 @@ typedef struct {
 
 const animation_overlay_frame_t* animation_get_normal_overlay_frame(int frame_index);
 const animation_overlay_frame_t* animation_get_embarrass_overlay_frame(int frame_index);
+const animation_overlay_frame_t* animation_get_fire_overlay_frame(int frame_index);
+const animation_overlay_frame_t* animation_get_happy_overlay_frame(int frame_index);
+const animation_overlay_frame_t* animation_get_inspiration_overlay_frame(int frame_index);

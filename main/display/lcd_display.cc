@@ -1067,15 +1067,16 @@ static lv_image_dsc_t* composed_img_dsc = nullptr;
 static uint8_t* composed_img_data = nullptr;
 
 // Helper function to create composed image with sparse overlay pixels
-// Only applies to normal2/normal3 (frame_index 1 and 2) and embarrass2/embarrass3 (frame_index 1 and 2)
+// Only applies to normal2/normal3 (frame_index 1 and 2), embarrass2/embarrass3 (frame_index 1 and 2),
+// fire2-4/happy2-4/inspiration2-4 (frame_index 1, 2, and 3)
 static lv_image_dsc_t* compose_image_with_overlay(const lv_image_dsc_t* base_img, int frame_index) {
     if (base_img == nullptr || base_img->data == nullptr) {
         ESP_LOGE(TAG, "Invalid base image for composition");
         return nullptr;
     }
     
-    // Only compose for frame_index 1 and 2 (normal2/normal3 or embarrass2/embarrass3)
-    if (frame_index != 1 && frame_index != 2) {
+    // Only compose for frame_index 1, 2, or 3 (depending on animation type)
+    if (frame_index < 1 || frame_index > 3) {
         return nullptr; // No composition needed
     }
     
@@ -1083,10 +1084,19 @@ static lv_image_dsc_t* compose_image_with_overlay(const lv_image_dsc_t* base_img
     int current_animation = animation_get_now_animation();
     bool is_normal_animation = (current_animation == ANIMATION_NORMAL || current_animation == ANIMATION_STATIC_NORMAL);
     bool is_embarrass_animation = (current_animation == ANIMATION_EMBARRESSED);
+    bool is_fire_animation = (current_animation == ANIMATION_FIRE);
+    bool is_happy_animation = (current_animation == ANIMATION_HAPPY);
+    bool is_inspiration_animation = (current_animation == ANIMATION_INSPIRATION);
     
-    // Only apply overlays for normal and embarrass animations
-    if (!is_normal_animation && !is_embarrass_animation) {
+    // Only apply overlays for supported animations
+    if (!is_normal_animation && !is_embarrass_animation && !is_fire_animation && 
+        !is_happy_animation && !is_inspiration_animation) {
         return nullptr; // No overlay for this animation type
+    }
+    
+    // Normal and embarrass only support frame_index 1 and 2
+    if ((is_normal_animation || is_embarrass_animation) && frame_index > 2) {
+        return nullptr; // No overlay for this frame
     }
     
     lv_coord_t img_width = base_img->header.w;
@@ -1134,6 +1144,12 @@ static lv_image_dsc_t* compose_image_with_overlay(const lv_image_dsc_t* base_img
         runtime_overlay = animation_get_normal_overlay_frame(frame_index);
     } else if (is_embarrass_animation) {
         runtime_overlay = animation_get_embarrass_overlay_frame(frame_index);
+    } else if (is_fire_animation) {
+        runtime_overlay = animation_get_fire_overlay_frame(frame_index);
+    } else if (is_happy_animation) {
+        runtime_overlay = animation_get_happy_overlay_frame(frame_index);
+    } else if (is_inspiration_animation) {
+        runtime_overlay = animation_get_inspiration_overlay_frame(frame_index);
     }
     
     const animation_overlay_pixel_t* overlay_list = nullptr;
