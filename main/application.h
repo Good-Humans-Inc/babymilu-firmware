@@ -108,6 +108,8 @@ private:
     bool voice_detected_ = false;
     bool busy_decoding_audio_ = false;
     int clock_ticks_ = 0;
+    int talk_animation_index_ = 0;  // Track which talk animation (0-3 for talk1-talk4)
+    int talk_packet_count_ = 0;  // Counter for throttling talk animation updates
     TaskHandle_t check_new_version_task_handle_ = nullptr;
 
     // Audio encode / decode

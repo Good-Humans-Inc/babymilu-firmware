@@ -12,7 +12,7 @@
 #include "mcp_server.h"
 #include "settings.h"
 #include "audio_debugger.h"
-#include "animation/animation_updater.h"
+// #include "animation/animation_updater.h"
 #include "ssid_manager.h"
 
 #if CONFIG_USE_AUDIO_PROCESSOR
@@ -680,8 +680,8 @@ void Application::Start()
     display->UpdateStatusBar(true);
 
     // Initialize and start the animation updater
-    AnimationUpdater::GetInstance().Initialize();
-    AnimationUpdater::GetInstance().Start();
+    // AnimationUpdater::GetInstance().Initialize();
+    // AnimationUpdater::GetInstance().Start();
 
     // Check for new firmware version or get the MQTT broker address
     CheckNewVersion();
@@ -1183,6 +1183,24 @@ void Application::OnAudioOutput()
             pcm = std::move(resampled);
         }
         codec->OutputData(pcm);
+        
+        // Cycle through talk animations when speaking
+        if (device_state_ == kDeviceStateSpeaking) {
+            // Update talk animation every few packets (approximately every 300ms)
+            // Each packet is 60ms, so update every 5 packets
+            talk_packet_count_++;
+            if (talk_packet_count_ >= 5) {
+                talk_packet_count_ = 0;
+                talk_animation_index_ = (talk_animation_index_ + 1) % 4;
+                char talk_emotion[16];
+                snprintf(talk_emotion, sizeof(talk_emotion), "talk%d", talk_animation_index_ + 1);
+                Schedule([this, emotion = std::string(talk_emotion)]() {
+                    auto display = Board::GetInstance().GetDisplay();
+                    display->SetEmotion(emotion.c_str());
+                });
+            }
+        }
+        
 #ifdef CONFIG_USE_SERVER_AEC
         std::lock_guard<std::mutex> lock(timestamp_mutex_);
         timestamp_queue_.push_back(packet.timestamp);
@@ -1413,6 +1431,10 @@ void Application::SetDeviceState(DeviceState state)
         break;
     case kDeviceStateSpeaking:
         display->SetStatus(Lang::Strings::SPEAKING);
+        // Reset talk animation index and packet counter when entering speaking state
+        talk_animation_index_ = 0;
+        talk_packet_count_ = 0;
+        display->SetEmotion("talk1");
 
         if (listening_mode_ != kListeningModeRealtime)
         {
