@@ -81,13 +81,22 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
         }
     }
 
+    // Use default endpoint if not configured
+    const std::string default_endpoint = "35.188.112.96:1883";
     if (endpoint.empty()) {
-        ESP_LOGW(TAG, "MQTT endpoint is not specified");
-        if (report_error) {
-            SetError(Lang::Strings::SERVER_NOT_FOUND);
-        }
-        return false;
+        ESP_LOGW(TAG, "MQTT endpoint is not specified, using default: %s", default_endpoint.c_str());
+        endpoint = default_endpoint;
     }
+
+    // Verbose diagnostics for MQTT configuration
+    ESP_LOGI(TAG,
+             "MQTT config: endpoint=%s, client_id=%s, username=%s, keepalive=%d, up_topic=%s, down_topic=%s",
+             endpoint.c_str(),
+             client_id.empty() ? "<empty>" : client_id.c_str(),
+             username.empty() ? "<empty>" : "<set>",
+             keepalive_interval,
+             publish_topic_.empty() ? "<empty>" : publish_topic_.c_str(),
+             subscribe_topic_.empty() ? "<empty>" : subscribe_topic_.c_str());
 
     mqtt_ = Board::GetInstance().CreateMqtt();
     mqtt_->SetKeepAlive(keepalive_interval);
@@ -96,8 +105,48 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
         ESP_LOGI(TAG, "Disconnected from endpoint");
     });
 
+    mqtt_->OnConnected([this, client_id]() {
+        ESP_LOGI(TAG, "MQTT client fully connected (CONNACK received)");
+        // Subscribe in the OnConnected callback to ensure we're fully connected
+        if (!subscribe_topic_.empty()) {
+            ESP_LOGI(TAG, "Subscribing to topic (from OnConnected): %s", subscribe_topic_.c_str());
+            bool is_connected = mqtt_->IsConnected();
+            ESP_LOGI(TAG, "Connection status before subscribe: %s", is_connected ? "connected" : "not connected");
+            
+            if (!mqtt_->Subscribe(subscribe_topic_)) {
+                ESP_LOGE(TAG, "Failed to subscribe to topic (from OnConnected): %s", subscribe_topic_.c_str());
+                bool still_connected = mqtt_->IsConnected();
+                ESP_LOGE(TAG, "Connection status after failed subscribe: %s", still_connected ? "connected" : "disconnected");
+                
+                // Diagnostic: Try to publish to see if it's ACL-specific to SUBSCRIBE
+                if (!publish_topic_.empty()) {
+                    ESP_LOGI(TAG, "Testing publish capability to diagnose ACL issue...");
+                    std::string test_msg = "{\"type\":\"test\",\"diagnostic\":\"subscribe_failed\"}";
+                    if (mqtt_->Publish(publish_topic_, test_msg)) {
+                        ESP_LOGI(TAG, "Publish succeeded - connection is working, likely ACL denies SUBSCRIBE");
+                        ESP_LOGE(TAG, "DIAGNOSIS: Broker ACL likely denies SUBSCRIBE for client_id=%s to topic=%s", 
+                                 client_id.empty() ? "<empty>" : client_id.c_str(), subscribe_topic_.c_str());
+                    } else {
+                        ESP_LOGE(TAG, "Publish also failed - connection may be broken or ACL denies both PUBLISH and SUBSCRIBE");
+                    }
+                } else {
+                    ESP_LOGE(TAG, "DIAGNOSIS: Subscribe failed, but cannot test publish (publish_topic empty). Likely ACL denies SUBSCRIBE for client_id=%s to topic=%s",
+                             client_id.empty() ? "<empty>" : client_id.c_str(), subscribe_topic_.c_str());
+                }
+            } else {
+                ESP_LOGI(TAG, "Successfully subscribed to topic (from OnConnected): %s", subscribe_topic_.c_str());
+            }
+        }
+    });
+
     mqtt_->OnMessage([this](const std::string& topic, const std::string& payload) {
-        ESP_LOGI(TAG, "Received message on topic: %s, payload: %s", topic.c_str(), payload.c_str());
+        // Log every inbound MQTT message (topic, size, and a short prefix of the payload)
+        const int kPreviewLen = 120;
+        ESP_LOGI(TAG, "MQTT RX topic=%s len=%u prefix=%.*s",
+                 topic.c_str(),
+                 (unsigned)payload.size(),
+                 (int)std::min((int)payload.size(), kPreviewLen),
+                 payload.c_str());
         cJSON* root = cJSON_Parse(payload.c_str());
         if (root == nullptr) {
             ESP_LOGE(TAG, "Failed to parse json message %s", payload.c_str());
@@ -173,22 +222,32 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
     } else {
         broker_address = endpoint;
     }
+    ESP_LOGI(TAG, "Broker parsed: %s:%d", broker_address.c_str(), broker_port);
     if (!mqtt_->Connect(broker_address, broker_port, client_id, username, password)) {
-        ESP_LOGE(TAG, "Failed to connect to endpoint");
+        ESP_LOGE(TAG, "Failed to connect to endpoint %s:%d", broker_address.c_str(), broker_port);
         SetError(Lang::Strings::SERVER_NOT_CONNECTED);
         return false;
     }
 
-    ESP_LOGI(TAG, "Connected to endpoint");
+    ESP_LOGI(TAG, "Connected to endpoint %s:%d", broker_address.c_str(), broker_port);
     
-    // Subscribe to receive messages from server
+    // Check connection status
+    bool is_connected = mqtt_->IsConnected();
+    ESP_LOGI(TAG, "MQTT connection status after Connect(): %s", is_connected ? "connected" : "not connected");
+    
+    // Try immediate subscription (may fail if CONNACK not received yet)
+    // OnConnected callback will also try to subscribe as a fallback
     if (!subscribe_topic_.empty()) {
-        ESP_LOGI(TAG, "Subscribing to topic: %s", subscribe_topic_.c_str());
+        ESP_LOGI(TAG, "Attempting initial subscription to topic: %s", subscribe_topic_.c_str());
+        if (!is_connected) {
+            ESP_LOGW(TAG, "MQTT not fully connected yet, subscribe may fail - will retry in OnConnected callback");
+        }
         if (!mqtt_->Subscribe(subscribe_topic_)) {
-            ESP_LOGE(TAG, "Failed to subscribe to topic: %s", subscribe_topic_.c_str());
-            // Don't fail completely, but log the error
+            ESP_LOGW(TAG, "Initial subscribe failed (may retry in OnConnected): %s", subscribe_topic_.c_str());
+            ESP_LOGW(TAG, "Current connection status: %s", mqtt_->IsConnected() ? "connected" : "not connected");
+            // Don't fail completely - OnConnected callback will retry and provide better diagnostics
         } else {
-            ESP_LOGI(TAG, "Successfully subscribed to topic: %s", subscribe_topic_.c_str());
+            ESP_LOGI(TAG, "Successfully subscribed to topic (initial): %s", subscribe_topic_.c_str());
         }
     } else {
         ESP_LOGW(TAG, "Subscribe topic is empty, cannot subscribe to receive messages");
