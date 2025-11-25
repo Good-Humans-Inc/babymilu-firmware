@@ -139,9 +139,13 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
         ESP_LOGI(TAG, "BLE GAP EVENT DISCONNECTED");
         ble_server_state.connected = false;
         ble_server_state.conn_handle = 0;
+        ble_server_state.advertising = false;  // Reset advertising state
         if (ble_server_state.connection_callback) {
             ble_server_state.connection_callback(false);
         }
+        // Restart advertising after disconnect so device can be found again
+        ESP_LOGI(TAG, "Restarting advertising after disconnect");
+        ble_app_advertise();
         break;
         
     case BLE_GAP_EVENT_ADV_COMPLETE:
@@ -161,7 +165,16 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
 static void ble_app_advertise(void)
 {
     if (!ble_server_state.initialized) {
+        ESP_LOGW(TAG, "Cannot advertise: BLE server not initialized");
         return;
+    }
+
+    // Stop any existing advertising first
+    if (ble_server_state.advertising) {
+        ESP_LOGI(TAG, "Stopping existing advertising before restart");
+        ble_gap_adv_stop();
+        ble_server_state.advertising = false;
+        vTaskDelay(pdMS_TO_TICKS(100));  // Small delay to ensure stop completes
     }
 
     // GAP - device name definition
@@ -172,17 +185,28 @@ static void ble_app_advertise(void)
     fields.name = (uint8_t *)device_name;
     fields.name_len = strlen(device_name);
     fields.name_is_complete = 1;
-    ble_gap_adv_set_fields(&fields);
+    
+    int rc = ble_gap_adv_set_fields(&fields);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "Failed to set advertising fields: %d", rc);
+        return;
+    }
 
     // GAP - device connectivity definition
     struct ble_gap_adv_params adv_params;
     memset(&adv_params, 0, sizeof(adv_params));
     adv_params.conn_mode = BLE_GAP_CONN_MODE_UND;
     adv_params.disc_mode = BLE_GAP_DISC_MODE_GEN;
-    ble_gap_adv_start(ble_server_state.addr_type, NULL, BLE_HS_FOREVER, 
-                     &adv_params, ble_gap_event, NULL);
+    
+    rc = ble_gap_adv_start(ble_server_state.addr_type, NULL, BLE_HS_FOREVER, 
+                          &adv_params, ble_gap_event, NULL);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "Failed to start advertising: %d", rc);
+        return;
+    }
     
     ble_server_state.advertising = true;
+    ESP_LOGI(TAG, "BLE advertising started successfully, device name: %s", device_name);
 }
 
 // The application

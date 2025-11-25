@@ -1693,8 +1693,9 @@ void Application::OpenWebSocketConnection() {
     
     ESP_LOGI(TAG, "WebSocket connection opened successfully");
     
-    // For remote wakeup (ws_start): If device is idle, automatically enter listening state
-    // This ensures the red light turns on and audio streaming starts
+    // For remote wakeup (ws_start): Automatically enter listening state if device is in a valid state
+    // This ensures the red light turns on and audio streaming starts, just like a button press
+    // Works even in alarm mode (when alerts are shown) since alerts don't change device state
     if (device_state_ == kDeviceStateIdle) {
         ESP_LOGI(TAG, "Remote wakeup: WebSocket opened via ws_start, automatically entering listening state");
         // Set listening mode to manual for remote wakeup (button will control stop)
@@ -1703,6 +1704,14 @@ void Application::OpenWebSocketConnection() {
         // - Turn on red light (via led->OnStateChanged())
         // - Send listen start message
         // - Start audio capture
+    }
+    else if (device_state_ == kDeviceStateSpeaking) {
+        // If speaking, abort speaking and enter listening mode (same as button press behavior)
+        ESP_LOGI(TAG, "Remote wakeup: Device is speaking, aborting and entering listening state");
+        Schedule([this]() {
+            AbortSpeaking(kAbortReasonNone);
+            SetListeningMode(kListeningModeManualStop);
+        });
     }
     // If we're already in listening state (e.g., user pressed button before ws_start),
     // send the listen start message now that the connection is ready
@@ -1720,5 +1729,11 @@ void Application::OpenWebSocketConnection() {
             audio_processor_->Start();
             wake_word_->StopDetection();
         }
+    }
+    else if (device_state_ == kDeviceStateConnecting) {
+        // If we're in connecting state (e.g., connection just opened), enter listening mode
+        // This handles the case where ws_start arrives while device is connecting
+        ESP_LOGI(TAG, "Remote wakeup: Device is connecting, entering listening state");
+        SetListeningMode(kListeningModeManualStop);
     }
 }
