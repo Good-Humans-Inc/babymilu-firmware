@@ -13,7 +13,9 @@
 #include "settings.h"
 #include "audio_debugger.h"
 #include "animation/animation_updater.h"
+#include "animation/animation.h"
 #include "ssid_manager.h"
+#include "wifi_station.h"
 
 #if CONFIG_USE_AUDIO_PROCESSOR
 #include "afe_audio_processor.h"
@@ -678,6 +680,22 @@ void Application::Start()
 
     // Update the status bar immediately to show the network state
     display->UpdateStatusBar(true);
+
+    // Check WiFi connection status and show message if not connected
+    if (board.GetBoardType() != "ml307") {
+        auto& wifi_station = WifiStation::GetInstance();
+        if (!wifi_station.IsConnected()) {
+            // Show message to guide user to connect WiFi
+            display->SetChatMessage("system", "Connect me to wifi with BabyMilu App. Can't wait to meet you again.");
+        } else {
+            // WiFi is connected, check if animation is available
+            Animation_t* current_anim = animation_get_normal_animation();
+            if (current_anim == NULL || current_anim->len == 0) {
+                // No animation available, show connected message
+                display->SetChatMessage("system", "Connected! I am traveling over :D");
+            }
+        }
+    }
 
     // Initialize and start the animation updater
     AnimationUpdater::GetInstance().Initialize();

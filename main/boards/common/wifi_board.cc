@@ -18,6 +18,7 @@
 #include <wifi_station.h>
 #include <wifi_configuration_ap.h>
 #include <ssid_manager.h>
+#include "animation/animation.h"
 
 static const char *TAG = "WifiBoard";
 
@@ -173,6 +174,13 @@ void WifiBoard::StartNetwork() {
             ble_server_stop_advertising();
             ble_server_deinit();
             ble_initialized_ = false;
+        }
+        
+        // Check if animation is available, if not show connected message
+        Animation_t* current_anim = animation_get_normal_animation();
+        if (current_anim == NULL || current_anim->len == 0) {
+            // No animation available, show connected message
+            display->SetChatMessage("system", "Connected! I am traveling over :D");
         }
     });
     
