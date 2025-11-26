@@ -450,15 +450,22 @@ void LcdDisplay::SetupUI()
 #endif
 void LcdDisplay::SetChatMessage(const char *role, const char *content)
 {
+    ESP_LOGI("LcdDisplay", "SetChatMessage called: role='%s', content='%s'", role ? role : "NULL", content ? content : "NULL");
     DisplayLockGuard lock(this);
     if (content_ == nullptr)
     {
+        ESP_LOGW("LcdDisplay", "SetChatMessage: content_ is nullptr, cannot display message");
         return;
     }
 
     // 避免出现空的消息框
     if (strlen(content) == 0)
+    {
+        ESP_LOGW("LcdDisplay", "SetChatMessage: content is empty, skipping");
         return;
+    }
+    
+    ESP_LOGI("LcdDisplay", "SetChatMessage: content_ is valid, proceeding to create message bubble");
 
     // 检查消息数量是否超过限制
     uint32_t child_count = lv_obj_get_child_cnt(content_);
@@ -988,6 +995,122 @@ void LcdDisplay::SetPreviewImage(const lv_img_dsc_t *img_dsc)
     }
 }
 #endif
+
+// Public method to create system messages directly in content_ (works even when CONFIG_USE_WECHAT_MESSAGE_STYLE is disabled)
+void LcdDisplay::CreateSystemMessage(const char* message)
+{
+    ESP_LOGI("LcdDisplay", "CreateSystemMessage called: message='%s'", message ? message : "NULL");
+    DisplayLockGuard lock(this);
+    if (content_ == nullptr)
+    {
+        ESP_LOGW("LcdDisplay", "CreateSystemMessage: content_ is nullptr, cannot create message");
+        return;
+    }
+
+    if (message == nullptr || strlen(message) == 0)
+    {
+        ESP_LOGW("LcdDisplay", "CreateSystemMessage: message is empty, skipping");
+        return;
+    }
+    
+    ESP_LOGI("LcdDisplay", "CreateSystemMessage: content_ is valid, creating message bubble");
+    
+    // Remove any existing system messages created by CreateSystemMessage
+    // Use a special marker to identify containers created by CreateSystemMessage
+    static const char* SYSTEM_MSG_MARKER = "CreateSystemMessage";
+    uint32_t child_count = lv_obj_get_child_cnt(content_);
+    for (int32_t i = child_count - 1; i >= 0; i--)
+    {
+        lv_obj_t *child = lv_obj_get_child(content_, i);
+        if (child == nullptr) continue;
+        
+        // Check if this container is marked as a CreateSystemMessage container
+        void *user_data = lv_obj_get_user_data(child);
+        if (user_data != nullptr && strcmp((const char*)user_data, SYSTEM_MSG_MARKER) == 0)
+        {
+            // This is a system message container created by CreateSystemMessage, delete it
+            ESP_LOGI("LcdDisplay", "CreateSystemMessage: Removing existing system message");
+            lv_obj_del(child);
+        }
+    }
+    
+    // Create a full-width container for centering
+    lv_obj_t *container = lv_obj_create(content_);
+    lv_obj_set_width(container, LV_HOR_RES);
+    lv_obj_set_height(container, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(container, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(container, 0, 0);
+    lv_obj_set_style_pad_all(container, 0, 0);
+    // Mark this container as created by CreateSystemMessage
+    lv_obj_set_user_data(container, (void*)SYSTEM_MSG_MARKER);
+
+    // Create message bubble
+    lv_obj_t *msg_bubble = lv_obj_create(container);
+    lv_obj_set_style_radius(msg_bubble, 8, 0);
+    lv_obj_set_scrollbar_mode(msg_bubble, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_set_style_border_width(msg_bubble, 1, 0);
+    lv_obj_set_style_border_color(msg_bubble, current_theme_.border, 0);
+    lv_obj_set_style_pad_all(msg_bubble, 8, 0);
+    lv_obj_set_style_bg_color(msg_bubble, current_theme_.system_bubble, 0);
+    lv_obj_set_width(msg_bubble, LV_SIZE_CONTENT);
+    lv_obj_set_height(msg_bubble, LV_SIZE_CONTENT);
+    lv_obj_set_style_flex_grow(msg_bubble, 0, 0);
+
+    // Create message text
+    lv_obj_t *msg_text = lv_label_create(msg_bubble);
+    lv_label_set_text(msg_text, message);
+    lv_label_set_long_mode(msg_text, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_font(msg_text, fonts_.text_font, 0);
+    lv_obj_set_style_text_color(msg_text, current_theme_.system_text, 0);
+    
+    // Calculate and set appropriate width
+    lv_coord_t text_width = lv_txt_get_width(message, strlen(message), fonts_.text_font, 0);
+    lv_coord_t max_width = LV_HOR_RES * 85 / 100 - 16;
+    lv_coord_t bubble_width = (text_width < max_width) ? text_width : max_width;
+    if (bubble_width < 20) bubble_width = 20;
+    lv_obj_set_width(msg_text, bubble_width);
+    lv_obj_set_width(msg_bubble, bubble_width);
+
+    // Center align the bubble in container
+    lv_obj_align(msg_bubble, LV_ALIGN_CENTER, 0, 0);
+    
+    // Auto-scroll to show the message
+    lv_obj_scroll_to_view_recursive(container, LV_ANIM_ON);
+    
+    ESP_LOGI("LcdDisplay", "CreateSystemMessage: Message created successfully");
+}
+
+void LcdDisplay::ClearSystemMessages()
+{
+    ESP_LOGI("LcdDisplay", "ClearSystemMessages called");
+    DisplayLockGuard lock(this);
+    if (content_ == nullptr)
+    {
+        ESP_LOGW("LcdDisplay", "ClearSystemMessages: content_ is nullptr, cannot clear messages");
+        return;
+    }
+    
+    // Remove all system messages created by CreateSystemMessage
+    // Use a special marker to identify containers created by CreateSystemMessage
+    static const char* SYSTEM_MSG_MARKER = "CreateSystemMessage";
+    uint32_t child_count = lv_obj_get_child_cnt(content_);
+    int removed_count = 0;
+    for (int32_t i = child_count - 1; i >= 0; i--)
+    {
+        lv_obj_t *child = lv_obj_get_child(content_, i);
+        if (child == nullptr) continue;
+        
+        // Check if this container is marked as a CreateSystemMessage container
+        void *user_data = lv_obj_get_user_data(child);
+        if (user_data != nullptr && strcmp((const char*)user_data, SYSTEM_MSG_MARKER) == 0)
+        {
+            // This is a system message container created by CreateSystemMessage, delete it
+            lv_obj_del(child);
+            removed_count++;
+        }
+    }
+    ESP_LOGI("LcdDisplay", "ClearSystemMessages: Removed %d system message(s)", removed_count);
+}
 
 void LcdDisplay::SetEmotion(const char *emotion)
 {

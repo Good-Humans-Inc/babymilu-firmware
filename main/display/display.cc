@@ -82,16 +82,24 @@ void Display::ShowNotification(const std::string &notification, int duration_ms)
 }
 
 void Display::ShowNotification(const char* notification, int duration_ms) {
+    ESP_LOGI("Display", "ShowNotification called: notification='%s', duration_ms=%d", notification ? notification : "NULL", duration_ms);
     DisplayLockGuard lock(this);
     if (notification_label_ == nullptr) {
+        ESP_LOGW("Display", "ShowNotification: notification_label_ is nullptr, cannot display notification");
         return;
     }
+    ESP_LOGI("Display", "ShowNotification: notification_label_ is valid, setting text");
     lv_label_set_text(notification_label_, notification);
     lv_obj_clear_flag(notification_label_, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(status_label_, LV_OBJ_FLAG_HIDDEN);
+    ESP_LOGI("Display", "ShowNotification: notification displayed, duration_ms=%d", duration_ms);
 
     esp_timer_stop(notification_timer_);
-    ESP_ERROR_CHECK(esp_timer_start_once(notification_timer_, duration_ms * 1000));
+    if (duration_ms > 0) {
+        ESP_ERROR_CHECK(esp_timer_start_once(notification_timer_, duration_ms * 1000));
+    } else {
+        ESP_LOGI("Display", "ShowNotification: duration_ms=0, notification will stay permanent");
+    }
 }
 
 void Display::UpdateStatusBar(bool update_all) {
@@ -242,11 +250,15 @@ void Display::SetPreviewImage(const lv_img_dsc_t* image) {
 }
 
 void Display::SetChatMessage(const char* role, const char* content) {
+    ESP_LOGI("Display", "SetChatMessage called: role='%s', content='%s'", role ? role : "NULL", content ? content : "NULL");
     DisplayLockGuard lock(this);
     if (chat_message_label_ == nullptr) {
+        ESP_LOGW("Display", "SetChatMessage: chat_message_label_ is nullptr, cannot display message");
         return;
     }
+    ESP_LOGI("Display", "SetChatMessage: chat_message_label_ is valid, setting text");
     lv_label_set_text(chat_message_label_, content);
+    ESP_LOGI("Display", "SetChatMessage: text set successfully");
 }
 
 void Display::SetTheme(const std::string& theme_name) {

@@ -16,6 +16,7 @@
 #include "animation/animation.h"
 #include "ssid_manager.h"
 #include "wifi_station.h"
+#include "display/lcd_display.h"
 
 #if CONFIG_USE_AUDIO_PROCESSOR
 #include "afe_audio_processor.h"
@@ -682,19 +683,75 @@ void Application::Start()
     display->UpdateStatusBar(true);
 
     // Check WiFi connection status and show message if not connected
+    // Note: If no WiFi credentials exist, StartNetwork() will block in WiFi config mode,
+    // so this code only runs if WiFi credentials exist but connection failed or is in progress
     if (board.GetBoardType() != "ml307") {
+        ESP_LOGI(TAG, "Checking WiFi connection status...");
         auto& wifi_station = WifiStation::GetInstance();
-        if (!wifi_station.IsConnected()) {
-            // Show message to guide user to connect WiFi
-            display->SetChatMessage("system", "Connect me to wifi with BabyMilu App. Can't wait to meet you again.");
+        bool is_connected = wifi_station.IsConnected();
+        ESP_LOGI(TAG, "WiFi connection status: %s", is_connected ? "CONNECTED" : "NOT CONNECTED");
+        ESP_LOGI(TAG, "Device state: %d (kDeviceStateWifiConfiguring=%d)", device_state_, kDeviceStateWifiConfiguring);
+        
+        if (!is_connected) {
+            // Show message to guide user to connect WiFi (only if not already in config mode)
+            // If in config mode, the message is already shown in wifi_board.cc
+            if (device_state_ != kDeviceStateWifiConfiguring) {
+                ESP_LOGI(TAG, "Not in WiFi config mode, attempting to show WiFi connection message");
+                const char* wifi_message = "Connect me to wifi with BabyMilu App. Can't wait to meet you again.";
+                
+                // Try to use LcdDisplay::CreateSystemMessage if available
+                LcdDisplay* lcd_display = static_cast<LcdDisplay*>(display);
+                if (lcd_display != nullptr) {
+                    ESP_LOGI(TAG, "Display is LcdDisplay, using CreateSystemMessage");
+                    lcd_display->CreateSystemMessage(wifi_message);
+                }
+                
+                // Also try standard methods as fallback
+                display->SetChatMessage("system", wifi_message);
+                ESP_LOGI(TAG, "Called SetChatMessage with WiFi message");
+                
+                // Also try ShowNotification as fallback
+                vTaskDelay(pdMS_TO_TICKS(100));
+                display->ShowNotification(wifi_message, 0);
+                ESP_LOGI(TAG, "Called ShowNotification with WiFi message");
+            } else {
+                ESP_LOGI(TAG, "Already in WiFi config mode, message should be shown by wifi_board.cc");
+            }
         } else {
+            ESP_LOGI(TAG, "WiFi is connected, checking animation availability...");
             // WiFi is connected, check if animation is available
             Animation_t* current_anim = animation_get_normal_animation();
+            ESP_LOGI(TAG, "Animation check: current_anim=%p", current_anim);
+            if (current_anim != NULL) {
+                ESP_LOGI(TAG, "Animation available: len=%d", current_anim->len);
+            }
+            
             if (current_anim == NULL || current_anim->len == 0) {
-                // No animation available, show connected message
-                display->SetChatMessage("system", "Connected! I am traveling over :D");
+                ESP_LOGI(TAG, "No animation available, showing connected message");
+                // No animation available, show connected message (display in center of screen)
+                const char* connected_message = "Connected! I am traveling over :D";
+                
+                // Try to use LcdDisplay::CreateSystemMessage if available
+                LcdDisplay* lcd_display = static_cast<LcdDisplay*>(display);
+                if (lcd_display != nullptr) {
+                    ESP_LOGI(TAG, "Display is LcdDisplay, using CreateSystemMessage for connected message");
+                    lcd_display->CreateSystemMessage(connected_message);
+                }
+                
+                // Also try standard methods as fallback
+                display->SetChatMessage("system", connected_message);
+                ESP_LOGI(TAG, "Called SetChatMessage with connected message");
+                
+                // Also try ShowNotification as fallback
+                vTaskDelay(pdMS_TO_TICKS(100));
+                display->ShowNotification(connected_message, 0);
+                ESP_LOGI(TAG, "Called ShowNotification with connected message");
+            } else {
+                ESP_LOGI(TAG, "Animation is available, not showing connected message");
             }
         }
+    } else {
+        ESP_LOGI(TAG, "ML307 board detected, skipping WiFi message display");
     }
 
     // Initialize and start the animation updater

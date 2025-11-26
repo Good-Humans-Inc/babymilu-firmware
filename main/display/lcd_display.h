@@ -57,6 +57,12 @@ public:
     virtual void SetEmotionImg(const lv_image_dsc_t *img) override;
     // Add theme switching function
     virtual void SetTheme(const std::string& theme_name) override;
+    
+    // Public method to force create a message in content_ (works even when CONFIG_USE_WECHAT_MESSAGE_STYLE is disabled)
+    void CreateSystemMessage(const char* message);
+    
+    // Public method to clear all system messages created by CreateSystemMessage
+    void ClearSystemMessages();
 };
 
 // RGB LCD显示器

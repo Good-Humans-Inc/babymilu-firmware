@@ -19,6 +19,7 @@
 #include <wifi_configuration_ap.h>
 #include <ssid_manager.h>
 #include "animation/animation.h"
+#include "display/lcd_display.h"
 
 static const char *TAG = "WifiBoard";
 
@@ -138,6 +139,35 @@ void WifiBoard::StartNetwork() {
         std::string hint = "Connect to BLE device 'BabyMilu' to configure WiFi";
         application.Alert("WiFi Configuration", hint.c_str(), "", Lang::Sounds::P3_WIFICONFIG);
         
+        // Show message to guide user to connect WiFi (display in center of screen)
+        ESP_LOGI(TAG, "Attempting to display WiFi connection message...");
+        auto display = Board::GetInstance().GetDisplay();
+        if (display == nullptr) {
+            ESP_LOGE(TAG, "Display is null! Cannot show WiFi connection message");
+        } else {
+            ESP_LOGI(TAG, "Display pointer is valid, attempting to set message");
+            
+            // Wait for display to be fully initialized (LVGL needs time)
+            ESP_LOGI(TAG, "Waiting for display to be fully initialized...");
+            vTaskDelay(pdMS_TO_TICKS(2000)); // Wait 2 seconds for LVGL to initialize
+            
+            const char* wifi_message = "Connect me to wifi with BabyMilu App. Can't wait to meet you again.";
+            
+            // Try to cast to LcdDisplay to use CreateSystemMessage
+            // Use static_cast since we know the display type for LCD boards
+            LcdDisplay* lcd_display = static_cast<LcdDisplay*>(display);
+            if (lcd_display != nullptr) {
+                ESP_LOGI(TAG, "Display is LcdDisplay, using CreateSystemMessage method");
+                lcd_display->CreateSystemMessage(wifi_message);
+                ESP_LOGI(TAG, "Called CreateSystemMessage");
+            } else {
+                ESP_LOGI(TAG, "Display is not LcdDisplay, using standard methods");
+                // Try SetChatMessage (works if CONFIG_USE_WECHAT_MESSAGE_STYLE is enabled)
+                display->SetChatMessage("system", wifi_message);
+                ESP_LOGI(TAG, "Called SetChatMessage");
+            }
+        }
+        
         // Wait for BLE configuration
         while (wifi_config_mode_) {
             vTaskDelay(pdMS_TO_TICKS(1000));
@@ -177,10 +207,35 @@ void WifiBoard::StartNetwork() {
         }
         
         // Check if animation is available, if not show connected message
+        ESP_LOGI(TAG, "WiFi connected, checking animation availability...");
         Animation_t* current_anim = animation_get_normal_animation();
+        ESP_LOGI(TAG, "Animation check: current_anim=%p", current_anim);
+        if (current_anim != NULL) {
+            ESP_LOGI(TAG, "Animation available: len=%d", current_anim->len);
+        }
+        
         if (current_anim == NULL || current_anim->len == 0) {
-            // No animation available, show connected message
-            display->SetChatMessage("system", "Connected! I am traveling over :D");
+            ESP_LOGI(TAG, "No animation available, showing connected message");
+            // No animation available, show connected message (display in center of screen)
+            const char* connected_message = "Connected! I am traveling over :D";
+            
+            // Try to use LcdDisplay::CreateSystemMessage if available
+            LcdDisplay* lcd_display = static_cast<LcdDisplay*>(display);
+            if (lcd_display != nullptr) {
+                ESP_LOGI(TAG, "Display is LcdDisplay, using CreateSystemMessage for connected message");
+                lcd_display->CreateSystemMessage(connected_message);
+            }
+            
+            // Also try standard methods as fallback
+            display->SetChatMessage("system", connected_message);
+            ESP_LOGI(TAG, "Called SetChatMessage with connected message");
+            
+            // Also try ShowNotification as fallback
+            vTaskDelay(pdMS_TO_TICKS(100));
+            display->ShowNotification(connected_message, 0);
+            ESP_LOGI(TAG, "Called ShowNotification with connected message");
+        } else {
+            ESP_LOGI(TAG, "Animation is available, not showing connected message");
         }
     });
     

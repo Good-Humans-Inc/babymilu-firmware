@@ -225,6 +225,9 @@ private:
     button_driver_t* boot_btn_driver_ = nullptr;
     button_driver_t* pwr_btn_driver_ = nullptr;
     static CustomBoard* instance_;
+    bool volume_mode_ = false;
+    esp_timer_handle_t volume_display_timer_ = nullptr;
+    
 
 
     void InitializeI2c() {
@@ -379,14 +382,103 @@ private:
         // gpio_set_level(PWR_Control_PIN, false);
         gpio_set_level(PWR_Control_PIN, true); 
     }
+    void ShowVolumeOnScreen() {
+        auto codec = GetAudioCodec();
+        if (!codec) return;
+        
+        int volume = codec->output_volume();
+        char volume_text[64];
+        snprintf(volume_text, sizeof(volume_text), "Volume: %d%%", volume);
+        
+        // Use CreateSystemMessage instead of SetChatMessage (works even when CONFIG_USE_WECHAT_MESSAGE_STYLE is disabled)
+        LcdDisplay* lcd_display = static_cast<LcdDisplay*>(display_);
+        if (lcd_display != nullptr) {
+            lcd_display->CreateSystemMessage(volume_text);
+        } else {
+            display_->SetChatMessage("system", volume_text);
+        }
+        
+        // Clear the timer if it exists
+        if (volume_display_timer_ != nullptr) {
+            esp_timer_stop(volume_display_timer_);
+        }
+    }
+
+    void EnterVolumeMode() {
+        volume_mode_ = true;
+        ESP_LOGI(TAG, "Entering volume adjustment mode");
+        // Use CreateSystemMessage instead of SetChatMessage (works even when CONFIG_USE_WECHAT_MESSAGE_STYLE is disabled)
+        LcdDisplay* lcd_display = static_cast<LcdDisplay*>(display_);
+        if (lcd_display != nullptr) {
+            lcd_display->CreateSystemMessage("Volume Mode - Power: Up, Boot: Down, Triple Boot: Exit");
+        } else {
+            display_->SetChatMessage("system", "Volume Mode - Power: Up, Boot: Down, Triple Boot: Exit");
+        }
+        ShowVolumeOnScreen();
+    }
+
+    void ExitVolumeMode() {
+        volume_mode_ = false;
+        ESP_LOGI(TAG, "Exiting volume adjustment mode");
+        
+        // Clear volume display messages immediately
+        LcdDisplay* lcd_display = static_cast<LcdDisplay*>(display_);
+        if (lcd_display != nullptr) {
+            lcd_display->ClearSystemMessages();
+        }
+        
+        if (volume_display_timer_ != nullptr) {
+            esp_timer_stop(volume_display_timer_);
+        }
+        
+        // Restore normal status
+        auto& app = Application::GetInstance();
+        if (app.GetDeviceState() == kDeviceStateIdle) {
+            display_->SetStatus("Standby");
+        }
+    }
+
+    void AdjustVolume(int delta) {
+        auto codec = GetAudioCodec();
+        if (!codec) return;
+        
+        int current_volume = codec->output_volume();
+        int new_volume = current_volume + delta;
+        
+        if (new_volume > 100) new_volume = 100;
+        if (new_volume < 0) new_volume = 0;
+        
+        codec->SetOutputVolume(new_volume);
+        ESP_LOGI(TAG, "Volume adjusted: %d -> %d", current_volume, new_volume);
+        ShowVolumeOnScreen();
+    }
+
     void InitializeButtons() {
         instance_ = this;
         InitializeButtonsCustom();
 
+        // Create timer for clearing volume display (not used anymore, but kept for potential future use)
+        esp_timer_create_args_t volume_timer_args = {
+            .callback = [](void* arg) {
+                auto self = static_cast<CustomBoard*>(arg);
+                // Clear the volume display messages
+                LcdDisplay* lcd_display = static_cast<LcdDisplay*>(self->display_);
+                if (lcd_display != nullptr) {
+                    lcd_display->ClearSystemMessages();
+                }
+            },
+            .arg = this,
+            .dispatch_method = ESP_TIMER_TASK,
+            .name = "volume_display_timer",
+            .skip_unhandled_events = true
+        };
+        ESP_ERROR_CHECK(esp_timer_create(&volume_timer_args, &volume_display_timer_));
+
         // Boot Button
+        // short_press_time must be > 0 for multiple click detection to work
         button_config_t boot_btn_config = {
             .long_press_time = 2000,
-            .short_press_time = 0
+            .short_press_time = 500  // 500ms to detect multiple clicks
         };
         boot_btn_driver_ = (button_driver_t*)calloc(1, sizeof(button_driver_t));
         boot_btn_driver_->enable_power_save = false;
@@ -394,14 +486,44 @@ private:
             return !gpio_get_level(BOOT_BUTTON_GPIO);
         };
         ESP_ERROR_CHECK(iot_button_create(&boot_btn_config, boot_btn_driver_, &boot_btn));
+        
+        // Boot button single click - volume down in volume mode, otherwise toggle chat
         iot_button_register_cb(boot_btn, BUTTON_SINGLE_CLICK, nullptr, [](void* button_handle, void* usr_data) {
             auto self = static_cast<CustomBoard*>(usr_data);
-            auto& app = Application::GetInstance();
-            if (app.GetDeviceState() == kDeviceStateStarting && !WifiStation::GetInstance().IsConnected()) {
-                self->ResetWifiConfiguration();
+            ESP_LOGI(TAG, "Boot button single click, volume_mode_=%d", self->volume_mode_);
+            if (self->volume_mode_) {
+                // In volume mode: single click = volume down
+                ESP_LOGI(TAG, "Volume mode active, decreasing volume");
+                self->AdjustVolume(-10);
+            } else {
+                // Normal mode: toggle chat
+                ESP_LOGI(TAG, "Normal mode, toggling chat");
+                auto& app = Application::GetInstance();
+                if (app.GetDeviceState() == kDeviceStateStarting && !WifiStation::GetInstance().IsConnected()) {
+                    self->ResetWifiConfiguration();
+                }
+                app.ToggleChatState();
             }
-            app.ToggleChatState();
         }, this);
+
+        // Boot button triple click - enter/exit volume mode
+        button_event_args_t triple_click_args = {
+            .multiple_clicks = {
+                .clicks = 3
+            }
+        };
+        iot_button_register_cb(boot_btn, BUTTON_MULTIPLE_CLICK, &triple_click_args, [](void* button_handle, void* usr_data) {
+            auto self = static_cast<CustomBoard*>(usr_data);
+            ESP_LOGI(TAG, "Triple click detected! Current volume_mode_=%d", self->volume_mode_);
+            if (self->volume_mode_) {
+                ESP_LOGI(TAG, "Exiting volume mode");
+                self->ExitVolumeMode();
+            } else {
+                ESP_LOGI(TAG, "Entering volume mode");
+                self->EnterVolumeMode();
+            }
+        }, this);
+        ESP_LOGI(TAG, "Triple-click handler registered for boot button");
 
         // Power Button
         button_config_t pwr_btn_config = {
@@ -414,6 +536,21 @@ private:
             return !gpio_get_level(PWR_BUTTON_GPIO);
         };
         ESP_ERROR_CHECK(iot_button_create(&pwr_btn_config, pwr_btn_driver_, &pwr_btn));
+        
+        // Power button single click - volume up in volume mode
+        iot_button_register_cb(pwr_btn, BUTTON_SINGLE_CLICK, nullptr, [](void* button_handle, void* usr_data) {
+            auto self = static_cast<CustomBoard*>(usr_data);
+            ESP_LOGI(TAG, "Power button single click, volume_mode_=%d", self->volume_mode_);
+            if (self->volume_mode_) {
+                // In volume mode: single click = volume up
+                ESP_LOGI(TAG, "Volume mode active, increasing volume");
+                self->AdjustVolume(10);
+            } else {
+                ESP_LOGI(TAG, "Power button clicked but not in volume mode, ignoring");
+            }
+        }, this);
+        
+        // Power button long press - backlight/power control (existing functionality)
         iot_button_register_cb(pwr_btn, BUTTON_LONG_PRESS_START, nullptr, [](void* button_handle, void* usr_data) {
             auto self = static_cast<CustomBoard*>(usr_data);
             if(self->GetBacklight()->brightness() > 0) {
@@ -467,6 +604,14 @@ public:
     virtual AudioCodec* GetAudioCodec() override {
         static NoAudioCodecSimplex audio_codec(AUDIO_INPUT_SAMPLE_RATE, AUDIO_OUTPUT_SAMPLE_RATE,
             AUDIO_I2S_SPK_GPIO_BCLK, AUDIO_I2S_SPK_GPIO_LRCK, AUDIO_I2S_SPK_GPIO_DOUT, I2S_STD_SLOT_BOTH, AUDIO_I2S_MIC_GPIO_SCK, AUDIO_I2S_MIC_GPIO_WS, AUDIO_I2S_MIC_GPIO_DIN, I2S_STD_SLOT_RIGHT); // I2S_STD_SLOT_LEFT / I2S_STD_SLOT_RIGHT / I2S_STD_SLOT_BOTH
+        static bool volume_initialized = false;
+        
+        // Set default volume to 100% on first call only
+        if (!volume_initialized) {
+            audio_codec.SetOutputVolume(100);
+            ESP_LOGI(TAG, "Audio codec initialized with default volume: 100%%");
+            volume_initialized = true;
+        }
 
         return &audio_codec;
     }
