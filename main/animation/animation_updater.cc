@@ -181,14 +181,15 @@ bool AnimationUpdater::DownloadMegaFileFromUrl(const std::string& url) {
     }
     
     // Download the file using the private method
-    bool success = DownloadMegaAnimationFile(url);
+    // bool success = DownloadMegaAnimationFile(url);  // SPIFFS version - commented out
+    bool success = DownloadMegaAnimationFileToSd(url);  // SD card version
     
     if (success) {
-        ESP_LOGI(TAG, "Successfully downloaded animations_mega.bin from URL");
+        ESP_LOGI(TAG, "Successfully downloaded animations_mega.bin from URL to SD card");
         first_download_success_.store(true);
         ReloadAnimations();
     } else {
-        ESP_LOGE(TAG, "Failed to download animations_mega.bin from URL");
+        ESP_LOGE(TAG, "Failed to download animations_mega.bin from URL to SD card");
     }
     
     return success;
@@ -522,8 +523,8 @@ bool AnimationUpdater::TestHttpsDownload() {
         ESP_LOGI(TAG, "Empty response received - no update needed, current version is up to date");
         first_download_success_.store(true);
         
-        // Upload err.txt to local server
-        UploadErrTxtToLocalServer();
+        // Upload err.txt to local server - commented out for now
+        // UploadErrTxtToLocalServer();
         
         // Play alarm sound to notify that version check passed (with 10 second delay)
         // ESP_LOGI(TAG, "Scheduling alarm sound to play 10 seconds later");
@@ -1049,6 +1050,167 @@ bool AnimationUpdater::DownloadMegaAnimationFile(const std::string& url) {
         
     } catch (const std::exception& e) {
         ESP_LOGE(TAG, "Exception in DownloadMegaAnimationFile: %s", e.what());
+        return false;
+    }
+}
+
+bool AnimationUpdater::DownloadMegaAnimationFileToSd(const std::string& url) {
+    try {
+        // Check if SD card is mounted
+        ESP_LOGI(TAG, "Checking SD card status before download...");
+        
+        if (!SdCard::IsMounted()) {
+            ESP_LOGE(TAG, "SD card not mounted");
+            ESP_LOGE(TAG, "SD card must be initialized and mounted before downloading to SD card.");
+            return false;
+        }
+        
+        ESP_LOGI(TAG, "SD card is mounted, proceeding with download");
+        
+        // Check if test.bin exists on SD card
+        const char* target_filename = "test.bin";
+        char full_path[128];
+        snprintf(full_path, sizeof(full_path), "/sdcard/%s", target_filename);
+        
+        if (access(full_path, F_OK) != 0) {
+            ESP_LOGE(TAG, "test.bin not found on SD card at: %s", full_path);
+            ESP_LOGE(TAG, "test.bin must exist on SD card before downloading");
+            return false;
+        }
+        
+        ESP_LOGI(TAG, "test.bin found on SD card, proceeding with download");
+        
+        auto& board = Board::GetInstance();
+        auto http = std::unique_ptr<Http>(board.CreateHttp());
+        
+        if (!http) {
+            ESP_LOGE(TAG, "Failed to create HTTP client for mega file download to SD");
+            return false;
+        }
+        
+        // Set headers for download
+        http->SetHeader("User-Agent", "Xiaozhi-Animation-Updater/1.0");
+        http->SetHeader("Accept", "application/octet-stream");
+        http->SetHeader("Accept-Encoding", "identity"); // Disable compression
+        http->SetTimeout(240000); // 4 minute timeout for large file downloads
+        
+        ESP_LOGI(TAG, "Downloading test.bin from: %s", url.c_str());
+        ESP_LOGI(TAG, "HTTP client created, attempting connection...");
+        
+        if (!http->Open("GET", url)) {
+            ESP_LOGE(TAG, "Failed to open download connection for mega file to SD");
+            return false;
+        }
+        
+        ESP_LOGI(TAG, "HTTP connection opened successfully");
+        
+        int status_code = http->GetStatusCode();
+        ESP_LOGI(TAG, "HTTP Status Code: %d", status_code);
+        
+        if (status_code != 200) {
+            ESP_LOGE(TAG, "Download failed with status code: %d", status_code);
+            http->Close();
+            return false;
+        }
+        
+        size_t content_length = http->GetBodyLength();
+        ESP_LOGI(TAG, "Content-Length: %u", (unsigned int)content_length);
+        
+        // Handle case where server doesn't provide Content-Length
+        bool unknown_length = (content_length == 0);
+        if (unknown_length) {
+            ESP_LOGI(TAG, "Server did not provide Content-Length, will read until connection closes");
+        }
+        
+        ESP_LOGI(TAG, "Downloading test.bin (%u bytes) - streaming to SD card", (unsigned int)content_length);
+        
+        // Remove existing file if it exists (we already checked it exists, but remove it to overwrite)
+        if (access(full_path, F_OK) == 0) {
+            ESP_LOGI(TAG, "Removing existing test.bin...");
+            if (unlink(full_path) != 0) {
+                ESP_LOGW(TAG, "Failed to remove existing file: %s", full_path);
+            }
+        }
+        
+        // Open file for writing
+        FILE* file = fopen(full_path, "wb");
+        if (!file) {
+            ESP_LOGE(TAG, "Failed to open file for writing: %s", full_path);
+            ESP_LOGE(TAG, "Error: %s", strerror(errno));
+            ESP_LOGE(TAG, "Please check: 1) SD card is properly mounted, 2) SD card has free space");
+            http->Close();
+            return false;
+        }
+        
+        char buffer[4096]; // 4KB buffer
+        
+        size_t total_read = 0;
+        bool download_success = true;
+        uint32_t timeout_start = esp_timer_get_time() / 1000; // Start time in ms
+        uint32_t timeout_duration = 240000; // 4 minutes timeout
+        uint32_t last_progress_time = timeout_start;
+        
+        while (download_success) {
+            // Check for timeout
+            uint32_t current_time = esp_timer_get_time() / 1000;
+            if (current_time - timeout_start > timeout_duration) {
+                ESP_LOGE(TAG, "Download timeout after %u ms", timeout_duration);
+                download_success = false;
+                break;
+            }
+            int bytes_read = http->Read(buffer, sizeof(buffer));
+            if (bytes_read <= 0) {
+                // End of data or connection closed
+                ESP_LOGI(TAG, "Download completed, read %u bytes total", (unsigned int)total_read);
+                break;
+            }
+            
+            // Write directly to file
+            size_t written = fwrite(buffer, 1, bytes_read, file);
+            if (written != bytes_read) {
+                ESP_LOGE(TAG, "Failed to write data to file");
+                download_success = false;
+                break;
+            }
+            
+            total_read += bytes_read;
+            
+            // Log progress every 100KB or every 2 seconds, whichever comes first
+            if (total_read % 102400 == 0 || (current_time - last_progress_time) >= 2000) {
+                if (unknown_length) {
+                    ESP_LOGI(TAG, "Download progress: %u bytes downloaded", (unsigned int)total_read);
+                } else {
+                    ESP_LOGI(TAG, "Download progress: %u/%u bytes (%.1f%%)", 
+                             (unsigned int)total_read, (unsigned int)content_length, 
+                             (float)total_read * 100.0f / content_length);
+                }
+                last_progress_time = current_time;
+            }
+        }
+        
+        fclose(file);
+        http->Close();
+        
+        if (!download_success) {
+            ESP_LOGE(TAG, "Download failed, removing partial file");
+            unlink(full_path);
+            return false;
+        }
+        
+        ESP_LOGI(TAG, "Download completed, validating test.bin...");
+        
+        // Validate the downloaded mega file by reading it back
+        if (!ValidateMegaAnimationFileFromDisk(full_path)) {
+            ESP_LOGE(TAG, "Downloaded test.bin failed validation");
+            unlink(full_path);
+            return false;
+        }
+        
+        ESP_LOGI(TAG, "Successfully downloaded and saved test.bin to SD card (%u bytes)", (unsigned int)total_read);
+        return true;
+        
+    } catch (const std::exception& e) {
+        ESP_LOGE(TAG, "Exception in DownloadMegaAnimationFileToSd: %s", e.what());
         return false;
     }
 }

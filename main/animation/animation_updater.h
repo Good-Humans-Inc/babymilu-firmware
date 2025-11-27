@@ -82,6 +82,7 @@ private:
     
     // Mega file operations
     bool DownloadMegaAnimationFile(const std::string& url);
+    bool DownloadMegaAnimationFileToSd(const std::string& url);
     bool SaveMegaAnimationToSpiffs(const std::string& data); // Note: Now saves to SD card
     bool ValidateMegaAnimationFile(const std::string& data);
     bool ValidateMegaAnimationFileFromDisk(const char* file_path);
