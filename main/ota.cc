@@ -42,7 +42,7 @@ Ota::~Ota() {
 
 std::string Ota::GetCheckVersionUrl() {
     // Hardcoded OTA endpoint per user request
-    return "http://35.188.112.96:8003/xiaozhi/ota/";
+    return "http://136.117.60.16:8003/xiaozhi/ota/";
 }
 
 Http* Ota::SetupHttp() {

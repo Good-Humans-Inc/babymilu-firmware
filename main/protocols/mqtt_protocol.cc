@@ -82,7 +82,7 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
     }
 
     // Use default endpoint if not configured
-    const std::string default_endpoint = "35.188.112.96:1883";
+    const std::string default_endpoint = "136.117.60.16:1883";
     if (endpoint.empty()) {
         ESP_LOGW(TAG, "MQTT endpoint is not specified, using default: %s", default_endpoint.c_str());
         endpoint = default_endpoint;

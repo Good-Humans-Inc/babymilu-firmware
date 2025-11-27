@@ -118,7 +118,7 @@ bool WebsocketProtocol::OpenAudioChannel() {
     std::string url = settings.GetString("url");
     
     // Validate URL and fallback to hardcoded URL if invalid
-    const std::string default_url = "ws://35.188.112.96:8000/xiaozhi/v1/";
+    const std::string default_url = "ws://136.117.60.16:8000/xiaozhi/v1/";
     if (!IsValidWebSocketUrl(url)) {
         if (!url.empty()) {
             ESP_LOGW(TAG, "Invalid WebSocket URL in settings (localhost/invalid): %s, using default and clearing invalid URL", url.c_str());
