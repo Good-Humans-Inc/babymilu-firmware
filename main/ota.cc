@@ -2,6 +2,7 @@
 #include "system_info.h"
 #include "settings.h"
 #include "assets/lang_config.h"
+#include "config.h"
 
 #include <cJSON.h>
 #include <esp_log.h>
@@ -41,8 +42,12 @@ Ota::~Ota() {
 }
 
 std::string Ota::GetCheckVersionUrl() {
-    // Hardcoded OTA endpoint per user request
-    return "http://136.117.60.16:8003/xiaozhi/ota/";
+    const char* url = CONFIG_OTA_URL;
+    if (url && strlen(url) > 0) {
+        return std::string(url);
+    }
+    // Return empty string if not configured (OTA will be disabled)
+    return "";
 }
 
 Http* Ota::SetupHttp() {
@@ -59,6 +64,7 @@ Http* Ota::SetupHttp() {
     http->SetHeader("User-Agent", std::string(BOARD_NAME "/") + app_desc->version);
     http->SetHeader("Accept-Language", Lang::CODE);
     http->SetHeader("Content-Type", "application/json");
+    http->SetTimeout(30000); // 30 second timeout for OTA requests
 
     return http;
 }
@@ -75,8 +81,8 @@ bool Ota::CheckVersion() {
     ESP_LOGI(TAG, "Current version: %s", current_version_.c_str());
 
     std::string url = GetCheckVersionUrl();
-    if (url.length() < 10) {
-        ESP_LOGE(TAG, "Check version URL is not properly set");
+    if (url.empty()) {
+        ESP_LOGI(TAG, "OTA URL not configured, skipping version check");
         return false;
     }
 
@@ -135,89 +141,52 @@ bool Ota::CheckVersion() {
     }
 
     has_mqtt_config_ = false;
+    has_mqtt_endpoint_ = false;
     cJSON *mqtt = cJSON_GetObjectItem(root, "mqtt");
     if (cJSON_IsObject(mqtt)) {
-        // Check if the endpoint from OTA matches our desired server
-        cJSON *endpoint_item = cJSON_GetObjectItem(mqtt, "endpoint");
-        bool should_ignore_mqtt_config = false;
-        
-        if (cJSON_IsString(endpoint_item)) {
-            std::string ota_endpoint = endpoint_item->valuestring;
-            // Ignore mqtt config from OTA if it points to old servers
-            // Only accept endpoints that contain our new server IP: 35.188.112.96
-            if (ota_endpoint.find("35.188.112.96") == std::string::npos) {
-                ESP_LOGW(TAG, "Ignoring MQTT endpoint from OTA (old server): %s, will use default instead", ota_endpoint.c_str());
-                should_ignore_mqtt_config = true;
-            } else {
-                ESP_LOGI(TAG, "Accepting MQTT endpoint from OTA (new server): %s", ota_endpoint.c_str());
-            }
-        }
-        
-        if (!should_ignore_mqtt_config) {
-            Settings settings("mqtt", true);
-            cJSON *item = NULL;
-            cJSON_ArrayForEach(item, mqtt) {
-                if (cJSON_IsString(item)) {
-                    if (settings.GetString(item->string) != item->valuestring) {
-                        settings.SetString(item->string, item->valuestring);
-                    }
-                } else if (cJSON_IsNumber(item)) {
-                    if (settings.GetInt(item->string) != item->valueint) {
-                        settings.SetInt(item->string, item->valueint);
-                    }
+        Settings settings("mqtt", true);
+        cJSON *item = NULL;
+        cJSON_ArrayForEach(item, mqtt) {
+            if (cJSON_IsString(item)) {
+                // Track if endpoint was explicitly set by OTA server
+                if (strcmp(item->string, "endpoint") == 0) {
+                    has_mqtt_endpoint_ = true;
+                    ESP_LOGI(TAG, "OTA server sent MQTT endpoint: %s", item->valuestring);
+                }
+                if (settings.GetString(item->string) != item->valuestring) {
+                    settings.SetString(item->string, item->valuestring);
+                    ESP_LOGI(TAG, "Updated MQTT setting: %s = %s", item->string, item->valuestring);
+                }
+            } else if (cJSON_IsNumber(item)) {
+                if (settings.GetInt(item->string) != item->valueint) {
+                    settings.SetInt(item->string, item->valueint);
+                    ESP_LOGI(TAG, "Updated MQTT setting: %s = %d", item->string, item->valueint);
                 }
             }
-            has_mqtt_config_ = true;
-        } else {
-            // Clear any existing mqtt endpoint from settings to force use of default
-            Settings settings("mqtt", true);
-            settings.SetString("endpoint", "");
-            ESP_LOGI(TAG, "Cleared MQTT endpoint from settings, will use default: 35.188.112.96:1883");
         }
+        has_mqtt_config_ = true;
+        ESP_LOGI(TAG, "MQTT config from OTA server: has_endpoint=%d", has_mqtt_endpoint_);
     } else {
-        ESP_LOGI(TAG, "No mqtt section found !");
+        ESP_LOGI(TAG, "No mqtt section found in OTA response - will derive from menuconfig");
     }
 
     has_websocket_config_ = false;
     cJSON *websocket = cJSON_GetObjectItem(root, "websocket");
     if (cJSON_IsObject(websocket)) {
-        // Check if the URL from OTA matches our desired server
-        cJSON *url_item = cJSON_GetObjectItem(websocket, "url");
-        bool should_ignore_websocket_config = false;
-        
-        if (cJSON_IsString(url_item)) {
-            std::string ota_url = url_item->valuestring;
-            // Ignore websocket config from OTA if it points to old servers
-            // Only accept URLs that contain our new server IP: 35.188.112.96
-            if (ota_url.find("35.188.112.96") == std::string::npos) {
-                ESP_LOGW(TAG, "Ignoring WebSocket URL from OTA (old server): %s, will use default instead", ota_url.c_str());
-                should_ignore_websocket_config = true;
-            } else {
-                ESP_LOGI(TAG, "Accepting WebSocket URL from OTA (new server): %s", ota_url.c_str());
-            }
-        }
-        
-        if (!should_ignore_websocket_config) {
-            Settings settings("websocket", true);
-            cJSON *item = NULL;
-            cJSON_ArrayForEach(item, websocket) {
-                if (cJSON_IsString(item)) {
-                    if (settings.GetString(item->string) != item->valuestring) {
-                        settings.SetString(item->string, item->valuestring);
-                    }
-                } else if (cJSON_IsNumber(item)) {
-                    if (settings.GetInt(item->string) != item->valueint) {
-                        settings.SetInt(item->string, item->valueint);
-                    }
+        Settings settings("websocket", true);
+        cJSON *item = NULL;
+        cJSON_ArrayForEach(item, websocket) {
+            if (cJSON_IsString(item)) {
+                if (settings.GetString(item->string) != item->valuestring) {
+                    settings.SetString(item->string, item->valuestring);
+                }
+            } else if (cJSON_IsNumber(item)) {
+                if (settings.GetInt(item->string) != item->valueint) {
+                    settings.SetInt(item->string, item->valueint);
                 }
             }
-            has_websocket_config_ = true;
-        } else {
-            // Clear any existing websocket URL from settings to force use of default
-            Settings settings("websocket", true);
-            settings.SetString("url", "");
-            ESP_LOGI(TAG, "Cleared WebSocket URL from settings, will use default: ws://35.188.112.96:8000/xiaozhi/v1/");
         }
+        has_websocket_config_ = true;
     } else {
         ESP_LOGI(TAG, "No websocket section found!");
     }

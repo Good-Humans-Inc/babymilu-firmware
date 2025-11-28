@@ -4,6 +4,7 @@
 #include "animation.h"
 #include "sd_card.h"
 #include "settings.h"
+#include "config.h"
 #include <esp_log.h>
 #include <esp_timer.h>
 #include <cJSON.h>
@@ -16,11 +17,6 @@
 #include <dirent.h>
 
 #define TAG "AnimationUpdater"
-
-// Default server URL - change this to your test server
-// #define DEFAULT_SERVER_URL "http://192.168.5.15:8081/api/animations"
-// Updated for HTTPS testing
-#define DEFAULT_SERVER_URL "https://github.com/Jackson-hangxuan/postman_test/raw/refs/heads/main"
 
 // Server version - should match the lambda function's SERVER_VERSION
 #define SERVER_VERSION "1.0.1"
@@ -48,9 +44,6 @@ void AnimationUpdater::Initialize() {
     LoadConfiguration();
     
     ESP_LOGI(TAG, "Animation Updater initialized");
-    ESP_LOGI(TAG, "  Server URL: %s", server_url_.c_str());
-    ESP_LOGI(TAG, "  Check Interval: %u seconds", check_interval_seconds_);
-    ESP_LOGI(TAG, "  Enabled: %s", enabled_.load() ? "true" : "false");
 }
 
 void AnimationUpdater::Start() {
@@ -194,6 +187,12 @@ bool AnimationUpdater::ForceUpdateCheck() {
 
 std::string AnimationUpdater::BuildMegaDownloadUrl() {
     // Direct GCS URL for mega.bin scoped by device MAC (uppercase + URL-encoded ':')
+    // Use configured server URL if available
+    if (!server_url_.empty()) {
+        return server_url_;
+    }
+    
+    // Fallback: construct URL from MAC address (legacy behavior)
     std::string mac = SystemInfo::GetMacAddress();
     std::string mac_upper = mac;
     std::transform(mac_upper.begin(), mac_upper.end(), mac_upper.begin(), [](unsigned char c){ return (unsigned char)std::toupper(c); });
@@ -1430,8 +1429,11 @@ void AnimationUpdater::ReloadAnimations() {
 }
 
 void AnimationUpdater::LoadConfiguration() {
-    // Use hardcoded configuration for testing
-    server_url_ = DEFAULT_SERVER_URL;
+    // Animation server URL is dynamically constructed from MAC address
+    // Pattern: https://storage.googleapis.com/milu-public/device_bin/<MAC_encoded>/mega.bin
+    // Leave server_url_ empty to use the dynamic GCS URL (handled in BuildMegaDownloadUrl)
+    server_url_ = "";
+    
     check_interval_seconds_ = 10;  // 10 seconds
     enabled_.store(true);  // Always enabled for testing
     
@@ -1440,16 +1442,7 @@ void AnimationUpdater::LoadConfiguration() {
     std::string saved_version = settings.GetString("version", "1.0.0");  // Default to 1.0.0 if not found
     if (!saved_version.empty()) {
         current_version_ = saved_version;
-        ESP_LOGI(TAG, "Loaded version from NVS: %s", current_version_.c_str());
-    } else {
-        ESP_LOGW(TAG, "Failed to load version from NVS, using default: %s", current_version_.c_str());
     }
-    
-    ESP_LOGI(TAG, "Configuration loaded:");
-    ESP_LOGI(TAG, "  Server URL: %s", server_url_.c_str());
-    ESP_LOGI(TAG, "  Check Interval: %u seconds", check_interval_seconds_);
-    ESP_LOGI(TAG, "  Enabled: %s", enabled_.load() ? "true" : "false");
-    ESP_LOGI(TAG, "  Current Version: %s", current_version_.c_str());
 }
 
 void AnimationUpdater::SaveConfiguration() {

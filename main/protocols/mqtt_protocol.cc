@@ -2,6 +2,8 @@
 #include "board.h"
 #include "application.h"
 #include "settings.h"
+#include "config.h"
+#include "ota.h"
 
 #include <esp_log.h>
 #include <ml307_mqtt.h>
@@ -81,11 +83,11 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
         }
     }
 
-    // Use default endpoint if not configured
-    const std::string default_endpoint = "136.117.60.16:1883";
+    // MQTT endpoint must be set by application.cc from menuconfig OTA URL or OTA server response
+    // No fallback/default here - fail if not configured
     if (endpoint.empty()) {
-        ESP_LOGW(TAG, "MQTT endpoint is not specified, using default: %s", default_endpoint.c_str());
-        endpoint = default_endpoint;
+        ESP_LOGE(TAG, "MQTT endpoint is not configured. It should be derived from menuconfig OTA URL or set by OTA server.");
+        return false;
     }
 
     // Verbose diagnostics for MQTT configuration
@@ -215,12 +217,19 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
     ESP_LOGI(TAG, "Connecting to endpoint %s", endpoint.c_str());
     std::string broker_address;
     int broker_port = 8883;
-    size_t pos = endpoint.find(':');
+    
+    // Handle mqtt:// protocol prefix
+    std::string endpoint_clean = endpoint;
+    if (endpoint_clean.find("mqtt://") == 0) {
+        endpoint_clean = endpoint_clean.substr(7); // Remove "mqtt://" prefix
+    }
+    
+    size_t pos = endpoint_clean.find(':');
     if (pos != std::string::npos) {
-        broker_address = endpoint.substr(0, pos);
-        broker_port = std::stoi(endpoint.substr(pos + 1));
+        broker_address = endpoint_clean.substr(0, pos);
+        broker_port = std::stoi(endpoint_clean.substr(pos + 1));
     } else {
-        broker_address = endpoint;
+        broker_address = endpoint_clean;
     }
     ESP_LOGI(TAG, "Broker parsed: %s:%d", broker_address.c_str(), broker_port);
     if (!mqtt_->Connect(broker_address, broker_port, client_id, username, password)) {

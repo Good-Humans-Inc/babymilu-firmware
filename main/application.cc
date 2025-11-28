@@ -17,6 +17,7 @@
 #include "ssid_manager.h"
 #include "wifi_station.h"
 #include "display/lcd_display.h"
+#include "ota.h"
 
 #if CONFIG_USE_AUDIO_PROCESSOR
 #include "afe_audio_processor.h"
@@ -40,12 +41,7 @@
 
 #define TAG "Application"
 
-#ifndef DEFAULT_MQTT_ENDPOINT
-#define DEFAULT_MQTT_ENDPOINT ""
-#endif
-#ifndef DEFAULT_MQTT_PUBLISH_TEMPLATE
-#define DEFAULT_MQTT_PUBLISH_TEMPLATE "xiaozhi/%s/up"
-#endif
+#include "config.h"
 
 // Minimal WAV-from-HTTP player for POC: expects mono 16-bit PCM at codec sample rate
 static bool PlayWavFromUrl(const std::string &url, float gain)
@@ -761,20 +757,60 @@ void Application::Start()
     // Check for new firmware version or get the MQTT broker address
     CheckNewVersion();
 
-    // Seed MQTT config on first boot if unset (allows setting broker at build time)
+    // Always derive MQTT endpoint from OTA URL (menuconfig) unless OTA server explicitly sent one
+    // This ensures MQTT endpoint stays in sync with OTA server hostname
     {
         Settings mqtt_settings("mqtt", true);
         auto endpoint = mqtt_settings.GetString("endpoint");
-        if (endpoint.empty() && std::string(DEFAULT_MQTT_ENDPOINT).size() > 0)
+        
+        // Only skip derivation if OTA server explicitly sent endpoint in MQTT config
+        // This allows OTA server to override via JSON, but otherwise derives from menuconfig OTA URL
+        if (!ota_.HasMqttEndpoint())
         {
-            auto mac = SystemInfo::GetMacAddress();
-            char up_topic[128];
-            snprintf(up_topic, sizeof(up_topic), DEFAULT_MQTT_PUBLISH_TEMPLATE, mac.c_str());
-            mqtt_settings.SetString("endpoint", DEFAULT_MQTT_ENDPOINT);
-            mqtt_settings.SetString("client_id", mac);
-            mqtt_settings.SetString("publish_topic", up_topic);
-            // Optional username/password can be added similarly if needed
-            ESP_LOGI(TAG, "Seeded MQTT endpoint to %s", DEFAULT_MQTT_ENDPOINT);
+            std::string ota_url = ota_.GetCheckVersionUrl();
+            if (!ota_url.empty())
+            {
+                // Extract hostname from OTA URL
+                // Format: http://host:port/path or https://host:port/path
+                std::string mqtt_endpoint;
+                size_t protocol_end = ota_url.find("://");
+                if (protocol_end != std::string::npos)
+                {
+                    size_t host_start = protocol_end + 3;
+                    size_t host_end = ota_url.find_first_of(":/", host_start);
+                    if (host_end == std::string::npos)
+                    {
+                        host_end = ota_url.length();
+                    }
+                    std::string hostname = ota_url.substr(host_start, host_end - host_start);
+                    mqtt_endpoint = "mqtt://" + hostname + ":1883";
+                    
+                    // ALWAYS update from OTA URL (menuconfig) - force sync, no matter what was stored before
+                    auto mac = SystemInfo::GetMacAddress();
+                    char up_topic[128];
+                    snprintf(up_topic, sizeof(up_topic), "xiaozhi/%s/up", mac.c_str());
+                    mqtt_settings.SetString("endpoint", mqtt_endpoint);
+                    if (mqtt_settings.GetString("client_id").empty())
+                    {
+                        mqtt_settings.SetString("client_id", mac);
+                    }
+                    if (mqtt_settings.GetString("publish_topic").empty())
+                    {
+                        mqtt_settings.SetString("publish_topic", up_topic);
+                    }
+                    if (mqtt_settings.GetString("subscribe_topic").empty())
+                    {
+                        mqtt_settings.SetString("subscribe_topic", std::string(up_topic).substr(0, strlen(up_topic) - 2) + "down");
+                    }
+                    ESP_LOGI(TAG, "Updated MQTT endpoint from OTA URL (menuconfig): %s -> %s", endpoint.empty() ? "<empty>" : endpoint.c_str(), mqtt_endpoint.c_str());
+                }
+            }
+        } else {
+            ESP_LOGI(TAG, "MQTT endpoint from OTA server response (not updating from menuconfig): %s", endpoint.c_str());
+            // Log warning if OTA server sent old endpoint - this should be updated on server side
+            if (endpoint.find("136.117.60.16") != std::string::npos) {
+                ESP_LOGW(TAG, "WARNING: OTA server sent old endpoint (136.117.60.16). Please update OTA server to send correct endpoint or remove endpoint field to use menuconfig derivation.");
+            }
         }
     }
 

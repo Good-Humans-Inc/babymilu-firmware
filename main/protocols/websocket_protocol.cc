@@ -3,6 +3,8 @@
 #include "system_info.h"
 #include "application.h"
 #include "settings.h"
+#include "config.h"
+#include "ota.h"
 
 #include <cstring>
 #include <cJSON.h>
@@ -117,17 +119,49 @@ bool WebsocketProtocol::OpenAudioChannel() {
     Settings settings("websocket", false);
     std::string url = settings.GetString("url");
     
-    // Validate URL and fallback to hardcoded URL if invalid
-    const std::string default_url = "ws://136.117.60.16:8000/xiaozhi/v1/";
+    // Validate URL and derive from OTA URL if invalid or not configured
     if (!IsValidWebSocketUrl(url)) {
         if (!url.empty()) {
-            ESP_LOGW(TAG, "Invalid WebSocket URL in settings (localhost/invalid): %s, using default and clearing invalid URL", url.c_str());
+            ESP_LOGW(TAG, "Invalid WebSocket URL in settings (localhost/invalid): %s, clearing invalid URL", url.c_str());
             // Clear invalid URL from settings
             settings.SetString("url", "");
-        } else {
-            ESP_LOGW(TAG, "No WebSocket URL in settings, using default: %s", default_url.c_str());
         }
-        url = default_url;
+        
+        // Derive WebSocket URL from OTA URL (same host, port 8000)
+        Ota ota;
+        std::string ota_url = ota.GetCheckVersionUrl();
+        if (!ota_url.empty()) {
+            // Extract hostname from OTA URL and construct WebSocket URL
+            // Format: http://host:port/path or https://host:port/path
+            size_t protocol_end = ota_url.find("://");
+            if (protocol_end != std::string::npos) {
+                std::string protocol = ota_url.substr(0, protocol_end);
+                // Use wss:// if OTA uses https://, otherwise ws://
+                std::string ws_protocol = (protocol == "https") ? "wss" : "ws";
+                
+                size_t host_start = protocol_end + 3;
+                size_t host_end = ota_url.find_first_of(":/", host_start);
+                if (host_end == std::string::npos) {
+                    host_end = ota_url.length();
+                }
+                std::string hostname = ota_url.substr(host_start, host_end - host_start);
+                
+                // Construct WebSocket URL: ws://hostname:8000/xiaozhi/v1/
+                url = ws_protocol + "://" + hostname + ":8000/xiaozhi/v1/";
+                
+                if (IsValidWebSocketUrl(url)) {
+                    ESP_LOGI(TAG, "Using WebSocket URL derived from OTA URL: %s", url.c_str());
+                } else {
+                    ESP_LOGE(TAG, "Derived WebSocket URL is invalid: %s", url.c_str());
+                    url = "";
+                }
+            }
+        }
+        
+        if (url.empty()) {
+            ESP_LOGE(TAG, "No valid WebSocket URL configured and could not derive from OTA URL");
+            return false;
+        }
     } else {
         ESP_LOGI(TAG, "Using WebSocket URL from settings: %s", url.c_str());
     }
