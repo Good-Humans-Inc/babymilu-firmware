@@ -2,6 +2,7 @@
 #include "board.h"
 #include "application.h"
 #include "settings.h"
+#include "system_info.h"
 
 #include <esp_log.h>
 #include <ml307_mqtt.h>
@@ -79,6 +80,23 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
             // If no /up pattern, append /down
             subscribe_topic_ += "/down";
         }
+    }
+
+    // Generate default topics from MAC address if both are empty
+    // This ensures the device can always subscribe even if OTA/config didn't provide topics
+    if (publish_topic_.empty() && subscribe_topic_.empty()) {
+        auto mac = SystemInfo::GetMacAddress();
+        char up_topic[128];
+        snprintf(up_topic, sizeof(up_topic), "xiaozhi/%s/up", mac.c_str());
+        publish_topic_ = up_topic;
+        subscribe_topic_ = std::string("xiaozhi/") + mac + "/down";
+        
+        // Save to settings so they persist
+        Settings write_settings("mqtt", true);
+        write_settings.SetString("publish_topic", publish_topic_);
+        write_settings.SetString("subscribe_topic", subscribe_topic_);
+        ESP_LOGI(TAG, "Generated default MQTT topics from MAC address: publish=%s, subscribe=%s", 
+                 publish_topic_.c_str(), subscribe_topic_.c_str());
     }
 
     // Use default endpoint if not configured
