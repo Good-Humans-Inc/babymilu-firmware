@@ -120,7 +120,27 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
     mqtt_->SetKeepAlive(keepalive_interval);
 
     mqtt_->OnDisconnected([this]() {
-        ESP_LOGI(TAG, "Disconnected from endpoint");
+        ESP_LOGW(TAG, "MQTT disconnected from endpoint");
+        // Log connection state for diagnostics
+        bool still_connected = mqtt_ ? mqtt_->IsConnected() : false;
+        ESP_LOGW(TAG, "MQTT connection state after disconnect callback: %s", still_connected ? "connected" : "disconnected");
+        
+        // If this happens after ws_start, it might be expected server behavior
+        // but MQTT should stay connected for future control messages
+        if (server_requested_websocket_) {
+            ESP_LOGW(TAG, "MQTT disconnected after ws_start - this may indicate server is closing MQTT connection");
+            ESP_LOGW(TAG, "MQTT should remain connected for control messages (ws_start, wake word, etc.)");
+        }
+        
+        // Attempt automatic reconnection after a delay
+        // This ensures MQTT stays available for control messages
+        Application::GetInstance().Schedule([this]() {
+            vTaskDelay(pdMS_TO_TICKS(MQTT_RECONNECT_INTERVAL_MS));
+            if (mqtt_ && !mqtt_->IsConnected()) {
+                ESP_LOGI(TAG, "Attempting to reconnect MQTT after disconnect...");
+                StartMqttClient(false);
+            }
+        });
     });
 
     mqtt_->OnConnected([this, client_id]() {
@@ -184,6 +204,11 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
         } else if (strcmp(type->valuestring, "ws_start") == 0) {
             // Server is redirecting to WebSocket
             server_requested_websocket_ = true;
+            
+            // Log MQTT connection state before processing ws_start
+            bool mqtt_connected_before = mqtt_ ? mqtt_->IsConnected() : false;
+            ESP_LOGI(TAG, "Received ws_start message. MQTT connection state: %s", mqtt_connected_before ? "connected" : "disconnected");
+            
             auto wss_url = cJSON_GetObjectItem(root, "wss");
             auto version = cJSON_GetObjectItem(root, "version");
             
@@ -205,6 +230,11 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
                     }
                     ESP_LOGI(TAG, "WebSocket URL saved. Opening WebSocket connection for conversation...");
                 }
+                
+                // Log MQTT connection state after processing ws_start (before scheduling WebSocket)
+                bool mqtt_connected_after = mqtt_ ? mqtt_->IsConnected() : false;
+                ESP_LOGI(TAG, "MQTT connection state after processing ws_start: %s (should remain connected)", 
+                         mqtt_connected_after ? "connected" : "disconnected");
                 
                 // Schedule opening WebSocket connection in the application context
                 // (will use default URL if invalid URL was received)
