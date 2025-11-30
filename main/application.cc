@@ -42,10 +42,13 @@ Application::Application() {
 #error "CONFIG_USE_DEVICE_AEC and CONFIG_USE_SERVER_AEC cannot be enabled at the same time"
 #elif CONFIG_USE_DEVICE_AEC
     aec_mode_ = kAecOnDeviceSide;
+    ESP_LOGI(TAG, "AEC Mode: Device-Side (CONFIG_USE_DEVICE_AEC enabled)");
 #elif CONFIG_USE_SERVER_AEC
     aec_mode_ = kAecOnServerSide;
+    ESP_LOGI(TAG, "AEC Mode: Server-Side (CONFIG_USE_SERVER_AEC enabled)");
 #else
     aec_mode_ = kAecOff;
+    ESP_LOGI(TAG, "AEC Mode: Off (no AEC config enabled)");
 #endif
 
     esp_timer_create_args_t clock_timer_args = {
@@ -588,6 +591,24 @@ void Application::MainEventLoop() {
             if (device_state_ == kDeviceStateListening) {
                 auto led = Board::GetInstance().GetLed();
                 led->OnStateChanged();
+            } else if (device_state_ == kDeviceStateSpeaking) {
+                // VAD detected voice during playback - interrupt and switch to listening
+                // This only works when device-side AEC is enabled (prevents self-interruption)
+                bool voice_detected = audio_service_.IsVoiceDetected();
+                ESP_LOGI(TAG, "VAD change during Speaking: voice_detected=%d, aec_mode=%d, processor_running=%d", 
+                    voice_detected, aec_mode_, audio_service_.IsAudioProcessorRunning());
+                
+                if (aec_mode_ == kAecOnDeviceSide && voice_detected) {
+                    ESP_LOGI(TAG, "VAD detected real voice during playback, interrupting");
+                    Schedule([this]() {
+                        AbortSpeaking(kAbortReasonNone);
+                        // Switch to listening mode to capture the user's voice
+                        SetListeningMode(aec_mode_ == kAecOff ? kListeningModeAutoStop : kListeningModeRealtime);
+                    });
+                }
+                // Update LED to show voice detection
+                auto led = Board::GetInstance().GetLed();
+                led->OnStateChanged();
             }
         }
 
@@ -712,7 +733,24 @@ void Application::SetDeviceState(DeviceState state) {
             display->SetStatus(Lang::Strings::SPEAKING);
 
             if (listening_mode_ != kListeningModeRealtime) {
-                audio_service_.EnableVoiceProcessing(false);
+                // Keep voice processing enabled if device-side AEC is available
+                // This allows VAD to detect real voice while AEC cancels playback echo
+                if (aec_mode_ == kAecOnDeviceSide) {
+                    ESP_LOGI(TAG, "Speaking state: Keeping voice processing enabled with AEC for VAD interruption");
+                    // Ensure AEC is enabled for echo cancellation
+                    audio_service_.EnableDeviceAec(true);
+                    // Voice processing should already be running from Listening state
+                    // If not, enable it (but don't reset decoder as we're playing audio)
+                    if (!audio_service_.IsAudioProcessorRunning()) {
+                        ESP_LOGW(TAG, "Audio processor not running, enabling it");
+                        audio_service_.EnableVoiceProcessing(true);
+                    }
+                } else {
+                    ESP_LOGI(TAG, "Speaking state: Disabling voice processing (no device-side AEC)");
+                    // Without device-side AEC, disable voice processing to avoid self-interruption
+                    // (playback audio would trigger VAD and cause false interruptions)
+                    audio_service_.EnableVoiceProcessing(false);
+                }
                 // Only AFE wake word can be detected in speaking mode
                 audio_service_.EnableWakeWordDetection(audio_service_.IsAfeWakeWord());
             }

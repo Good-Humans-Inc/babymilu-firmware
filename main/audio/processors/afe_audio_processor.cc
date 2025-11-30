@@ -58,7 +58,8 @@ void AfeAudioProcessor::Initialize(AudioCodec* codec, int frame_duration_ms, srm
 
 #ifdef CONFIG_USE_DEVICE_AEC
     afe_config->aec_init = true;
-    afe_config->vad_init = false;
+    // Enable VAD alongside AEC so we can detect real voice while AEC cancels playback echo
+    afe_config->vad_init = true;
 #else
     afe_config->aec_init = false;
     afe_config->vad_init = true;
@@ -175,8 +176,11 @@ void AfeAudioProcessor::AudioProcessorTask() {
 void AfeAudioProcessor::EnableDeviceAec(bool enable) {
     if (enable) {
 #if CONFIG_USE_DEVICE_AEC
-        afe_iface_->disable_vad(afe_data_);
+        // Enable AEC to cancel playback echo
         afe_iface_->enable_aec(afe_data_);
+        // Keep VAD enabled so we can detect real voice (VAD works alongside AEC)
+        // AEC will cancel the echo, allowing VAD to detect only real voice
+        afe_iface_->enable_vad(afe_data_);
 #else
         ESP_LOGE(TAG, "Device AEC is not supported");
 #endif
