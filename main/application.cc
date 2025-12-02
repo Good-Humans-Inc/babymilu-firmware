@@ -996,6 +996,15 @@ void Application::Start()
             } else {
                 ESP_LOGW(TAG, "Alert command requires status, message and emotion");
             }
+        } else if (strcmp(type->valuestring, "listen") == 0) {
+            auto state = cJSON_GetObjectItem(root, "state");
+            if (cJSON_IsString(state)) {
+                if (strcmp(state->valuestring, "start") == 0) {
+                    Schedule([this]() { SetListeningMode(kListeningModeManualStop); });
+                } else if (strcmp(state->valuestring, "stop") == 0) {
+                    Schedule([this]() { StopListening(); });
+                }
+            }
         } else if (strcmp(type->valuestring, "play_url") == 0) {
             auto url = cJSON_GetObjectItem(root, "url");
             auto gain = cJSON_GetObjectItem(root, "gain");
@@ -1850,6 +1859,15 @@ void Application::OpenWebSocketConnection() {
                     Schedule([this, display, emotion_str = std::string(emotion->valuestring)]() {
                         display->SetEmotion(emotion_str.c_str());
                     });
+                }
+            } else if (strcmp(type->valuestring, "listen") == 0) {
+                auto state = cJSON_GetObjectItem(root, "state");
+                if (cJSON_IsString(state)) {
+                    if (strcmp(state->valuestring, "start") == 0) {
+                        Schedule([this]() { SetListeningMode(kListeningModeManualStop); });
+                    } else if (strcmp(state->valuestring, "stop") == 0) {
+                        Schedule([this]() { StopListening(); });
+                    }
                 }
             }
             // Add other message type handlers as needed
