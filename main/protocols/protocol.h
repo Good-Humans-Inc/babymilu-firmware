@@ -73,6 +73,8 @@ public:
     virtual void SendIotDescriptors(const std::string& descriptors);
     virtual void SendIotStates(const std::string& states);
     virtual void SendMcpMessage(const std::string& message);
+    // Check if protocol has been inactive for specified seconds (for proactive timeout)
+    bool IsInactiveFor(int seconds) const;
 
 protected:
     std::function<void(const cJSON* root)> on_incoming_json_;

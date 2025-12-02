@@ -138,3 +138,9 @@ bool Protocol::IsTimeout() const {
     }
     return timeout;
 }
+
+bool Protocol::IsInactiveFor(int seconds) const {
+    auto now = std::chrono::steady_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::seconds>(now - last_incoming_time_);
+    return duration.count() > seconds;
+}

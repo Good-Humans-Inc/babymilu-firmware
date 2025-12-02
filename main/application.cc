@@ -38,6 +38,7 @@
 #include <cJSON.h>
 #include <driver/gpio.h>
 #include <arpa/inet.h>
+#include <algorithm>
 
 #define TAG "Application"
 
@@ -768,6 +769,7 @@ void Application::Start()
         if (!ota_.HasMqttEndpoint())
         {
             std::string ota_url = ota_.GetCheckVersionUrl();
+            ESP_LOGI(TAG, "Deriving MQTT endpoint from menuconfig OTA URL: %s", ota_url.empty() ? "<empty>" : ota_url.c_str());
             if (!ota_url.empty())
             {
                 // Extract hostname from OTA URL
@@ -784,15 +786,28 @@ void Application::Start()
                     }
                     std::string hostname = ota_url.substr(host_start, host_end - host_start);
                     mqtt_endpoint = "mqtt://" + hostname + ":1883";
+                    ESP_LOGI(TAG, "Extracted hostname from OTA URL: %s -> MQTT endpoint: %s", hostname.c_str(), mqtt_endpoint.c_str());
                     
                     // ALWAYS update from OTA URL (menuconfig) - force sync, no matter what was stored before
                     auto mac = SystemInfo::GetMacAddress();
+                    // Normalize MAC to lowercase to ensure consistency with server
+                    std::transform(mac.begin(), mac.end(), mac.begin(), ::tolower);
                     char up_topic[128];
                     snprintf(up_topic, sizeof(up_topic), "xiaozhi/%s/up", mac.c_str());
                     mqtt_settings.SetString("endpoint", mqtt_endpoint);
                     if (mqtt_settings.GetString("client_id").empty())
                     {
-                        mqtt_settings.SetString("client_id", mac);
+                        // Format client-id as esp32-{mac} for stable identification
+                        // Remove colons from MAC for cleaner client-id (e.g., esp32-30eda0ada0dc)
+                        std::string mac_clean = mac;
+                        mac_clean.erase(std::remove(mac_clean.begin(), mac_clean.end(), ':'), mac_clean.end());
+                        std::string client_id = "esp32-" + mac_clean;
+                        mqtt_settings.SetString("client_id", client_id);
+                        ESP_LOGI(TAG, "Set MQTT client_id to: %s", client_id.c_str());
+                    }
+                    // Set keepalive to 60s if not already set
+                    if (mqtt_settings.GetInt("keepalive", 0) == 0) {
+                        mqtt_settings.SetInt("keepalive", 60);
                     }
                     if (mqtt_settings.GetString("publish_topic").empty())
                     {
@@ -803,7 +818,11 @@ void Application::Start()
                         mqtt_settings.SetString("subscribe_topic", std::string(up_topic).substr(0, strlen(up_topic) - 2) + "down");
                     }
                     ESP_LOGI(TAG, "Updated MQTT endpoint from OTA URL (menuconfig): %s -> %s", endpoint.empty() ? "<empty>" : endpoint.c_str(), mqtt_endpoint.c_str());
+                } else {
+                    ESP_LOGE(TAG, "Failed to parse OTA URL format: %s", ota_url.c_str());
                 }
+            } else {
+                ESP_LOGE(TAG, "OTA URL is empty! MQTT endpoint cannot be derived. Please set CONFIG_OTA_URL in menuconfig.");
             }
         } else {
             ESP_LOGI(TAG, "MQTT endpoint from OTA server response (not updating from menuconfig): %s", endpoint.c_str());
@@ -1001,6 +1020,22 @@ void Application::Start()
             } else {
                 ESP_LOGW(TAG, "play_url missing 'url' field");
             }
+        } else if (strcmp(type->valuestring, "auto_update") == 0) {
+            auto url = cJSON_GetObjectItem(root, "url");
+            if (cJSON_IsString(url)) {
+                ESP_LOGI(TAG, "Auto update requested with URL: %s", url->valuestring);
+                Schedule([url_str = std::string(url->valuestring)]() {
+                    auto& updater = AnimationUpdater::GetInstance();
+                    bool success = updater.DownloadMegaFileFromUrl(url_str);
+                    if (success) {
+                        ESP_LOGI(TAG, "Auto update completed successfully");
+                    } else {
+                        ESP_LOGE(TAG, "Auto update failed");
+                    }
+                });
+            } else {
+                ESP_LOGW(TAG, "auto_update command requires url field");
+            }
         } else {
             ESP_LOGW(TAG, "Unknown message type: %s", type->valuestring);
         } });
@@ -1158,6 +1193,19 @@ void Application::OnClockTimer()
         // SystemInfo::PrintTaskCpuUsage(pdMS_TO_TICKS(1000));
         // SystemInfo::PrintTaskList();
         SystemInfo::PrintHeapStats();
+
+        // Check for WebSocket inactivity and close proactively
+        // Close WebSocket if it's been idle for 60 seconds (shorter than the 120s timeout)
+        // This ensures fresh connections for new conversations
+        if (websocket_protocol_ && websocket_protocol_->IsAudioChannelOpened()) {
+            if (websocket_protocol_->IsInactiveFor(60)) {
+                ESP_LOGI(TAG, "WebSocket inactive for 60+ seconds, closing proactively");
+                Schedule([this]() {
+                    websocket_protocol_->CloseAudioChannel();
+                    SetDeviceState(kDeviceStateIdle);
+                });
+            }
+        }
 
         // If we have synchronized server time, set the status to clock "HH:MM" if the device is idle
         if (ota_.HasServerTime())
@@ -1696,11 +1744,25 @@ Protocol* Application::GetActiveProtocol() {
     return protocol_.get();
 }
 
+bool Application::IsWebSocketConnected() const {
+    return websocket_protocol_ != nullptr && websocket_protocol_->IsAudioChannelOpened();
+}
+
 void Application::OpenWebSocketConnection() {
-    // If WebSocket protocol already exists and is opened, do nothing
+    // If WebSocket protocol already exists and is opened, close it first to ensure clean state
+    // This allows ws_start to always create a fresh connection for each new conversation
+    // Always close existing WebSocket connection when ws_start arrives to ensure fresh session
     if (websocket_protocol_ && websocket_protocol_->IsAudioChannelOpened()) {
-        ESP_LOGI(TAG, "WebSocket connection already open");
-        return;
+        ESP_LOGI(TAG, "WebSocket connection already open, closing it first for fresh connection");
+        websocket_protocol_->CloseAudioChannel();
+        // Small delay to ensure clean closure
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    // Also reset the protocol instance if it exists but connection is closed (stale instance)
+    // This ensures we always get a fresh connection setup
+    if (websocket_protocol_ && !websocket_protocol_->IsAudioChannelOpened()) {
+        ESP_LOGI(TAG, "WebSocket protocol exists but connection is closed, resetting for fresh connection");
+        websocket_protocol_.reset();
     }
     
     // Create WebSocket protocol if it doesn't exist
@@ -1747,11 +1809,17 @@ void Application::OpenWebSocketConnection() {
             
             if (strcmp(type->valuestring, "tts") == 0) {
                 auto state = cJSON_GetObjectItem(root, "state");
+                ESP_LOGI(TAG, "Received TTS message, state: %s", state ? state->valuestring : "null");
                 if (strcmp(state->valuestring, "start") == 0) {
+                    ESP_LOGI(TAG, "TTS start received, transitioning to speaking state");
                     Schedule([this]() {
                         aborted_ = false;
+                        ESP_LOGI(TAG, "TTS start handler: current device state=%d", device_state_);
                         if (device_state_ == kDeviceStateIdle || device_state_ == kDeviceStateListening) {
+                            ESP_LOGI(TAG, "Transitioning to speaking state for TTS");
                             SetDeviceState(kDeviceStateSpeaking);
+                        } else {
+                            ESP_LOGW(TAG, "TTS start received but device state is %d, not transitioning", device_state_);
                         }
                     });
                 } else if (strcmp(state->valuestring, "stop") == 0) {

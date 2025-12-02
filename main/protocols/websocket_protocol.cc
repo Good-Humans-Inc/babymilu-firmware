@@ -190,8 +190,11 @@ bool WebsocketProtocol::OpenAudioChannel() {
 
     error_occurred_ = false;
     frame_count_ = 0;  // Reset frame counter for new session
+    last_incoming_time_ = std::chrono::steady_clock::now();  // Initialize timestamp for inactivity checking
     websocket_ = Board::GetInstance().CreateWebSocket();
     
+    // Set headers before connecting - the WebSocket library will automatically
+    // handle the HTTP GET + Upgrade handshake when Connect() is called with ws:// or wss:// URL
     if (!token.empty()) {
         // If token not has a space, add "Bearer " prefix
         if (token.find(" ") == std::string::npos) {

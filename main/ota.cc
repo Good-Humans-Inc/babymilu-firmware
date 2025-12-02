@@ -78,6 +78,9 @@ bool Ota::CheckVersion() {
 
     // Check if there is a new firmware version available
     current_version_ = app_desc->version;
+    // Trim whitespace from current version
+    current_version_.erase(0, current_version_.find_first_not_of(" \t\n\r"));
+    current_version_.erase(current_version_.find_last_not_of(" \t\n\r") + 1);
     ESP_LOGI(TAG, "Current version: %s", current_version_.c_str());
 
     std::string url = GetCheckVersionUrl();
@@ -109,6 +112,8 @@ bool Ota::CheckVersion() {
     // Response: { "firmware": { "version": "1.0.0", "url": "http://" } }
     // Parse the JSON response and check if the version is newer
     // If it is, set has_new_version_ to true and store the new version and URL
+    
+    ESP_LOGI(TAG, "OTA server response: %s", data.c_str());
     
     cJSON *root = cJSON_Parse(data.c_str());
     if (root == NULL) {
@@ -222,6 +227,9 @@ bool Ota::CheckVersion() {
         cJSON *version = cJSON_GetObjectItem(firmware, "version");
         if (cJSON_IsString(version)) {
             firmware_version_ = version->valuestring;
+            // Trim whitespace from version string
+            firmware_version_.erase(0, firmware_version_.find_first_not_of(" \t\n\r"));
+            firmware_version_.erase(firmware_version_.find_last_not_of(" \t\n\r") + 1);
         }
         cJSON *url = cJSON_GetObjectItem(firmware, "url");
         if (cJSON_IsString(url)) {
@@ -229,12 +237,13 @@ bool Ota::CheckVersion() {
         }
 
         if (cJSON_IsString(version) && cJSON_IsString(url)) {
+            ESP_LOGI(TAG, "Server returned firmware version: %s (current: %s)", firmware_version_.c_str(), current_version_.c_str());
             // Check if the version is newer, for example, 0.1.0 is newer than 0.0.1
             has_new_version_ = IsNewVersionAvailable(current_version_, firmware_version_);
             if (has_new_version_) {
                 ESP_LOGI(TAG, "New version available: %s", firmware_version_.c_str());
             } else {
-                ESP_LOGI(TAG, "Current is the latest version");
+                ESP_LOGI(TAG, "Current is the latest version (server: %s, current: %s)", firmware_version_.c_str(), current_version_.c_str());
             }
             // If the force flag is set to 1, the given version is forced to be installed
             cJSON *force = cJSON_GetObjectItem(firmware, "force");
@@ -391,7 +400,12 @@ std::vector<int> Ota::ParseVersion(const std::string& version) {
     std::string segment;
     
     while (std::getline(ss, segment, '.')) {
-        versionNumbers.push_back(std::stoi(segment));
+        // Trim whitespace from segment
+        segment.erase(0, segment.find_first_not_of(" \t\n\r"));
+        segment.erase(segment.find_last_not_of(" \t\n\r") + 1);
+        if (!segment.empty()) {
+            versionNumbers.push_back(std::stoi(segment));
+        }
     }
     
     return versionNumbers;
@@ -401,15 +415,30 @@ bool Ota::IsNewVersionAvailable(const std::string& currentVersion, const std::st
     std::vector<int> current = ParseVersion(currentVersion);
     std::vector<int> newer = ParseVersion(newVersion);
     
+    ESP_LOGI(TAG, "Comparing versions: current=%s (%d.%d.%d), new=%s (%d.%d.%d)", 
+             currentVersion.c_str(), 
+             current.size() > 0 ? current[0] : 0,
+             current.size() > 1 ? current[1] : 0,
+             current.size() > 2 ? current[2] : 0,
+             newVersion.c_str(),
+             newer.size() > 0 ? newer[0] : 0,
+             newer.size() > 1 ? newer[1] : 0,
+             newer.size() > 2 ? newer[2] : 0);
+    
     for (size_t i = 0; i < std::min(current.size(), newer.size()); ++i) {
         if (newer[i] > current[i]) {
+            ESP_LOGI(TAG, "Version component %zu: %d > %d, new version is available", i, newer[i], current[i]);
             return true;
         } else if (newer[i] < current[i]) {
+            ESP_LOGI(TAG, "Version component %zu: %d < %d, current version is newer", i, newer[i], current[i]);
             return false;
         }
     }
     
-    return newer.size() > current.size();
+    bool result = newer.size() > current.size();
+    ESP_LOGI(TAG, "All components equal, checking length: newer.size()=%zu, current.size()=%zu, result=%d", 
+             newer.size(), current.size(), result);
+    return result;
 }
 
 std::string Ota::GetActivationPayload() {

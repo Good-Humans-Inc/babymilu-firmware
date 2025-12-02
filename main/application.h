@@ -85,6 +85,7 @@ public:
     void ClearWifiConfiguration();
     Protocol* GetActiveProtocol();  // Returns the protocol to use for audio (WebSocket if available, else primary)
     void OpenWebSocketConnection();  // Opens WebSocket connection for conversations
+    bool IsWebSocketConnected() const;  // Check if WebSocket is already connected
 
 private:
     Application();

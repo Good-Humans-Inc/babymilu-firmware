@@ -9,6 +9,7 @@
 #include <ml307_mqtt.h>
 #include <ml307_udp.h>
 #include <cstring>
+#include <algorithm>
 #include <arpa/inet.h>
 #include "assets/lang_config.h"
 
@@ -57,9 +58,17 @@ bool MqttProtocol::Start() {
 }
 
 bool MqttProtocol::StartMqttClient(bool report_error) {
+    // Use single global MQTT client - don't recreate if already connected
+    if (mqtt_ != nullptr && mqtt_->IsConnected()) {
+        ESP_LOGI(TAG, "MQTT client already connected, reusing existing connection");
+        return true;
+    }
+    
+    // Only delete and recreate if not connected or doesn't exist
     if (mqtt_ != nullptr) {
-        ESP_LOGW(TAG, "Mqtt client already started");
+        ESP_LOGW(TAG, "MQTT client exists but not connected, cleaning up and recreating");
         delete mqtt_;
+        mqtt_ = nullptr;
     }
 
     Settings settings("mqtt", false);
@@ -67,7 +76,8 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
     auto client_id = settings.GetString("client_id");
     auto username = settings.GetString("username");
     auto password = settings.GetString("password");
-    int keepalive_interval = settings.GetInt("keepalive", 120);
+    // Use 60s keepalive as recommended (was 120s default)
+    int keepalive_interval = settings.GetInt("keepalive", 60);
     publish_topic_ = settings.GetString("publish_topic");
     
     // Derive subscribe topic from publish topic (replace /up with /down)
@@ -105,10 +115,43 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
 
     mqtt_->OnDisconnected([this]() {
         ESP_LOGI(TAG, "Disconnected from endpoint");
+        
+        // Prevent double reconnection race condition
+        if (reconnecting_) {
+            ESP_LOGW(TAG, "Reconnection already in progress, skipping duplicate disconnect handler");
+            return;
+        }
+        
+        reconnecting_ = true;
+        
+        // Use our own reconnection with exponential backoff (200-500ms)
+        // Disable esp-mqtt auto-reconnect to avoid conflicts
+        // Start with current backoff delay, increase on retries (capped at 500ms)
+        int backoff_ms = reconnect_backoff_ms_;
+        
+        // Schedule reconnection attempt on application thread with backoff
+        Application::GetInstance().Schedule([this, backoff_ms]() {
+            vTaskDelay(pdMS_TO_TICKS(backoff_ms));  // Backoff delay
+            
+            if (mqtt_ != nullptr && !mqtt_->IsConnected()) {
+                ESP_LOGI(TAG, "Attempting MQTT reconnection after disconnect (backoff: %dms)", backoff_ms);
+                if (!StartMqttClient(false)) {  // Don't report error on reconnect
+                    // If reconnection fails, increase backoff for next retry (capped at 500ms)
+                    reconnect_backoff_ms_ = std::min(reconnect_backoff_ms_ + 100, 500);
+                    ESP_LOGW(TAG, "MQTT reconnection failed, will retry with backoff: %dms", reconnect_backoff_ms_);
+                } else {
+                    // Reconnection succeeded, reset backoff to initial value
+                    reconnect_backoff_ms_ = 200;
+                }
+            }
+            reconnecting_ = false;
+        });
     });
 
     mqtt_->OnConnected([this, client_id]() {
         ESP_LOGI(TAG, "MQTT client fully connected (CONNACK received)");
+        // Reset reconnection backoff on successful connection
+        reconnect_backoff_ms_ = 200;
         // Subscribe in the OnConnected callback to ensure we're fully connected
         if (!subscribe_topic_.empty()) {
             ESP_LOGI(TAG, "Subscribing to topic (from OnConnected): %s", subscribe_topic_.c_str());
@@ -192,8 +235,14 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
                 
                 // Schedule opening WebSocket connection in the application context
                 // (will use default URL if invalid URL was received)
+                // Always open WebSocket connection when ws_start is received, even if one exists
+                // This ensures a fresh session and proper callback setup for each new conversation
                 Application::GetInstance().Schedule([this]() {
-                    Application::GetInstance().OpenWebSocketConnection();
+                    auto& app = Application::GetInstance();
+                    // Always open WebSocket connection - if one exists, it will be closed and recreated
+                    // This ensures clean state and proper callback setup for each new conversation
+                    ESP_LOGI(TAG, "Opening WebSocket connection for ws_start (will close existing if any)");
+                    app.OpenWebSocketConnection();
                 });
             } else {
                 ESP_LOGE(TAG, "ws_start message missing 'wss' field");
@@ -216,12 +265,20 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
 
     ESP_LOGI(TAG, "Connecting to endpoint %s", endpoint.c_str());
     std::string broker_address;
-    int broker_port = 8883;
+    int broker_port = 1883;  // Default to plain TCP port (1883), not TLS port (8883)
+    bool use_tls = false;
     
-    // Handle mqtt:// protocol prefix
+    // Check endpoint scheme to determine transport type
+    // mqtt:// = plain TCP, mqtts:// = TLS/SSL
     std::string endpoint_clean = endpoint;
-    if (endpoint_clean.find("mqtt://") == 0) {
+    if (endpoint_clean.find("mqtts://") == 0) {
+        use_tls = true;
+        endpoint_clean = endpoint_clean.substr(8); // Remove "mqtts://" prefix
+        broker_port = 8883;  // Default TLS port
+    } else if (endpoint_clean.find("mqtt://") == 0) {
+        use_tls = false;
         endpoint_clean = endpoint_clean.substr(7); // Remove "mqtt://" prefix
+        broker_port = 1883;  // Default plain TCP port
     }
     
     size_t pos = endpoint_clean.find(':');
@@ -231,7 +288,7 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
     } else {
         broker_address = endpoint_clean;
     }
-    ESP_LOGI(TAG, "Broker parsed: %s:%d", broker_address.c_str(), broker_port);
+    ESP_LOGI(TAG, "Broker parsed: %s:%d (transport: %s)", broker_address.c_str(), broker_port, use_tls ? "TLS" : "TCP");
     if (!mqtt_->Connect(broker_address, broker_port, client_id, username, password)) {
         ESP_LOGE(TAG, "Failed to connect to endpoint %s:%d", broker_address.c_str(), broker_port);
         SetError(Lang::Strings::SERVER_NOT_CONNECTED);
