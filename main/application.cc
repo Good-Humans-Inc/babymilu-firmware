@@ -17,7 +17,6 @@
 #include "ssid_manager.h"
 #include "wifi_station.h"
 #include "display/lcd_display.h"
-#include "ota.h"
 
 #if CONFIG_USE_AUDIO_PROCESSOR
 #include "afe_audio_processor.h"
@@ -38,11 +37,15 @@
 #include <cJSON.h>
 #include <driver/gpio.h>
 #include <arpa/inet.h>
-#include <algorithm>
 
 #define TAG "Application"
 
-#include "config.h"
+#ifndef DEFAULT_MQTT_ENDPOINT
+#define DEFAULT_MQTT_ENDPOINT ""
+#endif
+#ifndef DEFAULT_MQTT_PUBLISH_TEMPLATE
+#define DEFAULT_MQTT_PUBLISH_TEMPLATE "xiaozhi/%s/up"
+#endif
 
 // Minimal WAV-from-HTTP player for POC: expects mono 16-bit PCM at codec sample rate
 static bool PlayWavFromUrl(const std::string &url, float gain)
@@ -400,7 +403,6 @@ void Application::Alert(const char *status, const char *message, const char *emo
 
 void Application::DismissAlert()
 {
-    is_alarm_mode_ = false;  // Clear alarm mode when alert is dismissed
     if (device_state_ == kDeviceStateIdle)
     {
         auto display = Board::GetInstance().GetDisplay();
@@ -759,78 +761,20 @@ void Application::Start()
     // Check for new firmware version or get the MQTT broker address
     CheckNewVersion();
 
-    // Always derive MQTT endpoint from OTA URL (menuconfig) unless OTA server explicitly sent one
-    // This ensures MQTT endpoint stays in sync with OTA server hostname
+    // Seed MQTT config on first boot if unset (allows setting broker at build time)
     {
         Settings mqtt_settings("mqtt", true);
         auto endpoint = mqtt_settings.GetString("endpoint");
-        
-        // Only skip derivation if OTA server explicitly sent endpoint in MQTT config
-        // This allows OTA server to override via JSON, but otherwise derives from menuconfig OTA URL
-        if (!ota_.HasMqttEndpoint())
+        if (endpoint.empty() && std::string(DEFAULT_MQTT_ENDPOINT).size() > 0)
         {
-            std::string ota_url = ota_.GetCheckVersionUrl();
-            ESP_LOGI(TAG, "Deriving MQTT endpoint from menuconfig OTA URL: %s", ota_url.empty() ? "<empty>" : ota_url.c_str());
-            if (!ota_url.empty())
-            {
-                // Extract hostname from OTA URL
-                // Format: http://host:port/path or https://host:port/path
-                std::string mqtt_endpoint;
-                size_t protocol_end = ota_url.find("://");
-                if (protocol_end != std::string::npos)
-                {
-                    size_t host_start = protocol_end + 3;
-                    size_t host_end = ota_url.find_first_of(":/", host_start);
-                    if (host_end == std::string::npos)
-                    {
-                        host_end = ota_url.length();
-                    }
-                    std::string hostname = ota_url.substr(host_start, host_end - host_start);
-                    mqtt_endpoint = "mqtt://" + hostname + ":1883";
-                    ESP_LOGI(TAG, "Extracted hostname from OTA URL: %s -> MQTT endpoint: %s", hostname.c_str(), mqtt_endpoint.c_str());
-                    
-                    // ALWAYS update from OTA URL (menuconfig) - force sync, no matter what was stored before
-                    auto mac = SystemInfo::GetMacAddress();
-                    // Normalize MAC to lowercase to ensure consistency with server
-                    std::transform(mac.begin(), mac.end(), mac.begin(), ::tolower);
-                    char up_topic[128];
-                    snprintf(up_topic, sizeof(up_topic), "xiaozhi/%s/up", mac.c_str());
-                    mqtt_settings.SetString("endpoint", mqtt_endpoint);
-                    if (mqtt_settings.GetString("client_id").empty())
-                    {
-                        // Format client-id as esp32-{mac} for stable identification
-                        // Remove colons from MAC for cleaner client-id (e.g., esp32-30eda0ada0dc)
-                        std::string mac_clean = mac;
-                        mac_clean.erase(std::remove(mac_clean.begin(), mac_clean.end(), ':'), mac_clean.end());
-                        std::string client_id = "esp32-" + mac_clean;
-                        mqtt_settings.SetString("client_id", client_id);
-                        ESP_LOGI(TAG, "Set MQTT client_id to: %s", client_id.c_str());
-                    }
-                    // Set keepalive to 60s if not already set
-                    if (mqtt_settings.GetInt("keepalive", 0) == 0) {
-                        mqtt_settings.SetInt("keepalive", 60);
-                    }
-                    if (mqtt_settings.GetString("publish_topic").empty())
-                    {
-                        mqtt_settings.SetString("publish_topic", up_topic);
-                    }
-                    if (mqtt_settings.GetString("subscribe_topic").empty())
-                    {
-                        mqtt_settings.SetString("subscribe_topic", std::string(up_topic).substr(0, strlen(up_topic) - 2) + "down");
-                    }
-                    ESP_LOGI(TAG, "Updated MQTT endpoint from OTA URL (menuconfig): %s -> %s", endpoint.empty() ? "<empty>" : endpoint.c_str(), mqtt_endpoint.c_str());
-                } else {
-                    ESP_LOGE(TAG, "Failed to parse OTA URL format: %s", ota_url.c_str());
-                }
-            } else {
-                ESP_LOGE(TAG, "OTA URL is empty! MQTT endpoint cannot be derived. Please set CONFIG_OTA_URL in menuconfig.");
-            }
-        } else {
-            ESP_LOGI(TAG, "MQTT endpoint from OTA server response (not updating from menuconfig): %s", endpoint.c_str());
-            // Log warning if OTA server sent old endpoint - this should be updated on server side
-            if (endpoint.find("136.117.60.16") != std::string::npos) {
-                ESP_LOGW(TAG, "WARNING: OTA server sent old endpoint (136.117.60.16). Please update OTA server to send correct endpoint or remove endpoint field to use menuconfig derivation.");
-            }
+            auto mac = SystemInfo::GetMacAddress();
+            char up_topic[128];
+            snprintf(up_topic, sizeof(up_topic), DEFAULT_MQTT_PUBLISH_TEMPLATE, mac.c_str());
+            mqtt_settings.SetString("endpoint", DEFAULT_MQTT_ENDPOINT);
+            mqtt_settings.SetString("client_id", mac);
+            mqtt_settings.SetString("publish_topic", up_topic);
+            // Optional username/password can be added similarly if needed
+            ESP_LOGI(TAG, "Seeded MQTT endpoint to %s", DEFAULT_MQTT_ENDPOINT);
         }
     }
 
@@ -905,70 +849,44 @@ void Application::Start()
             /* removed unused: display */
             // DISABLED: Comment out transcript display to reduce memory usage
             // display->SetChatMessage("system", "");
-            // CRITICAL FIX: Don't force idle if we're in speaking state - we should transition to listening instead
-            // Only go to idle if we're already idle or in a state that doesn't need the connection
-            if (device_state_ == kDeviceStateSpeaking) {
-                ESP_LOGI(TAG, "Audio channel closed during speaking - transitioning to listening instead of idle");
-                SetDeviceState(kDeviceStateListening);
-            } else if (device_state_ != kDeviceStateListening) {
-                // Only set to idle if not in listening state (listening state might have connection open)
-                SetDeviceState(kDeviceStateIdle);
-            }
+            SetDeviceState(kDeviceStateIdle);
         }); });
     protocol_->OnIncomingJson([this, display](const cJSON *root)
                               {
-        // Log incoming JSON for debugging (first 200 chars)
-        char* json_str = cJSON_PrintUnformatted(root);
-        if (json_str) {
-            int len = strlen(json_str);
-            ESP_LOGI(TAG, "Incoming JSON: %.*s", len > 200 ? 200 : len, json_str);
-            cJSON_free(json_str);
-        }
-        
         // Parse JSON data
         auto type = cJSON_GetObjectItem(root, "type");
-        if (!cJSON_IsString(type)) {
-            ESP_LOGW(TAG, "Received JSON without valid type field");
-            return;
-        }
-        
-        ESP_LOGI(TAG, "Application::OnIncomingJson processing type: %s", type->valuestring);
-        
         if (strcmp(type->valuestring, "tts") == 0) {
             auto state = cJSON_GetObjectItem(root, "state");
             if (strcmp(state->valuestring, "start") == 0) {
                 Schedule([this]() {
                     aborted_ = false;
-                    // Track state before TTS starts - if TTS starts from idle, it's likely an alarm/notification
-                    state_before_tts_ = device_state_;
                     if (device_state_ == kDeviceStateIdle || device_state_ == kDeviceStateListening) {
-                        // If TTS starts from idle (not from listening), treat as alarm mode
-                        // This handles alarms/notifications that wake the device
-                        if (state_before_tts_ == kDeviceStateIdle) {
-                            is_alarm_mode_ = true;
-                            ESP_LOGI(TAG, "TTS started from idle state - treating as alarm mode");
-                        }
                         SetDeviceState(kDeviceStateSpeaking);
                     }
                 });
             } else if (strcmp(state->valuestring, "stop") == 0) {
-                ESP_LOGI(TAG, "TTS stop message received via primary protocol");
                 Schedule([this]() {
-                    ESP_LOGI(TAG, "TTS stop handler executing, current state=%d", device_state_);
                     background_task_->WaitForCompletion();
-                    // CRITICAL FIX: Always transition to listening after TTS stops, even if already idle
-                    // This handles the case where OnAudioChannelClosed forced idle prematurely
-                    // The listening_mode_ only controls HOW to stop listening, not whether to start it
-                    if (device_state_ == kDeviceStateSpeaking || device_state_ == kDeviceStateIdle) {
-                        ESP_LOGI(TAG, "TTS stopped, automatically starting listening (current state=%d, mode=%d)", device_state_, listening_mode_);
-                        SetDeviceState(kDeviceStateListening);
-                        state_before_tts_ = kDeviceStateUnknown;  // Reset tracking
-                        // Clear alarm mode after handling
-                        if (is_alarm_mode_) {
-                            is_alarm_mode_ = false;
+                    if (device_state_ == kDeviceStateSpeaking) {
+                        // Check if remote wakeup scenario (WebSocket still open)
+                        auto* active_protocol = GetActiveProtocol();
+                        bool is_remote_wakeup = (websocket_protocol_ != nullptr && 
+                                                websocket_protocol_->IsAudioChannelOpened() &&
+                                                active_protocol && active_protocol->IsAudioChannelOpened());
+                        
+                        if (is_remote_wakeup) {
+                            // Automatically resume listening after TTS in remote wakeup scenario
+                            ESP_LOGI(TAG, "TTS stopped, remote wakeup detected (WebSocket open) - automatically resuming listening");
+                            SetDeviceState(kDeviceStateListening);
+                        } else if (listening_mode_ == kListeningModeManualStop) {
+                            // Go to idle for manual interactions
+                            ESP_LOGI(TAG, "TTS stopped, going to idle (manual stop mode)");
+                            SetDeviceState(kDeviceStateIdle);
+                        } else {
+                            // Auto mode: resume listening
+                            ESP_LOGI(TAG, "TTS stopped, automatically resuming listening (auto stop mode)");
+                            SetDeviceState(kDeviceStateListening);
                         }
-                    } else {
-                        ESP_LOGW(TAG, "TTS stop received but device state is %d (not speaking/idle), ignoring", device_state_);
                     }
                 });
             } else if (strcmp(state->valuestring, "sentence_start") == 0) {
@@ -1019,13 +937,13 @@ void Application::Start()
             auto state = cJSON_GetObjectItem(root, "state");
             if (cJSON_IsString(state)) {
                 if (strcmp(state->valuestring, "start") == 0) {
-                    ESP_LOGI(TAG, "Received listen:start from cloud, starting listening");
+                    ESP_LOGI(TAG, "Received listen:start from server, starting listening");
                     Schedule([this]() { 
                         ESP_LOGI(TAG, "Executing listen:start - setting listening mode");
                         SetListeningMode(kListeningModeManualStop); 
                     });
                 } else if (strcmp(state->valuestring, "stop") == 0) {
-                    ESP_LOGI(TAG, "Received listen:stop from cloud, stopping listening");
+                    ESP_LOGI(TAG, "Received listen:stop from server, stopping listening");
                     Schedule([this]() { StopListening(); });
                 } else {
                     ESP_LOGW(TAG, "Received listen message with unknown state: %s", state->valuestring);
@@ -1051,26 +969,9 @@ void Application::Start()
             auto message = cJSON_GetObjectItem(root, "message");
             auto emotion = cJSON_GetObjectItem(root, "emotion");
             if (cJSON_IsString(status) && cJSON_IsString(message) && cJSON_IsString(emotion)) {
-                // Check if this is an alarm (status contains "alarm" or "Alarm")
-                const char* status_str = status->valuestring;
-                is_alarm_mode_ = (strstr(status_str, "alarm") != nullptr || 
-                                 strstr(status_str, "Alarm") != nullptr ||
-                                 strstr(status_str, "ALARM") != nullptr);
-                if (is_alarm_mode_) {
-                    ESP_LOGI(TAG, "Alarm mode activated (status: %s)", status_str);
-                }
                 Alert(status->valuestring, message->valuestring, emotion->valuestring, Lang::Sounds::P3_VIBRATION);
             } else {
                 ESP_LOGW(TAG, "Alert command requires status, message and emotion");
-            }
-        } else if (strcmp(type->valuestring, "listen") == 0) {
-            auto state = cJSON_GetObjectItem(root, "state");
-            if (cJSON_IsString(state)) {
-                if (strcmp(state->valuestring, "start") == 0) {
-                    Schedule([this]() { SetListeningMode(kListeningModeManualStop); });
-                } else if (strcmp(state->valuestring, "stop") == 0) {
-                    Schedule([this]() { StopListening(); });
-                }
             }
         } else if (strcmp(type->valuestring, "play_url") == 0) {
             auto url = cJSON_GetObjectItem(root, "url");
@@ -1095,22 +996,6 @@ void Application::Start()
                 });
             } else {
                 ESP_LOGW(TAG, "play_url missing 'url' field");
-            }
-        } else if (strcmp(type->valuestring, "auto_update") == 0) {
-            auto url = cJSON_GetObjectItem(root, "url");
-            if (cJSON_IsString(url)) {
-                ESP_LOGI(TAG, "Auto update requested with URL: %s", url->valuestring);
-                Schedule([url_str = std::string(url->valuestring)]() {
-                    auto& updater = AnimationUpdater::GetInstance();
-                    bool success = updater.DownloadMegaFileFromUrl(url_str);
-                    if (success) {
-                        ESP_LOGI(TAG, "Auto update completed successfully");
-                    } else {
-                        ESP_LOGE(TAG, "Auto update failed");
-                    }
-                });
-            } else {
-                ESP_LOGW(TAG, "auto_update command requires url field");
             }
         } else {
             ESP_LOGW(TAG, "Unknown message type: %s", type->valuestring);
@@ -1270,19 +1155,6 @@ void Application::OnClockTimer()
         // SystemInfo::PrintTaskList();
         SystemInfo::PrintHeapStats();
 
-        // Check for WebSocket inactivity and close proactively
-        // Close WebSocket if it's been idle for 60 seconds (shorter than the 120s timeout)
-        // This ensures fresh connections for new conversations
-        if (websocket_protocol_ && websocket_protocol_->IsAudioChannelOpened()) {
-            if (websocket_protocol_->IsInactiveFor(60)) {
-                ESP_LOGI(TAG, "WebSocket inactive for 60+ seconds, closing proactively");
-                Schedule([this]() {
-                    websocket_protocol_->CloseAudioChannel();
-                    SetDeviceState(kDeviceStateIdle);
-                });
-            }
-        }
-
         // If we have synchronized server time, set the status to clock "HH:MM" if the device is idle
         if (ota_.HasServerTime())
         {
@@ -1378,32 +1250,6 @@ void Application::OnAudioOutput()
     std::unique_lock<std::mutex> lock(mutex_);
     if (audio_decode_queue_.empty())
     {
-        // If we're in speaking state and queue is empty, audio playback has finished
-        // Automatically transition to listening (fallback if TTS stop message wasn't received)
-        // Also handle case where device was forced to idle prematurely
-        if ((device_state_ == kDeviceStateSpeaking || device_state_ == kDeviceStateIdle) && !busy_decoding_audio_)
-        {
-            auto duration_since_last_output = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_output_time_).count();
-            // CRITICAL FIX: Transition immediately if queue is empty and not busy decoding
-            // Only wait 100ms to ensure any in-flight packets are processed, but transition quickly
-            // This prevents race condition with OnAudioChannelClosed forcing idle state
-            // Works even if device was already forced to idle
-            if (duration_since_last_output > 100)
-            {
-                lock.unlock();
-                ESP_LOGI(TAG, "Audio queue empty, state=%d, not busy decoding - automatically transitioning to listening (fallback, delay=%ldms)", device_state_, duration_since_last_output);
-                Schedule([this, was_speaking = (device_state_ == kDeviceStateSpeaking)]() {
-                    // Double-check state - transition to listening even if forced to idle
-                    if (device_state_ == kDeviceStateSpeaking || (was_speaking && device_state_ == kDeviceStateIdle)) {
-                        ESP_LOGI(TAG, "TTS audio finished (queue empty), automatically starting listening (was_speaking=%d, current_state=%d)", was_speaking, device_state_);
-                        SetDeviceState(kDeviceStateListening);
-                    } else {
-                        ESP_LOGW(TAG, "Device state changed to %d before automatic transition could complete", device_state_);
-                    }
-                });
-                return;
-            }
-        }
         // Disable the output if there is no audio data for a long time
         if (device_state_ == kDeviceStateIdle)
         {
@@ -1846,25 +1692,11 @@ Protocol* Application::GetActiveProtocol() {
     return protocol_.get();
 }
 
-bool Application::IsWebSocketConnected() const {
-    return websocket_protocol_ != nullptr && websocket_protocol_->IsAudioChannelOpened();
-}
-
 void Application::OpenWebSocketConnection() {
-    // If WebSocket protocol already exists and is opened, close it first to ensure clean state
-    // This allows ws_start to always create a fresh connection for each new conversation
-    // Always close existing WebSocket connection when ws_start arrives to ensure fresh session
+    // If WebSocket protocol already exists and is opened, do nothing
     if (websocket_protocol_ && websocket_protocol_->IsAudioChannelOpened()) {
-        ESP_LOGI(TAG, "WebSocket connection already open, closing it first for fresh connection");
-        websocket_protocol_->CloseAudioChannel();
-        // Small delay to ensure clean closure
-        vTaskDelay(pdMS_TO_TICKS(100));
-    }
-    // Also reset the protocol instance if it exists but connection is closed (stale instance)
-    // This ensures we always get a fresh connection setup
-    if (websocket_protocol_ && !websocket_protocol_->IsAudioChannelOpened()) {
-        ESP_LOGI(TAG, "WebSocket protocol exists but connection is closed, resetting for fresh connection");
-        websocket_protocol_.reset();
+        ESP_LOGI(TAG, "WebSocket connection already open");
+        return;
     }
     
     // Create WebSocket protocol if it doesn't exist
@@ -1896,15 +1728,7 @@ void Application::OpenWebSocketConnection() {
         websocket_protocol_->OnAudioChannelClosed([this, &board = Board::GetInstance()]() {
             board.SetPowerSaveMode(true);
             Schedule([this]() {
-                // CRITICAL FIX: Don't force idle if we're in speaking state - we should transition to listening instead
-                // Only go to idle if we're already idle or in a state that doesn't need the connection
-                if (device_state_ == kDeviceStateSpeaking) {
-                    ESP_LOGI(TAG, "WebSocket audio channel closed during speaking - transitioning to listening instead of idle");
-                    SetDeviceState(kDeviceStateListening);
-                } else if (device_state_ != kDeviceStateListening) {
-                    // Only set to idle if not in listening state (listening state might have connection open)
-                    SetDeviceState(kDeviceStateIdle);
-                }
+                SetDeviceState(kDeviceStateIdle);
             });
         });
         
@@ -1919,45 +1743,36 @@ void Application::OpenWebSocketConnection() {
             
             if (strcmp(type->valuestring, "tts") == 0) {
                 auto state = cJSON_GetObjectItem(root, "state");
-                ESP_LOGI(TAG, "Received TTS message, state: %s", state ? state->valuestring : "null");
                 if (strcmp(state->valuestring, "start") == 0) {
-                    ESP_LOGI(TAG, "TTS start received, transitioning to speaking state");
                     Schedule([this]() {
                         aborted_ = false;
-                        // Track state before TTS starts - if TTS starts from idle, it's likely an alarm/notification
-                        state_before_tts_ = device_state_;
-                        ESP_LOGI(TAG, "TTS start handler: current device state=%d", device_state_);
                         if (device_state_ == kDeviceStateIdle || device_state_ == kDeviceStateListening) {
-                            // If TTS starts from idle (not from listening), treat as alarm mode
-                            // This handles alarms/notifications that wake the device
-                            if (state_before_tts_ == kDeviceStateIdle) {
-                                is_alarm_mode_ = true;
-                                ESP_LOGI(TAG, "TTS started from idle state (WebSocket) - treating as alarm mode");
-                            }
-                            ESP_LOGI(TAG, "Transitioning to speaking state for TTS");
                             SetDeviceState(kDeviceStateSpeaking);
-                        } else {
-                            ESP_LOGW(TAG, "TTS start received but device state is %d, not transitioning", device_state_);
                         }
                     });
                 } else if (strcmp(state->valuestring, "stop") == 0) {
-                    ESP_LOGI(TAG, "TTS stop message received via WebSocket");
                     Schedule([this]() {
-                        ESP_LOGI(TAG, "TTS stop handler executing, current state=%d", device_state_);
                         background_task_->WaitForCompletion();
-                        // CRITICAL FIX: Always transition to listening after TTS stops, even if already idle
-                        // This handles the case where OnAudioChannelClosed forced idle prematurely
-                        // WebSocket TTS handler: Always listen after TTS completes - listening_mode_ only controls how to stop
-                        if (device_state_ == kDeviceStateSpeaking || device_state_ == kDeviceStateIdle) {
-                            ESP_LOGI(TAG, "TTS stopped (WebSocket), automatically starting listening (current state=%d, mode=%d)", device_state_, listening_mode_);
-                            SetDeviceState(kDeviceStateListening);
-                            state_before_tts_ = kDeviceStateUnknown;  // Reset tracking
-                            // Clear alarm mode after handling
-                            if (is_alarm_mode_) {
-                                is_alarm_mode_ = false;
+                        if (device_state_ == kDeviceStateSpeaking) {
+                            // Check if remote wakeup scenario (WebSocket still open)
+                            auto* active_protocol = GetActiveProtocol();
+                            bool is_remote_wakeup = (websocket_protocol_ != nullptr && 
+                                                    websocket_protocol_->IsAudioChannelOpened() &&
+                                                    active_protocol && active_protocol->IsAudioChannelOpened());
+                            
+                            if (is_remote_wakeup) {
+                                // Automatically resume listening after TTS in remote wakeup scenario
+                                ESP_LOGI(TAG, "TTS stopped (WebSocket), remote wakeup detected - automatically resuming listening");
+                                SetDeviceState(kDeviceStateListening);
+                            } else if (listening_mode_ == kListeningModeManualStop) {
+                                // Go to idle for manual interactions
+                                ESP_LOGI(TAG, "TTS stopped (WebSocket), going to idle (manual stop mode)");
+                                SetDeviceState(kDeviceStateIdle);
+                            } else {
+                                // Auto mode: resume listening
+                                ESP_LOGI(TAG, "TTS stopped (WebSocket), automatically resuming listening (auto stop mode)");
+                                SetDeviceState(kDeviceStateListening);
                             }
-                        } else {
-                            ESP_LOGW(TAG, "TTS stop received but device state is %d (not speaking/idle), ignoring", device_state_);
                         }
                     });
                 } else if (strcmp(state->valuestring, "sentence_start") == 0) {
@@ -1982,10 +1797,19 @@ void Application::OpenWebSocketConnection() {
                 auto state = cJSON_GetObjectItem(root, "state");
                 if (cJSON_IsString(state)) {
                     if (strcmp(state->valuestring, "start") == 0) {
-                        Schedule([this]() { SetListeningMode(kListeningModeManualStop); });
+                        ESP_LOGI(TAG, "Received listen:start from server (WebSocket), starting listening");
+                        Schedule([this]() { 
+                            ESP_LOGI(TAG, "Executing listen:start - setting listening mode");
+                            SetListeningMode(kListeningModeManualStop); 
+                        });
                     } else if (strcmp(state->valuestring, "stop") == 0) {
+                        ESP_LOGI(TAG, "Received listen:stop from server (WebSocket), stopping listening");
                         Schedule([this]() { StopListening(); });
+                    } else {
+                        ESP_LOGW(TAG, "Received listen message with unknown state: %s", state->valuestring);
                     }
+                } else {
+                    ESP_LOGW(TAG, "Received listen message without valid state field");
                 }
             }
             // Add other message type handlers as needed
@@ -2013,12 +1837,20 @@ void Application::OpenWebSocketConnection() {
     // Works even in alarm mode (when alerts are shown) since alerts don't change device state
     if (device_state_ == kDeviceStateIdle) {
         ESP_LOGI(TAG, "Remote wakeup: WebSocket opened via ws_start, automatically entering listening state");
-        // Set listening mode to manual for remote wakeup (button will control stop)
-        SetListeningMode(kListeningModeManualStop);
-        // SetListeningMode() calls SetDeviceState(kDeviceStateListening) which will:
-        // - Turn on red light (via led->OnStateChanged())
-        // - Send listen start message
-        // - Start audio capture
+        // Small delay to ensure WebSocket connection is fully ready before starting listening
+        // This prevents race conditions where connection might not be ready immediately
+        vTaskDelay(pdMS_TO_TICKS(100));
+        // Verify connection is still open before proceeding
+        if (websocket_protocol_ && websocket_protocol_->IsAudioChannelOpened()) {
+            // Set listening mode to manual for remote wakeup (button will control stop)
+            SetListeningMode(kListeningModeManualStop);
+            // SetListeningMode() calls SetDeviceState(kDeviceStateListening) which will:
+            // - Turn on red light (via led->OnStateChanged())
+            // - Send listen start message
+            // - Start audio capture
+        } else {
+            ESP_LOGW(TAG, "WebSocket connection not ready after delay, cannot start listening automatically");
+        }
     }
     else if (device_state_ == kDeviceStateSpeaking) {
         // If speaking, abort speaking and enter listening mode (same as button press behavior)
