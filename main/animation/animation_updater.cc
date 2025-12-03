@@ -221,7 +221,7 @@ std::string AnimationUpdater::BuildMegaDownloadUrl() {
     std::string mac_encoded;
     mac_encoded.reserve(mac_lower.size() * 3);
     for (char c : mac_lower) {
-        if (c == ':') mac_encoded += "%3A"; else mac_encoded += c;
+        if (c == ':') mac_encoded += "%3a"; else mac_encoded += c;
     }
     return std::string("https://storage.googleapis.com/milu-public/device_bin/") + mac_encoded + "/mega.bin";
 }
