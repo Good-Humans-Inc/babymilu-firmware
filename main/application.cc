@@ -1481,7 +1481,10 @@ void Application::SetDeviceState(DeviceState state)
                 bool is_remote_wakeup = (websocket_protocol_ && 
                                        websocket_protocol_->IsAudioChannelOpened() && 
                                        previous_state == kDeviceStateIdle);
-                
+                // Ensure remote wake uses AutoStop so TTS stop resumes listening automatically
+                if (is_remote_wakeup && listening_mode_ == kListeningModeManualStop) {
+                    listening_mode_ = kListeningModeAutoStop;
+                }
                 ESP_LOGI(TAG, "Sending listen start message, mode=%d (0=auto, 1=manual, 2=realtime)%s", 
                         listening_mode_, is_remote_wakeup ? " [remote wakeup]" : "");
                 active_protocol->SendStartListening(listening_mode_);
