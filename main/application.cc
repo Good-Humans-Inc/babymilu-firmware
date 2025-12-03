@@ -866,6 +866,7 @@ void Application::Start()
                 });
             } else if (strcmp(state->valuestring, "stop") == 0) {
                 Schedule([this]() {
+                    ESP_LOGI(TAG, "TTS stop (primary): state=%d, listening_mode=%d", device_state_, (int)listening_mode_);
                     background_task_->WaitForCompletion();
                     if (device_state_ == kDeviceStateSpeaking) {
                         // Check if remote wakeup scenario (WebSocket still open)
@@ -1481,6 +1482,17 @@ void Application::SetDeviceState(DeviceState state)
                 bool is_remote_wakeup = (websocket_protocol_ && 
                                        websocket_protocol_->IsAudioChannelOpened() && 
                                        previous_state == kDeviceStateIdle);
+                // Debug preflight to confirm active protocol, channel status, audio state, and mode
+                {
+                    bool ws_open = (websocket_protocol_ && websocket_protocol_->IsAudioChannelOpened());
+                    const char* active_name = (active_protocol == websocket_protocol_.get() ? "ws"
+                                                : (active_protocol ? "mqtt" : "null"));
+                    ESP_LOGI(TAG, "DEBUG listen preflight: active=%s, ws_open=%d, audio_running=%d, mode=%d",
+                             active_name,
+                             ws_open ? 1 : 0,
+                             audio_processor_->IsRunning() ? 1 : 0,
+                             (int)listening_mode_);
+                }
                 // Hard-force AutoStop for remote wake so TTS stop resumes listening automatically
                 if (is_remote_wakeup) {
                     listening_mode_ = kListeningModeAutoStop;
@@ -1755,6 +1767,7 @@ void Application::OpenWebSocketConnection() {
                     });
                 } else if (strcmp(state->valuestring, "stop") == 0) {
                     Schedule([this]() {
+                        ESP_LOGI(TAG, "TTS stop (WebSocket): state=%d, listening_mode=%d", device_state_, (int)listening_mode_);
                         background_task_->WaitForCompletion();
                         if (device_state_ == kDeviceStateSpeaking) {
                             // Check if remote wakeup scenario (WebSocket still open)
