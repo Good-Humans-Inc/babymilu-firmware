@@ -208,7 +208,7 @@ bool AnimationUpdater::ForceUpdateCheck() {
 }
 
 std::string AnimationUpdater::BuildMegaDownloadUrl() {
-    // Direct GCS URL for mega.bin scoped by device MAC (uppercase + URL-encoded ':')
+    // Direct GCS URL for mega.bin scoped by device MAC (lowercase + URL-encoded ':')
     // Use configured server URL if available
     if (!server_url_.empty()) {
         return server_url_;
@@ -216,11 +216,11 @@ std::string AnimationUpdater::BuildMegaDownloadUrl() {
     
     // Fallback: construct URL from MAC address (legacy behavior)
     std::string mac = SystemInfo::GetMacAddress();
-    std::string mac_upper = mac;
-    std::transform(mac_upper.begin(), mac_upper.end(), mac_upper.begin(), [](unsigned char c){ return (unsigned char)std::toupper(c); });
+    std::string mac_lower = mac;
+    std::transform(mac_lower.begin(), mac_lower.end(), mac_lower.begin(), [](unsigned char c){ return (unsigned char)std::tolower(c); });
     std::string mac_encoded;
-    mac_encoded.reserve(mac_upper.size() * 3);
-    for (char c : mac_upper) {
+    mac_encoded.reserve(mac_lower.size() * 3);
+    for (char c : mac_lower) {
         if (c == ':') mac_encoded += "%3A"; else mac_encoded += c;
     }
     return std::string("https://storage.googleapis.com/milu-public/device_bin/") + mac_encoded + "/mega.bin";
