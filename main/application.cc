@@ -1842,8 +1842,8 @@ void Application::OpenWebSocketConnection() {
         vTaskDelay(pdMS_TO_TICKS(100));
         // Verify connection is still open before proceeding
         if (websocket_protocol_ && websocket_protocol_->IsAudioChannelOpened()) {
-            // Set listening mode to manual for remote wakeup (button will control stop)
-            SetListeningMode(kListeningModeManualStop);
+            // Use AutoStop for remote wake so TTS stop resumes listening automatically
+            SetListeningMode(kListeningModeAutoStop);
             // SetListeningMode() calls SetDeviceState(kDeviceStateListening) which will:
             // - Turn on red light (via led->OnStateChanged())
             // - Send listen start message
@@ -1857,7 +1857,7 @@ void Application::OpenWebSocketConnection() {
         ESP_LOGI(TAG, "Remote wakeup: Device is speaking, aborting and entering listening state");
         Schedule([this]() {
             AbortSpeaking(kAbortReasonNone);
-            SetListeningMode(kListeningModeManualStop);
+            SetListeningMode(kListeningModeAutoStop);
         });
     }
     // If we're already in listening state (e.g., user pressed button before ws_start),
@@ -1881,6 +1881,6 @@ void Application::OpenWebSocketConnection() {
         // If we're in connecting state (e.g., connection just opened), enter listening mode
         // This handles the case where ws_start arrives while device is connecting
         ESP_LOGI(TAG, "Remote wakeup: Device is connecting, entering listening state");
-        SetListeningMode(kListeningModeManualStop);
+        SetListeningMode(kListeningModeAutoStop);
     }
 }
