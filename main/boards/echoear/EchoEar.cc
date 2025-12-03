@@ -565,14 +565,17 @@ private:
 
     void InitializeButtons()
     {
-        boot_button_.OnClick([this]() {
-            auto &app = Application::GetInstance();
-            if (app.GetDeviceState() == kDeviceStateStarting && !WifiStation::GetInstance().IsConnected()) {
-                ESP_LOGI(TAG, "Boot button pressed, enter WiFi configuration mode");
-                ResetWifiConfiguration();
-            }
-            app.ToggleChatState();
+        boot_button_.OnPressDown([this]() {
+            ESP_LOGI(TAG, "Boot button is pressed");
         });
+        // boot_button_.OnClick([this]() {
+        //     auto &app = Application::GetInstance();
+        //     // if (app.GetDeviceState() == kDeviceStateStarting && !WifiStation::GetInstance().IsConnected()) {
+        //     //     ESP_LOGI(TAG, "Boot button pressed, enter WiFi configuration mode");
+        //     //     ResetWifiConfiguration();
+        //     // }
+        //     app.ToggleChatState();
+        // });
         gpio_config_t power_gpio_config = {
             .pin_bit_mask = (BIT64(POWER_CTRL)),
             .mode = GPIO_MODE_OUTPUT,
