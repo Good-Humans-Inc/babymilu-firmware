@@ -939,8 +939,8 @@ void Application::Start()
                 if (strcmp(state->valuestring, "start") == 0) {
                     ESP_LOGI(TAG, "Received listen:start from server, starting listening");
                     Schedule([this]() { 
-                        ESP_LOGI(TAG, "Executing listen:start - setting listening mode");
-                        SetListeningMode(kListeningModeManualStop); 
+                        ESP_LOGI(TAG, "Executing listen:start - setting listening mode (AutoStop)");
+                        SetListeningMode(kListeningModeAutoStop); 
                     });
                 } else if (strcmp(state->valuestring, "stop") == 0) {
                     ESP_LOGI(TAG, "Received listen:stop from server, stopping listening");
@@ -1481,8 +1481,8 @@ void Application::SetDeviceState(DeviceState state)
                 bool is_remote_wakeup = (websocket_protocol_ && 
                                        websocket_protocol_->IsAudioChannelOpened() && 
                                        previous_state == kDeviceStateIdle);
-                // Ensure remote wake uses AutoStop so TTS stop resumes listening automatically
-                if (is_remote_wakeup && listening_mode_ == kListeningModeManualStop) {
+                // Hard-force AutoStop for remote wake so TTS stop resumes listening automatically
+                if (is_remote_wakeup) {
                     listening_mode_ = kListeningModeAutoStop;
                 }
                 ESP_LOGI(TAG, "Sending listen start message, mode=%d (0=auto, 1=manual, 2=realtime)%s", 
@@ -1802,8 +1802,8 @@ void Application::OpenWebSocketConnection() {
                     if (strcmp(state->valuestring, "start") == 0) {
                         ESP_LOGI(TAG, "Received listen:start from server (WebSocket), starting listening");
                         Schedule([this]() { 
-                            ESP_LOGI(TAG, "Executing listen:start - setting listening mode");
-                            SetListeningMode(kListeningModeManualStop); 
+                            ESP_LOGI(TAG, "Executing listen:start - setting listening mode (AutoStop)");
+                            SetListeningMode(kListeningModeAutoStop); 
                         });
                     } else if (strcmp(state->valuestring, "stop") == 0) {
                         ESP_LOGI(TAG, "Received listen:stop from server (WebSocket), stopping listening");
