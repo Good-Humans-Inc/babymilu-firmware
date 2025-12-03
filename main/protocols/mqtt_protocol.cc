@@ -114,7 +114,7 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
     mqtt_->SetKeepAlive(keepalive_interval);
 
     mqtt_->OnDisconnected([this]() {
-        ESP_LOGI(TAG, "Disconnected from endpoint");
+        ESP_LOGI(TAG, "Disconnected from endpoint - will automatically reconnect");
         
         // Prevent double reconnection race condition
         if (reconnecting_) {
@@ -124,28 +124,9 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
         
         reconnecting_ = true;
         
-        // Use our own reconnection with exponential backoff (200-500ms)
-        // Disable esp-mqtt auto-reconnect to avoid conflicts
-        // Start with current backoff delay, increase on retries (capped at 500ms)
-        int backoff_ms = reconnect_backoff_ms_;
-        
-        // Schedule reconnection attempt on application thread with backoff
-        Application::GetInstance().Schedule([this, backoff_ms]() {
-            vTaskDelay(pdMS_TO_TICKS(backoff_ms));  // Backoff delay
-            
-            if (mqtt_ != nullptr && !mqtt_->IsConnected()) {
-                ESP_LOGI(TAG, "Attempting MQTT reconnection after disconnect (backoff: %dms)", backoff_ms);
-                if (!StartMqttClient(false)) {  // Don't report error on reconnect
-                    // If reconnection fails, increase backoff for next retry (capped at 500ms)
-                    reconnect_backoff_ms_ = std::min(reconnect_backoff_ms_ + 100, 500);
-                    ESP_LOGW(TAG, "MQTT reconnection failed, will retry with backoff: %dms", reconnect_backoff_ms_);
-                } else {
-                    // Reconnection succeeded, reset backoff to initial value
-                    reconnect_backoff_ms_ = 200;
-                }
-            }
-            reconnecting_ = false;
-        });
+        // Start continuous reconnection attempts with exponential backoff
+        // This will keep retrying until the server comes back online
+        AttemptReconnection();
     });
 
     mqtt_->OnConnected([this, client_id]() {
@@ -186,12 +167,18 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
 
     mqtt_->OnMessage([this](const std::string& topic, const std::string& payload) {
         // Log every inbound MQTT message (topic, size, and a short prefix of the payload)
-        const int kPreviewLen = 120;
+        const int kPreviewLen = 200;  // Increased to see more of the message
         ESP_LOGI(TAG, "MQTT RX topic=%s len=%u prefix=%.*s",
                  topic.c_str(),
                  (unsigned)payload.size(),
                  (int)std::min((int)payload.size(), kPreviewLen),
                  payload.c_str());
+        
+        // Check if this is a listen message for immediate visibility
+        if (payload.find("\"type\":\"listen\"") != std::string::npos || 
+            payload.find("type\":\"listen\"") != std::string::npos) {
+            ESP_LOGI(TAG, "*** LISTEN MESSAGE DETECTED IN MQTT PAYLOAD ***");
+        }
         cJSON* root = cJSON_Parse(payload.c_str());
         if (root == nullptr) {
             ESP_LOGE(TAG, "Failed to parse json message %s", payload.c_str());
@@ -256,8 +243,15 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
                     CloseAudioChannel();
                 });
             }
-        } else if (on_incoming_json_ != nullptr) {
-            on_incoming_json_(root);
+            // Don't forward goodbye to on_incoming_json_ as it's a protocol-level message
+        } else {
+            // Forward all other message types (including "listen", "tts", "stt", etc.) to Application handler
+            ESP_LOGI(TAG, "Forwarding MQTT message type '%s' to Application::OnIncomingJson", type->valuestring);
+            if (on_incoming_json_ != nullptr) {
+                on_incoming_json_(root);
+            } else {
+                ESP_LOGW(TAG, "on_incoming_json_ callback is null, cannot forward message type '%s'", type->valuestring);
+            }
         }
         cJSON_Delete(root);
         last_incoming_time_ = std::chrono::steady_clock::now();
@@ -320,6 +314,59 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
     }
     
     return true;
+}
+
+void MqttProtocol::AttemptReconnection() {
+    // Check if already connected (another thread might have connected)
+    if (mqtt_ != nullptr && mqtt_->IsConnected()) {
+        ESP_LOGI(TAG, "MQTT already connected, stopping reconnection attempts");
+        reconnecting_ = false;
+        reconnect_backoff_ms_ = 200;  // Reset backoff for next time
+        return;
+    }
+    
+    // Get current backoff delay
+    int backoff_ms = reconnect_backoff_ms_;
+    
+    // Schedule reconnection attempt on application thread with backoff
+    Application::GetInstance().Schedule([this, backoff_ms]() {
+        vTaskDelay(pdMS_TO_TICKS(backoff_ms));  // Backoff delay
+        
+        // Check again if connected (might have been connected by another thread)
+        if (mqtt_ != nullptr && mqtt_->IsConnected()) {
+            ESP_LOGI(TAG, "MQTT connected during backoff, stopping reconnection");
+            reconnecting_ = false;
+            reconnect_backoff_ms_ = 200;  // Reset backoff
+            return;
+        }
+        
+        ESP_LOGI(TAG, "Attempting MQTT reconnection (backoff: %dms)", backoff_ms);
+        
+        if (!StartMqttClient(false)) {  // Don't report error on reconnect
+            // Reconnection failed - increase backoff exponentially (200ms -> 500ms -> 1s -> 2s -> 5s -> 10s max)
+            if (reconnect_backoff_ms_ < 500) {
+                reconnect_backoff_ms_ = std::min(reconnect_backoff_ms_ + 100, 500);
+            } else if (reconnect_backoff_ms_ < 1000) {
+                reconnect_backoff_ms_ = 1000;
+            } else if (reconnect_backoff_ms_ < 2000) {
+                reconnect_backoff_ms_ = 2000;
+            } else if (reconnect_backoff_ms_ < 5000) {
+                reconnect_backoff_ms_ = 5000;
+            } else {
+                reconnect_backoff_ms_ = 10000;  // Cap at 10 seconds
+            }
+            
+            ESP_LOGW(TAG, "MQTT reconnection failed, will retry in %dms (server may be restarting)", reconnect_backoff_ms_);
+            
+            // Schedule next retry attempt (continuous retry loop)
+            AttemptReconnection();
+        } else {
+            // Reconnection succeeded!
+            ESP_LOGI(TAG, "MQTT reconnection successful after server restart");
+            reconnecting_ = false;
+            reconnect_backoff_ms_ = 200;  // Reset backoff to initial value for next time
+        }
+    });
 }
 
 bool MqttProtocol::SendText(const std::string& text) {

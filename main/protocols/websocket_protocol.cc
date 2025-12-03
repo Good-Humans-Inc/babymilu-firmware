@@ -271,18 +271,31 @@ bool WebsocketProtocol::OpenAudioChannel() {
             }
         } else {
             // Parse JSON data
+            ESP_LOGI(TAG, "WS RX text message len=%u data=%.*s", (unsigned)len, (int)std::min((int)len, 200), data);
             auto root = cJSON_Parse(data);
+            if (root == nullptr) {
+                ESP_LOGE(TAG, "Failed to parse WebSocket JSON message: %.*s", (int)std::min((int)len, 200), data);
+                return;
+            }
             auto type = cJSON_GetObjectItem(root, "type");
             if (cJSON_IsString(type)) {
+                ESP_LOGI(TAG, "WS RX message type: %s", type->valuestring);
+                // Check if this is a listen message for immediate visibility
+                if (strcmp(type->valuestring, "listen") == 0) {
+                    ESP_LOGI(TAG, "*** LISTEN MESSAGE DETECTED IN WEBSOCKET ***");
+                }
                 if (strcmp(type->valuestring, "hello") == 0) {
                     ParseServerHello(root);
                 } else {
+                    ESP_LOGI(TAG, "Forwarding WebSocket message type '%s' to Application::OnIncomingJson", type->valuestring);
                     if (on_incoming_json_ != nullptr) {
                         on_incoming_json_(root);
+                    } else {
+                        ESP_LOGW(TAG, "on_incoming_json_ callback is null, cannot forward WebSocket message type '%s'", type->valuestring);
                     }
                 }
             } else {
-                ESP_LOGE(TAG, "Missing message type, data: %s", data);
+                ESP_LOGE(TAG, "Missing message type in WebSocket message, data: %.*s", (int)std::min((int)len, 200), data);
             }
             cJSON_Delete(root);
         }

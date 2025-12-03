@@ -400,6 +400,7 @@ void Application::Alert(const char *status, const char *message, const char *emo
 
 void Application::DismissAlert()
 {
+    is_alarm_mode_ = false;  // Clear alarm mode when alert is dismissed
     if (device_state_ == kDeviceStateIdle)
     {
         auto display = Board::GetInstance().GetDisplay();
@@ -904,30 +905,70 @@ void Application::Start()
             /* removed unused: display */
             // DISABLED: Comment out transcript display to reduce memory usage
             // display->SetChatMessage("system", "");
-            SetDeviceState(kDeviceStateIdle);
+            // CRITICAL FIX: Don't force idle if we're in speaking state - we should transition to listening instead
+            // Only go to idle if we're already idle or in a state that doesn't need the connection
+            if (device_state_ == kDeviceStateSpeaking) {
+                ESP_LOGI(TAG, "Audio channel closed during speaking - transitioning to listening instead of idle");
+                SetDeviceState(kDeviceStateListening);
+            } else if (device_state_ != kDeviceStateListening) {
+                // Only set to idle if not in listening state (listening state might have connection open)
+                SetDeviceState(kDeviceStateIdle);
+            }
         }); });
     protocol_->OnIncomingJson([this, display](const cJSON *root)
                               {
+        // Log incoming JSON for debugging (first 200 chars)
+        char* json_str = cJSON_PrintUnformatted(root);
+        if (json_str) {
+            int len = strlen(json_str);
+            ESP_LOGI(TAG, "Incoming JSON: %.*s", len > 200 ? 200 : len, json_str);
+            cJSON_free(json_str);
+        }
+        
         // Parse JSON data
         auto type = cJSON_GetObjectItem(root, "type");
+        if (!cJSON_IsString(type)) {
+            ESP_LOGW(TAG, "Received JSON without valid type field");
+            return;
+        }
+        
+        ESP_LOGI(TAG, "Application::OnIncomingJson processing type: %s", type->valuestring);
+        
         if (strcmp(type->valuestring, "tts") == 0) {
             auto state = cJSON_GetObjectItem(root, "state");
             if (strcmp(state->valuestring, "start") == 0) {
                 Schedule([this]() {
                     aborted_ = false;
+                    // Track state before TTS starts - if TTS starts from idle, it's likely an alarm/notification
+                    state_before_tts_ = device_state_;
                     if (device_state_ == kDeviceStateIdle || device_state_ == kDeviceStateListening) {
+                        // If TTS starts from idle (not from listening), treat as alarm mode
+                        // This handles alarms/notifications that wake the device
+                        if (state_before_tts_ == kDeviceStateIdle) {
+                            is_alarm_mode_ = true;
+                            ESP_LOGI(TAG, "TTS started from idle state - treating as alarm mode");
+                        }
                         SetDeviceState(kDeviceStateSpeaking);
                     }
                 });
             } else if (strcmp(state->valuestring, "stop") == 0) {
+                ESP_LOGI(TAG, "TTS stop message received via primary protocol");
                 Schedule([this]() {
+                    ESP_LOGI(TAG, "TTS stop handler executing, current state=%d", device_state_);
                     background_task_->WaitForCompletion();
-                    if (device_state_ == kDeviceStateSpeaking) {
-                        if (listening_mode_ == kListeningModeManualStop) {
-                            SetDeviceState(kDeviceStateIdle);
-                        } else {
-                            SetDeviceState(kDeviceStateListening);
+                    // CRITICAL FIX: Always transition to listening after TTS stops, even if already idle
+                    // This handles the case where OnAudioChannelClosed forced idle prematurely
+                    // The listening_mode_ only controls HOW to stop listening, not whether to start it
+                    if (device_state_ == kDeviceStateSpeaking || device_state_ == kDeviceStateIdle) {
+                        ESP_LOGI(TAG, "TTS stopped, automatically starting listening (current state=%d, mode=%d)", device_state_, listening_mode_);
+                        SetDeviceState(kDeviceStateListening);
+                        state_before_tts_ = kDeviceStateUnknown;  // Reset tracking
+                        // Clear alarm mode after handling
+                        if (is_alarm_mode_) {
+                            is_alarm_mode_ = false;
                         }
+                    } else {
+                        ESP_LOGW(TAG, "TTS stop received but device state is %d (not speaking/idle), ignoring", device_state_);
                     }
                 });
             } else if (strcmp(state->valuestring, "sentence_start") == 0) {
@@ -974,6 +1015,24 @@ void Application::Start()
                 }
             }
 #endif
+        } else if (strcmp(type->valuestring, "listen") == 0) {
+            auto state = cJSON_GetObjectItem(root, "state");
+            if (cJSON_IsString(state)) {
+                if (strcmp(state->valuestring, "start") == 0) {
+                    ESP_LOGI(TAG, "Received listen:start from cloud, starting listening");
+                    Schedule([this]() { 
+                        ESP_LOGI(TAG, "Executing listen:start - setting listening mode");
+                        SetListeningMode(kListeningModeManualStop); 
+                    });
+                } else if (strcmp(state->valuestring, "stop") == 0) {
+                    ESP_LOGI(TAG, "Received listen:stop from cloud, stopping listening");
+                    Schedule([this]() { StopListening(); });
+                } else {
+                    ESP_LOGW(TAG, "Received listen message with unknown state: %s", state->valuestring);
+                }
+            } else {
+                ESP_LOGW(TAG, "Received listen message without valid state field");
+            }
         } else if (strcmp(type->valuestring, "system") == 0) {
             auto command = cJSON_GetObjectItem(root, "command");
             if (cJSON_IsString(command)) {
@@ -992,6 +1051,14 @@ void Application::Start()
             auto message = cJSON_GetObjectItem(root, "message");
             auto emotion = cJSON_GetObjectItem(root, "emotion");
             if (cJSON_IsString(status) && cJSON_IsString(message) && cJSON_IsString(emotion)) {
+                // Check if this is an alarm (status contains "alarm" or "Alarm")
+                const char* status_str = status->valuestring;
+                is_alarm_mode_ = (strstr(status_str, "alarm") != nullptr || 
+                                 strstr(status_str, "Alarm") != nullptr ||
+                                 strstr(status_str, "ALARM") != nullptr);
+                if (is_alarm_mode_) {
+                    ESP_LOGI(TAG, "Alarm mode activated (status: %s)", status_str);
+                }
                 Alert(status->valuestring, message->valuestring, emotion->valuestring, Lang::Sounds::P3_VIBRATION);
             } else {
                 ESP_LOGW(TAG, "Alert command requires status, message and emotion");
@@ -1311,6 +1378,32 @@ void Application::OnAudioOutput()
     std::unique_lock<std::mutex> lock(mutex_);
     if (audio_decode_queue_.empty())
     {
+        // If we're in speaking state and queue is empty, audio playback has finished
+        // Automatically transition to listening (fallback if TTS stop message wasn't received)
+        // Also handle case where device was forced to idle prematurely
+        if ((device_state_ == kDeviceStateSpeaking || device_state_ == kDeviceStateIdle) && !busy_decoding_audio_)
+        {
+            auto duration_since_last_output = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_output_time_).count();
+            // CRITICAL FIX: Transition immediately if queue is empty and not busy decoding
+            // Only wait 100ms to ensure any in-flight packets are processed, but transition quickly
+            // This prevents race condition with OnAudioChannelClosed forcing idle state
+            // Works even if device was already forced to idle
+            if (duration_since_last_output > 100)
+            {
+                lock.unlock();
+                ESP_LOGI(TAG, "Audio queue empty, state=%d, not busy decoding - automatically transitioning to listening (fallback, delay=%ldms)", device_state_, duration_since_last_output);
+                Schedule([this, was_speaking = (device_state_ == kDeviceStateSpeaking)]() {
+                    // Double-check state - transition to listening even if forced to idle
+                    if (device_state_ == kDeviceStateSpeaking || (was_speaking && device_state_ == kDeviceStateIdle)) {
+                        ESP_LOGI(TAG, "TTS audio finished (queue empty), automatically starting listening (was_speaking=%d, current_state=%d)", was_speaking, device_state_);
+                        SetDeviceState(kDeviceStateListening);
+                    } else {
+                        ESP_LOGW(TAG, "Device state changed to %d before automatic transition could complete", device_state_);
+                    }
+                });
+                return;
+            }
+        }
         // Disable the output if there is no audio data for a long time
         if (device_state_ == kDeviceStateIdle)
         {
@@ -1803,7 +1896,15 @@ void Application::OpenWebSocketConnection() {
         websocket_protocol_->OnAudioChannelClosed([this, &board = Board::GetInstance()]() {
             board.SetPowerSaveMode(true);
             Schedule([this]() {
-                SetDeviceState(kDeviceStateIdle);
+                // CRITICAL FIX: Don't force idle if we're in speaking state - we should transition to listening instead
+                // Only go to idle if we're already idle or in a state that doesn't need the connection
+                if (device_state_ == kDeviceStateSpeaking) {
+                    ESP_LOGI(TAG, "WebSocket audio channel closed during speaking - transitioning to listening instead of idle");
+                    SetDeviceState(kDeviceStateListening);
+                } else if (device_state_ != kDeviceStateListening) {
+                    // Only set to idle if not in listening state (listening state might have connection open)
+                    SetDeviceState(kDeviceStateIdle);
+                }
             });
         });
         
@@ -1823,8 +1924,16 @@ void Application::OpenWebSocketConnection() {
                     ESP_LOGI(TAG, "TTS start received, transitioning to speaking state");
                     Schedule([this]() {
                         aborted_ = false;
+                        // Track state before TTS starts - if TTS starts from idle, it's likely an alarm/notification
+                        state_before_tts_ = device_state_;
                         ESP_LOGI(TAG, "TTS start handler: current device state=%d", device_state_);
                         if (device_state_ == kDeviceStateIdle || device_state_ == kDeviceStateListening) {
+                            // If TTS starts from idle (not from listening), treat as alarm mode
+                            // This handles alarms/notifications that wake the device
+                            if (state_before_tts_ == kDeviceStateIdle) {
+                                is_alarm_mode_ = true;
+                                ESP_LOGI(TAG, "TTS started from idle state (WebSocket) - treating as alarm mode");
+                            }
                             ESP_LOGI(TAG, "Transitioning to speaking state for TTS");
                             SetDeviceState(kDeviceStateSpeaking);
                         } else {
@@ -1832,14 +1941,23 @@ void Application::OpenWebSocketConnection() {
                         }
                     });
                 } else if (strcmp(state->valuestring, "stop") == 0) {
+                    ESP_LOGI(TAG, "TTS stop message received via WebSocket");
                     Schedule([this]() {
+                        ESP_LOGI(TAG, "TTS stop handler executing, current state=%d", device_state_);
                         background_task_->WaitForCompletion();
-                        if (device_state_ == kDeviceStateSpeaking) {
-                            if (listening_mode_ == kListeningModeManualStop) {
-                                SetDeviceState(kDeviceStateIdle);
-                            } else {
-                                SetDeviceState(kDeviceStateListening);
+                        // CRITICAL FIX: Always transition to listening after TTS stops, even if already idle
+                        // This handles the case where OnAudioChannelClosed forced idle prematurely
+                        // WebSocket TTS handler: Always listen after TTS completes - listening_mode_ only controls how to stop
+                        if (device_state_ == kDeviceStateSpeaking || device_state_ == kDeviceStateIdle) {
+                            ESP_LOGI(TAG, "TTS stopped (WebSocket), automatically starting listening (current state=%d, mode=%d)", device_state_, listening_mode_);
+                            SetDeviceState(kDeviceStateListening);
+                            state_before_tts_ = kDeviceStateUnknown;  // Reset tracking
+                            // Clear alarm mode after handling
+                            if (is_alarm_mode_) {
+                                is_alarm_mode_ = false;
                             }
+                        } else {
+                            ESP_LOGW(TAG, "TTS stop received but device state is %d (not speaking/idle), ignoring", device_state_);
                         }
                     });
                 } else if (strcmp(state->valuestring, "sentence_start") == 0) {

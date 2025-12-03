@@ -51,6 +51,7 @@ private:
     uint32_t remote_sequence_;
 
     bool StartMqttClient(bool report_error=false);
+    void AttemptReconnection();  // Continuous retry until connected
     void ParseServerHello(const cJSON* root);
     std::string DecodeHexString(const std::string& hex_string);
 

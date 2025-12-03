@@ -81,6 +81,7 @@ public:
     void SendMcpMessage(const std::string& payload);
     void SetAecMode(AecMode mode);
     AecMode GetAecMode() const { return aec_mode_; }
+    bool IsAlarmModeActive() const { return is_alarm_mode_; }
     BackgroundTask* GetBackgroundTask() const { return background_task_; }
     void ClearWifiConfiguration();
     Protocol* GetActiveProtocol();  // Returns the protocol to use for audio (WebSocket if available, else primary)
@@ -104,6 +105,8 @@ private:
     volatile DeviceState device_state_ = kDeviceStateUnknown;
     ListeningMode listening_mode_ = kListeningModeAutoStop;
     AecMode aec_mode_ = kAecOff;
+    bool is_alarm_mode_ = false;  // Track if device is in alarm mode (for auto-listen after TTS)
+    DeviceState state_before_tts_ = kDeviceStateUnknown;  // Track state before TTS started (to detect alarm mode)
 
     bool aborted_ = false;
     bool voice_detected_ = false;
