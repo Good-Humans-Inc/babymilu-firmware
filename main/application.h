@@ -84,6 +84,11 @@ private:
     int clock_ticks_ = 0;
     TaskHandle_t check_new_version_task_handle_ = nullptr;
     TaskHandle_t main_event_loop_task_handle_ = nullptr;
+    
+    // VAD interrupt debounce state
+    int64_t speaking_start_time_us_ = 0;  // When speaking state started (for grace period)
+    int64_t vad_detected_time_us_ = 0;   // When VAD was first detected during speaking (for debounce)
+    bool vad_debounce_active_ = false;    // Whether we're currently in a debounce period
 
     void OnWakeWordDetected();
     void CheckNewVersion(Ota& ota);
