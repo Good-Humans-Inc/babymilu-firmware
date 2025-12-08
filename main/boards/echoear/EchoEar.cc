@@ -327,7 +327,7 @@ public:
         } else if (is_touched && was_touched_) {
             // Continuous touch (hold)
             event = TOUCH_HOLD;
-            ESP_LOGD("EchoEar", "TOUCH HOLD - x: %d, y: %d", tp_.x, tp_.y);
+            // ESP_LOGD("EchoEar", "TOUCH HOLD - x: %d, y: %d", tp_.x, tp_.y);
         }
 
         // Update previous state
@@ -465,22 +465,111 @@ private:
             return;
         }
 
+        // Swipe gesture tracking variables
+        static int swipe_start_x = -1;
+        static int swipe_start_y = -1;
+        static int swipe_last_x = -1;
+        static int swipe_last_y = -1;
+        static bool is_swiping = false;
+        const int SWIPE_THRESHOLD = 30;  // Minimum pixels for a swipe
+        const int VOLUME_STEP = 5;       // Volume change per swipe
+
         while (true) {
             if (touchpad->WaitForTouchEvent()) {
                 auto &app = Application::GetInstance();
                 auto &board = (EspS3Cat &)Board::GetInstance();
 
-                ESP_LOGI(TAG, "Touch event, TP_PIN_NUM_INT: %d", gpio_get_level(TP_PIN_NUM_INT));
+                // ESP_LOGI(TAG, "Touch event, TP_PIN_NUM_INT: %d", gpio_get_level(TP_PIN_NUM_INT));
                 touchpad->UpdateTouchPoint();
+                auto touch_point = touchpad->GetTouchPoint();
                 auto touch_event = touchpad->CheckTouchEvent();
 
-                if (touch_event == Cst816s::TOUCH_RELEASE) {
-                    if (app.GetDeviceState() == kDeviceStateStarting &&
-                            !WifiStation::GetInstance().IsConnected()) {
-                        board.ResetWifiConfiguration();
-                    } else {
-                        app.ToggleChatState();
+                if (touch_event == Cst816s::TOUCH_PRESS) {
+                    // Record initial touch position for swipe detection
+                    swipe_start_x = touch_point.x;
+                    swipe_start_y = touch_point.y;
+                    swipe_last_x = touch_point.x;
+                    swipe_last_y = touch_point.y;
+                    is_swiping = false;
+                    ESP_LOGD(TAG, "Touch press at (%d, %d)", swipe_start_x, swipe_start_y);
+                } else if (touch_event == Cst816s::TOUCH_HOLD) {
+                    // Track movement during hold - update last valid position
+                    if (touch_point.num > 0 && touch_point.x >= 0 && touch_point.y >= 0) {
+                        swipe_last_x = touch_point.x;
+                        swipe_last_y = touch_point.y;
+                        
+                        // Check if this is a vertical swipe (vertical movement > horizontal movement)
+                        if (swipe_start_x >= 0 && swipe_start_y >= 0) {
+                            int delta_x = swipe_last_x - swipe_start_x;
+                            int delta_y = swipe_last_y - swipe_start_y;
+                            int abs_delta_x = (delta_x < 0) ? -delta_x : delta_x;
+                            int abs_delta_y = (delta_y < 0) ? -delta_y : delta_y;
+                            
+                            if (abs_delta_y > abs_delta_x && abs_delta_y > SWIPE_THRESHOLD / 2) {
+                                is_swiping = true;
+                            }
+                        }
                     }
+                } else if (touch_event == Cst816s::TOUCH_RELEASE) {
+                    // Calculate swipe distance and direction using last valid position
+                    int end_x = (swipe_last_x >= 0) ? swipe_last_x : swipe_start_x;
+                    int end_y = (swipe_last_y >= 0) ? swipe_last_y : swipe_start_y;
+                    
+                    if (swipe_start_x >= 0 && swipe_start_y >= 0 && end_x >= 0 && end_y >= 0) {
+                        int delta_y = end_y - swipe_start_y;
+                        int abs_delta_y = (delta_y < 0) ? -delta_y : delta_y;
+                        int delta_x = end_x - swipe_start_x;
+                        int abs_delta_x = (delta_x < 0) ? -delta_x : delta_x;
+                        
+                        // Check if this was a vertical swipe (vertical movement > horizontal movement)
+                        if (abs_delta_y > abs_delta_x && abs_delta_y >= SWIPE_THRESHOLD) {
+                            // This is a vertical swipe - adjust volume
+                            auto* audio_codec = board.GetAudioCodec();
+                            if (audio_codec != nullptr) {
+                                int current_volume = audio_codec->output_volume();
+                                int volume_change = (abs_delta_y / SWIPE_THRESHOLD) * VOLUME_STEP;
+                                
+                                if (delta_y < 0) {
+                                    // Swipe up - increase volume
+                                    int new_volume = current_volume + volume_change;
+                                    if (new_volume > 100) new_volume = 100;
+                                    audio_codec->SetOutputVolume(new_volume);
+                                    ESP_LOGI(TAG, "Swipe UP detected: volume %d -> %d (swipe: %d pixels)", 
+                                             current_volume, new_volume, abs_delta_y);
+                                } else {
+                                    // Swipe down - decrease volume
+                                    int new_volume = current_volume - volume_change;
+                                    if (new_volume < 0) new_volume = 0;
+                                    audio_codec->SetOutputVolume(new_volume);
+                                    ESP_LOGI(TAG, "Swipe DOWN detected: volume %d -> %d (swipe: %d pixels)", 
+                                             current_volume, new_volume, abs_delta_y);
+                                }
+                            }
+                        } else {
+                            // Not a swipe - treat as tap (original behavior)
+                            if (app.GetDeviceState() == kDeviceStateStarting &&
+                                    !WifiStation::GetInstance().IsConnected()) {
+                                board.ResetWifiConfiguration();
+                            } else {
+                                app.ToggleChatState();
+                            }
+                        }
+                    } else {
+                        // No valid swipe data - treat as tap
+                        if (app.GetDeviceState() == kDeviceStateStarting &&
+                                !WifiStation::GetInstance().IsConnected()) {
+                            board.ResetWifiConfiguration();
+                        } else {
+                            app.ToggleChatState();
+                        }
+                    }
+                    
+                    // Reset swipe tracking
+                    swipe_start_x = -1;
+                    swipe_start_y = -1;
+                    swipe_last_x = -1;
+                    swipe_last_y = -1;
+                    is_swiping = false;
                 }
             }
         }
