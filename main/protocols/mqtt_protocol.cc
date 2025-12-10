@@ -197,13 +197,17 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
             ParseServerHello(root);
         } else if (strcmp(type->valuestring, "ws_start") == 0) {
             // Server is redirecting to WebSocket
+            // ws_start indicates alarm mode (server-initiated conversation)
             server_requested_websocket_ = true;
             auto wss_url = cJSON_GetObjectItem(root, "wss");
             auto version = cJSON_GetObjectItem(root, "version");
             
             if (cJSON_IsString(wss_url)) {
                 std::string url = wss_url->valuestring;
-                ESP_LOGI(TAG, "Server requests WebSocket connection: %s", url.c_str());
+                ESP_LOGI(TAG, "Server requests WebSocket connection (alarm mode): %s", url.c_str());
+                
+                // Set alarm mode flag - in alarm mode, TTS plays first, then listening starts
+                Application::GetInstance().SetAlarmMode(true);
                 
                 // Validate URL before saving
                 if (!IsValidWebSocketUrl(url)) {
@@ -228,7 +232,7 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
                     auto& app = Application::GetInstance();
                     // Always open WebSocket connection - if one exists, it will be closed and recreated
                     // This ensures clean state and proper callback setup for each new conversation
-                    ESP_LOGI(TAG, "Opening WebSocket connection for ws_start (will close existing if any)");
+                    ESP_LOGI(TAG, "Opening WebSocket connection for ws_start (alarm mode - TTS first, then listening)");
                     app.OpenWebSocketConnection();
                 });
             } else {

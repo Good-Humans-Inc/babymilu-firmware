@@ -550,17 +550,12 @@ private:
             }
         }, this);
         
-        // Power button long press - backlight/power control (existing functionality)
+        // Power button long press - reboot device
         iot_button_register_cb(pwr_btn, BUTTON_LONG_PRESS_START, nullptr, [](void* button_handle, void* usr_data) {
             auto self = static_cast<CustomBoard*>(usr_data);
-            if(self->GetBacklight()->brightness() > 0) {
-                self->GetBacklight()->SetBrightness(0);
-                gpio_set_level(PWR_Control_PIN, false);
-            }
-            else {
-                self->GetBacklight()->RestoreBrightness();
-                gpio_set_level(PWR_Control_PIN, true);
-            }
+            ESP_LOGI(TAG, "Power button long press detected, rebooting device...");
+            auto& app = Application::GetInstance();
+            app.Reboot();
         }, this);
     }
 

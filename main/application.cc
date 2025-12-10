@@ -861,6 +861,21 @@ void Application::Start()
                 Schedule([this]() {
                     aborted_ = false;
                     if (device_state_ == kDeviceStateIdle || device_state_ == kDeviceStateListening) {
+                        // Save state before TTS to determine if we should resume listening after TTS
+                        state_before_tts_ = device_state_;
+                        
+                        // If we're in LISTENING state, stop listening before TTS starts
+                        // This ensures no microphone audio interference during TTS playback
+                        if (device_state_ == kDeviceStateListening) {
+                            auto* active_protocol = GetActiveProtocol();
+                            if (active_protocol && active_protocol->IsAudioChannelOpened()) {
+                                ESP_LOGI(TAG, "TTS starting while listening - stopping listening before TTS");
+                                active_protocol->SendStopListening();
+                                // Small delay to ensure server receives listen:stop before TTS starts
+                                vTaskDelay(pdMS_TO_TICKS(50));
+                            }
+                        }
+                        
                         SetDeviceState(kDeviceStateSpeaking);
                     }
                 });
@@ -877,16 +892,31 @@ void Application::Start()
                         
                         if (is_remote_wakeup) {
                             // Automatically resume listening after TTS in remote wakeup scenario
-                            ESP_LOGI(TAG, "TTS stopped, remote wakeup detected (WebSocket open) - automatically resuming listening");
-                            SetDeviceState(kDeviceStateListening);
+                            if (is_alarm_mode_) {
+                                // Alarm mode: Always start listening after TTS (even if wasn't listening before)
+                                // This is the expected flow: ws_start → TTS → listening
+                                ESP_LOGI(TAG, "TTS stopped, alarm mode - starting listening for user response");
+                                SetDeviceState(kDeviceStateListening);
+                                is_alarm_mode_ = false; // Reset alarm mode after first TTS completes
+                            } else if (state_before_tts_ == kDeviceStateListening) {
+                                // Normal remote wakeup: Only resume if we were listening before TTS started
+                                ESP_LOGI(TAG, "TTS stopped, remote wakeup detected (WebSocket open) - automatically resuming listening");
+                                SetDeviceState(kDeviceStateListening);
+                            } else {
+                                ESP_LOGI(TAG, "TTS stopped, remote wakeup detected but was not listening before TTS - going to idle");
+                                SetDeviceState(kDeviceStateIdle);
+                            }
+                            state_before_tts_ = kDeviceStateUnknown; // Reset
                         } else if (listening_mode_ == kListeningModeManualStop) {
                             // Go to idle for manual interactions
                             ESP_LOGI(TAG, "TTS stopped, going to idle (manual stop mode)");
                             SetDeviceState(kDeviceStateIdle);
+                            state_before_tts_ = kDeviceStateUnknown; // Reset
                         } else {
                             // Auto mode: resume listening
                             ESP_LOGI(TAG, "TTS stopped, automatically resuming listening (auto stop mode)");
                             SetDeviceState(kDeviceStateListening);
+                            state_before_tts_ = kDeviceStateUnknown; // Reset
                         }
                     }
                 });
@@ -1743,6 +1773,7 @@ void Application::OpenWebSocketConnection() {
         websocket_protocol_->OnAudioChannelClosed([this, &board = Board::GetInstance()]() {
             board.SetPowerSaveMode(true);
             Schedule([this]() {
+                is_alarm_mode_ = false; // Reset alarm mode when WebSocket closes
                 SetDeviceState(kDeviceStateIdle);
             });
         });
@@ -1762,6 +1793,21 @@ void Application::OpenWebSocketConnection() {
                     Schedule([this]() {
                         aborted_ = false;
                         if (device_state_ == kDeviceStateIdle || device_state_ == kDeviceStateListening) {
+                            // Save state before TTS to determine if we should resume listening after TTS
+                            state_before_tts_ = device_state_;
+                            
+                            // If we're in LISTENING state, stop listening before TTS starts
+                            // This ensures no microphone audio interference during TTS playback
+                            if (device_state_ == kDeviceStateListening) {
+                                auto* active_protocol = GetActiveProtocol();
+                                if (active_protocol && active_protocol->IsAudioChannelOpened()) {
+                                    ESP_LOGI(TAG, "TTS starting while listening (WebSocket) - stopping listening before TTS");
+                                    active_protocol->SendStopListening();
+                                    // Small delay to ensure server receives listen:stop before TTS starts
+                                    vTaskDelay(pdMS_TO_TICKS(50));
+                                }
+                            }
+                            
                             SetDeviceState(kDeviceStateSpeaking);
                         }
                     });
@@ -1778,16 +1824,31 @@ void Application::OpenWebSocketConnection() {
                             
                             if (is_remote_wakeup) {
                                 // Automatically resume listening after TTS in remote wakeup scenario
-                                ESP_LOGI(TAG, "TTS stopped (WebSocket), remote wakeup detected - automatically resuming listening");
-                                SetDeviceState(kDeviceStateListening);
+                                if (is_alarm_mode_) {
+                                    // Alarm mode: Always start listening after TTS (even if wasn't listening before)
+                                    // This is the expected flow: ws_start → TTS → listening
+                                    ESP_LOGI(TAG, "TTS stopped (WebSocket), alarm mode - starting listening for user response");
+                                    SetDeviceState(kDeviceStateListening);
+                                    is_alarm_mode_ = false; // Reset alarm mode after first TTS completes
+                                } else if (state_before_tts_ == kDeviceStateListening) {
+                                    // Normal remote wakeup: Only resume if we were listening before TTS started
+                                    ESP_LOGI(TAG, "TTS stopped (WebSocket), remote wakeup detected - automatically resuming listening");
+                                    SetDeviceState(kDeviceStateListening);
+                                } else {
+                                    ESP_LOGI(TAG, "TTS stopped (WebSocket), remote wakeup detected but was not listening before TTS - going to idle");
+                                    SetDeviceState(kDeviceStateIdle);
+                                }
+                                state_before_tts_ = kDeviceStateUnknown; // Reset
                             } else if (listening_mode_ == kListeningModeManualStop) {
                                 // Go to idle for manual interactions
                                 ESP_LOGI(TAG, "TTS stopped (WebSocket), going to idle (manual stop mode)");
                                 SetDeviceState(kDeviceStateIdle);
+                                state_before_tts_ = kDeviceStateUnknown; // Reset
                             } else {
                                 // Auto mode: resume listening
                                 ESP_LOGI(TAG, "TTS stopped (WebSocket), automatically resuming listening (auto stop mode)");
                                 SetDeviceState(kDeviceStateListening);
+                                state_before_tts_ = kDeviceStateUnknown; // Reset
                             }
                         }
                     });
@@ -1848,24 +1909,31 @@ void Application::OpenWebSocketConnection() {
     
     ESP_LOGI(TAG, "WebSocket connection opened successfully");
     
-    // For remote wakeup (ws_start): Automatically enter listening state if device is in a valid state
-    // This ensures the red light turns on and audio streaming starts, just like a button press
-    // Works even in alarm mode (when alerts are shown) since alerts don't change device state
+    // For remote wakeup (ws_start): Behavior depends on alarm mode
+    // - Normal mode: Automatically enter listening state (for normal conversations)
+    // - Alarm mode: Skip listening, let TTS play first, then listening starts after TTS
     if (device_state_ == kDeviceStateIdle) {
-        ESP_LOGI(TAG, "Remote wakeup: WebSocket opened via ws_start, automatically entering listening state");
-        // Small delay to ensure WebSocket connection is fully ready before starting listening
-        // This prevents race conditions where connection might not be ready immediately
-        vTaskDelay(pdMS_TO_TICKS(100));
-        // Verify connection is still open before proceeding
-        if (websocket_protocol_ && websocket_protocol_->IsAudioChannelOpened()) {
-            // Use AutoStop for remote wake so TTS stop resumes listening automatically
-            SetListeningMode(kListeningModeAutoStop);
-            // SetListeningMode() calls SetDeviceState(kDeviceStateListening) which will:
-            // - Turn on red light (via led->OnStateChanged())
-            // - Send listen start message
-            // - Start audio capture
+        if (is_alarm_mode_) {
+            // Alarm mode: Don't start listening automatically
+            // Server will send TTS first, then listening will start after TTS stops
+            ESP_LOGI(TAG, "Alarm mode: WebSocket opened via ws_start, skipping automatic listening (TTS will play first)");
         } else {
-            ESP_LOGW(TAG, "WebSocket connection not ready after delay, cannot start listening automatically");
+            // Normal mode: Automatically enter listening state
+            ESP_LOGI(TAG, "Remote wakeup: WebSocket opened via ws_start, automatically entering listening state");
+            // Small delay to ensure WebSocket connection is fully ready before starting listening
+            // This prevents race conditions where connection might not be ready immediately
+            vTaskDelay(pdMS_TO_TICKS(100));
+            // Verify connection is still open before proceeding
+            if (websocket_protocol_ && websocket_protocol_->IsAudioChannelOpened()) {
+                // Use AutoStop for remote wake so TTS stop resumes listening automatically
+                SetListeningMode(kListeningModeAutoStop);
+                // SetListeningMode() calls SetDeviceState(kDeviceStateListening) which will:
+                // - Turn on red light (via led->OnStateChanged())
+                // - Send listen start message
+                // - Start audio capture
+            } else {
+                ESP_LOGW(TAG, "WebSocket connection not ready after delay, cannot start listening automatically");
+            }
         }
     }
     else if (device_state_ == kDeviceStateSpeaking) {

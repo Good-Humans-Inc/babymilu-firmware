@@ -82,6 +82,7 @@ public:
     void SetAecMode(AecMode mode);
     AecMode GetAecMode() const { return aec_mode_; }
     bool IsAlarmModeActive() const { return is_alarm_mode_; }
+    void SetAlarmMode(bool enabled) { is_alarm_mode_ = enabled; }
     BackgroundTask* GetBackgroundTask() const { return background_task_; }
     void ClearWifiConfiguration();
     Protocol* GetActiveProtocol();  // Returns the protocol to use for audio (WebSocket if available, else primary)
