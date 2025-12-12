@@ -72,7 +72,8 @@ Animation_t *animations[] = {
     NULL,  // ANIMATION_QUESTION
     NULL,  // ANIMATION_SHY
     NULL,  // ANIMATION_SLEEP
-    NULL}; // ANIMATION_HAPPY
+    NULL,  // ANIMATION_HAPPY
+    NULL}; // ANIMATION_TALK
 
 static int now_animation = 0;
 int pos = 0;
@@ -161,8 +162,9 @@ void animation_load_sd_card_animations(void)
     bool question_loaded = animation_load_question_from_sd_card();
     bool shy_loaded = animation_load_shy_from_sd_card();
     bool sleep_loaded = animation_load_sleep_from_sd_card();
+    bool talk_loaded = animation_load_talk_from_sd_card();
     
-    if (normal_loaded || embarrass_loaded || fire_loaded || happy_loaded || inspiration_loaded || question_loaded || shy_loaded || sleep_loaded) {
+    if (normal_loaded || embarrass_loaded || fire_loaded || happy_loaded || inspiration_loaded || question_loaded || shy_loaded || sleep_loaded || talk_loaded) {
         ESP_LOGI("animation", "✅ SD card animations loaded successfully!");
         if (normal_loaded) {
             ESP_LOGI("animation", "   - Normal animation now uses SD card (normal1.bin, normal2.bin, normal3.bin)");
@@ -322,6 +324,17 @@ Animation_t* animation_get_sleep_animation(void)
     }
 }
 
+// Function to get the appropriate talk animation (SD card only)
+Animation_t* animation_get_talk_animation(void)
+{
+    if (sd_talk.use_spiffs && sd_talk.imges && sd_talk.len > 0) {
+        return &sd_talk;
+    } else {
+        ESP_LOGW("animation", "No talk animation available from SD card");
+        return NULL;
+    }
+}
+
 void animation_show_current_sources(void)
 {
     ESP_LOGI("animation", "=== Current Animation Sources ===");
@@ -330,7 +343,7 @@ void animation_show_current_sources(void)
         Animation_t* anim = get_animation(i);
         const char* anim_names[] = {
             "STATIC_NORMAL", "EMBARRESSED", "FIRE", "INSPIRATION", "NORMAL",
-            "QUESTION", "SHY", "SLEEP", "HAPPY"
+            "QUESTION", "SHY", "SLEEP", "HAPPY", "TALK"
         };
         
         if (anim && anim->use_spiffs) {
@@ -1213,6 +1226,28 @@ bool animation_load_sleep_from_sd_card(void)
         return true;
     } else {
         ESP_LOGE("animation", "❌ Failed to load sleep animation from SD card");
+        return false;
+    }
+}
+
+bool animation_load_talk_from_sd_card(void)
+{
+    if (!SdCard::IsMounted()) {
+        ESP_LOGE("animation", "SD card not mounted");
+        return false;
+    }
+    
+    // Clean up existing SD card talk animation if any
+    animation_cleanup_sd_card_animation(&sd_talk);
+    
+    // Load talk animation from SD card - talk1 through talk4 as a single animation with 4 frames
+    const char* talk_frames[] = {"talk1.bin", "talk2.bin", "talk3.bin", "talk4.bin"};
+    
+    if (animation_create_sd_card_animation(&sd_talk, talk_frames, 4)) {
+        ESP_LOGI("animation", "✅ Successfully loaded talk animation from SD card");
+        return true;
+    } else {
+        ESP_LOGE("animation", "❌ Failed to load talk animation from SD card");
         return false;
     }
 }

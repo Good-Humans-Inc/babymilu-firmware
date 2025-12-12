@@ -1024,7 +1024,13 @@ void LcdDisplay::SetEmotion(const char *emotion)
         {ANIMATION_SLEEP, "sleepy"},
         {ANIMATION_SLEEP, "sleep"},  // Direct mapping to sleep animation
         {ANIMATION_HAPPY, "silly"},
-        {ANIMATION_QUESTION, "confused"}};
+        {ANIMATION_QUESTION, "confused"},
+        // Talk animations - all map to ANIMATION_TALK which cycles through talk1-talk4 frames
+        {ANIMATION_TALK, "talk"},
+        {ANIMATION_TALK, "talk1"},
+        {ANIMATION_TALK, "talk2"},
+        {ANIMATION_TALK, "talk3"},
+        {ANIMATION_TALK, "talk4"}};
 
     // 查找匹配的表情
     ESP_LOGI(TAG, "***** SetEmotion request: %s *****", emotion ? emotion : "<null>");
