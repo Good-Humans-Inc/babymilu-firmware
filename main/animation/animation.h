@@ -21,6 +21,7 @@ typedef enum _AnimationType_e {
     ANIMATION_SHY,
     ANIMATION_SLEEP,
     ANIMATION_HAPPY,
+    ANIMATION_TALK,
     ANIMATION_NUM
 }AnimationType_e;
 
@@ -35,6 +36,7 @@ Animation_t* animation_get_inspiration_animation(void);
 Animation_t* animation_get_question_animation(void);
 Animation_t* animation_get_shy_animation(void);
 Animation_t* animation_get_sleep_animation(void);
+Animation_t* animation_get_talk_animation(void);
 void animation_load_sd_card_animations(void);
 void animation_show_current_sources(void);
 
@@ -54,3 +56,4 @@ bool animation_load_inspiration_from_sd_card(void);
 bool animation_load_question_from_sd_card(void);
 bool animation_load_shy_from_sd_card(void);
 bool animation_load_sleep_from_sd_card(void);
+bool animation_load_talk_from_sd_card(void);

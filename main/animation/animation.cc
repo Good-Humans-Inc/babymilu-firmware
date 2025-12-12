@@ -32,6 +32,7 @@ static Animation_t sd_inspiration = {0};
 static Animation_t sd_question = {0};
 static Animation_t sd_shy = {0};
 static Animation_t sd_sleep = {0};
+static Animation_t sd_talk = {0};
 
 // Function to get the appropriate animation (SD card only)
 Animation_t* get_animation(int index) {
@@ -54,6 +55,8 @@ Animation_t* get_animation(int index) {
             return animation_get_sleep_animation();
         case 8: // ANIMATION_HAPPY
             return animation_get_happy_animation();
+        case 9: // ANIMATION_TALK
+            return animation_get_talk_animation();
         default:
             return animation_get_normal_animation();
     }

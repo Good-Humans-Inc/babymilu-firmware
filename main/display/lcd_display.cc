@@ -999,17 +999,22 @@ void LcdDisplay::SetEmotion(const char *emotion)
 
     static const std::vector<Emotion> emotions = {
         {ANIMATION_STATIC_NORMAL, "neutral"},
+        {ANIMATION_NORMAL, "normal"},  // Direct mapping to normal animation
         {ANIMATION_HAPPY, "happy"},
         {ANIMATION_HAPPY, "laughing"},
         {ANIMATION_HAPPY, "funny"},
         {ANIMATION_SHY, "sad"},
         {ANIMATION_FIRE, "angry"},
+        {ANIMATION_FIRE, "fire"},  // Direct mapping to fire animation
         {ANIMATION_EMBARRESSED, "crying"},
+        {ANIMATION_EMBARRESSED, "embarrass"},  // Direct mapping to embarrass animation
         {ANIMATION_INSPIRATION, "loving"},
+        {ANIMATION_INSPIRATION, "inspiration"},  // Direct mapping to inspiration animation
         {ANIMATION_SHY, "embarrassed"},
         {ANIMATION_INSPIRATION, "surprised"},
         {ANIMATION_INSPIRATION, "shocked"},
         {ANIMATION_QUESTION, "thinking"},
+        {ANIMATION_QUESTION, "question"},  // Direct mapping to question animation
         {ANIMATION_NORMAL, "winking"},
         {ANIMATION_INSPIRATION, "cool"},
         {ANIMATION_HAPPY, "relaxed"},
@@ -1017,6 +1022,7 @@ void LcdDisplay::SetEmotion(const char *emotion)
         {ANIMATION_INSPIRATION, "kissy"},
         {ANIMATION_HAPPY, "confident"},
         {ANIMATION_SLEEP, "sleepy"},
+        {ANIMATION_SLEEP, "sleep"},  // Direct mapping to sleep animation
         {ANIMATION_HAPPY, "silly"},
         {ANIMATION_QUESTION, "confused"}};
 
