@@ -177,6 +177,7 @@ bool AnimationUpdater::DownloadMegaFileNow() {
 }
 
 bool AnimationUpdater::ForceUpdateCheck() {
+    ESP_LOGI(TAG, "=== ForceUpdateCheck() called ===");
     ESP_LOGI(TAG, "Force update check requested - bypassing success flag");
     
     if (!enabled_.load()) {
@@ -184,13 +185,17 @@ bool AnimationUpdater::ForceUpdateCheck() {
         return false;
     }
     
+    // Force reset success flag to ensure download happens
+    first_download_success_.store(false);
+    ESP_LOGI(TAG, "Success flag reset, will force download");
+    
     ESP_LOGI(TAG, "Forcing immediate update check...");
     bool success = TestHttpsDownload();
     
     if (success) {
-        ESP_LOGI(TAG, "Force update check completed successfully");
+        ESP_LOGI(TAG, "=== Force update check completed successfully ===");
     } else {
-        ESP_LOGE(TAG, "Force update check failed");
+        ESP_LOGE(TAG, "=== Force update check failed ===");
     }
     
     return success;
@@ -302,30 +307,26 @@ void AnimationUpdater::UpdateLoop() {
     // Wait a bit before first check to let the system stabilize
     vTaskDelay(pdMS_TO_TICKS(5000)); // 5 seconds
     
-    // REMOVED: Startup guard - always download from cloud on reboot
-    // This ensures we get the latest animations from GCS bucket every reboot
-    ESP_LOGI(TAG, "Starting cloud download from GCS bucket on reboot...");
-    
-    // First download attempt on every reboot (before entering loop)
-    bool first_attempt = true;
+    // Check if download already happened synchronously before background task started
+    if (first_download_success_.load()) {
+        ESP_LOGI(TAG, "Download already completed synchronously, skipping background download");
+    } else {
+        ESP_LOGI(TAG, "Download not yet completed, will attempt in background task");
+    }
     
     while (is_running_.load()) {
-        // HTTPS DOWNLOAD: Always download animations_mega.bin from GCS bucket on reboot
-        if (enabled_.load()) {
-            // On first loop iteration (every reboot), always attempt download
-            if (first_attempt || !first_download_success_.load()) {
-                ESP_LOGI(TAG, "Attempting to download animations_mega.bin from GCS bucket...");
-                bool success = TestHttpsDownload();
-                if (success) {
-                    ESP_LOGI(TAG, "Successfully downloaded animations from GCS bucket");
-                } else {
-                    ESP_LOGW(TAG, "Failed to download from GCS bucket, will retry on next check");
-                }
-                first_attempt = false;
+        // HTTPS DOWNLOAD: Only download if not already successful
+        if (enabled_.load() && !first_download_success_.load()) {
+            ESP_LOGI(TAG, "Attempting to download animations_mega.bin from GCS bucket...");
+            bool success = TestHttpsDownload();
+            if (success) {
+                ESP_LOGI(TAG, "Successfully downloaded animations from GCS bucket");
             } else {
-                // After successful download in this boot cycle, skip further downloads
-                ESP_LOGD(TAG, "Download already successful this boot, skipping further downloads");
+                ESP_LOGW(TAG, "Failed to download from GCS bucket, will retry on next check");
             }
+        } else if (first_download_success_.load()) {
+            // Download already successful, skip further attempts
+            ESP_LOGD(TAG, "Download already successful, skipping further downloads");
         }
         
         // Wait for the specified interval before next check
@@ -1055,15 +1056,19 @@ bool AnimationUpdater::DownloadMegaAnimationFile(const std::string& url) {
             total_read += bytes_read;
             
             // Log progress more frequently - every 100KB or every 2 seconds, whichever comes first
-            uint32_t current_time = esp_timer_get_time() / 1000;
+            // Reuse current_time that was calculated at the start of the loop iteration
             bool should_log = false;
             
             if (total_read - last_logged_bytes >= log_interval) {
                 should_log = true;
                 last_logged_bytes = total_read;
-            } else if (current_time - last_log_time >= log_time_interval) {
-                should_log = true;
-                last_log_time = current_time;
+            } else {
+                // Update current_time for time-based logging check
+                current_time = esp_timer_get_time() / 1000;
+                if (current_time - last_log_time >= log_time_interval) {
+                    should_log = true;
+                    last_log_time = current_time;
+                }
             }
             
             if (should_log) {

@@ -12,7 +12,7 @@
 #include "mcp_server.h"
 #include "settings.h"
 #include "audio_debugger.h"
-// #include "animation/animation_updater.h"
+#include "animation/animation_updater.h"
 #include "ssid_manager.h"
 
 #if CONFIG_USE_AUDIO_PROCESSOR
@@ -680,8 +680,14 @@ void Application::Start()
     display->UpdateStatusBar(true);
 
     // Initialize and start the animation updater
-    // AnimationUpdater::GetInstance().Initialize();
-    // AnimationUpdater::GetInstance().Start();
+    AnimationUpdater::GetInstance().Initialize();
+    
+    // Download animations immediately after WiFi connects (before starting background task)
+    ESP_LOGI(TAG, "Downloading animations from GCS bucket immediately after WiFi connection...");
+    AnimationUpdater::GetInstance().ForceUpdateCheck();
+    
+    // Start background task for periodic updates
+    AnimationUpdater::GetInstance().Start();
 
     // Check for new firmware version or get the MQTT broker address
     CheckNewVersion();
