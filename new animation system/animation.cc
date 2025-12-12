@@ -1,0 +1,2973 @@
+/*
+ * @Descripttion:
+ * @Author: Xvsenfeng helloworldjiao@163.com
+ * @LastEditors: Xvsenfeng helloworldjiao@163.com
+ * Copyright (c) 2025 by helloworldjiao@163.com, All Rights Reserved.
+ */
+#include "animation.h"
+#include "lvgl.h"
+#include "board.h"
+#include "display.h"
+#include "sd_card.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include <type_traits>
+#include "esp_spiffs.h"
+#include "esp_log.h"
+#include "esp_partition.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <dirent.h>
+#include <sys/stat.h>
+#include <errno.h>
+
+static constexpr uint32_t LV_IMAGE_CF_OVERLAY_PIXELS = 0x4F50584C; // "OPXL"
+static constexpr size_t NORMAL_OVERLAY_FRAME_COUNT = 2;
+static constexpr size_t EMBARRASS_OVERLAY_FRAME_COUNT = 2;
+static constexpr size_t FIRE_OVERLAY_FRAME_COUNT = 3;     // Frames 2-4 (indices 1-3)
+static constexpr size_t HAPPY_OVERLAY_FRAME_COUNT = 3;    // Frames 2-4 (indices 1-3)
+static constexpr size_t INSPIRATION_OVERLAY_FRAME_COUNT = 3; // Frames 2-4 (indices 1-3)
+
+static animation_overlay_pixel_t* normal_overlay_pixels_runtime[NORMAL_OVERLAY_FRAME_COUNT] = {nullptr, nullptr};
+static size_t normal_overlay_pixel_counts[NORMAL_OVERLAY_FRAME_COUNT] = {0, 0};
+static animation_overlay_frame_t normal_overlay_frame_views[NORMAL_OVERLAY_FRAME_COUNT] = {};
+
+static animation_overlay_pixel_t* embarrass_overlay_pixels_runtime[EMBARRASS_OVERLAY_FRAME_COUNT] = {nullptr, nullptr};
+static size_t embarrass_overlay_pixel_counts[EMBARRASS_OVERLAY_FRAME_COUNT] = {0, 0};
+static animation_overlay_frame_t embarrass_overlay_frame_views[EMBARRASS_OVERLAY_FRAME_COUNT] = {};
+
+static animation_overlay_pixel_t* fire_overlay_pixels_runtime[FIRE_OVERLAY_FRAME_COUNT] = {nullptr, nullptr, nullptr};
+static size_t fire_overlay_pixel_counts[FIRE_OVERLAY_FRAME_COUNT] = {0, 0, 0};
+static animation_overlay_frame_t fire_overlay_frame_views[FIRE_OVERLAY_FRAME_COUNT] = {};
+
+static animation_overlay_pixel_t* happy_overlay_pixels_runtime[HAPPY_OVERLAY_FRAME_COUNT] = {nullptr, nullptr, nullptr};
+static size_t happy_overlay_pixel_counts[HAPPY_OVERLAY_FRAME_COUNT] = {0, 0, 0};
+static animation_overlay_frame_t happy_overlay_frame_views[HAPPY_OVERLAY_FRAME_COUNT] = {};
+
+static animation_overlay_pixel_t* inspiration_overlay_pixels_runtime[INSPIRATION_OVERLAY_FRAME_COUNT] = {nullptr, nullptr, nullptr};
+static size_t inspiration_overlay_pixel_counts[INSPIRATION_OVERLAY_FRAME_COUNT] = {0, 0, 0};
+static animation_overlay_frame_t inspiration_overlay_frame_views[INSPIRATION_OVERLAY_FRAME_COUNT] = {};
+
+static_assert(sizeof(animation_overlay_pixel_t) == 6, "animation_overlay_pixel_t must remain 6 bytes");
+
+static void animation_clear_normal_overlay_frames(void)
+{
+    for (size_t i = 0; i < NORMAL_OVERLAY_FRAME_COUNT; ++i) {
+        if (normal_overlay_pixels_runtime[i] != nullptr) {
+            free(normal_overlay_pixels_runtime[i]);
+            normal_overlay_pixels_runtime[i] = nullptr;
+        }
+        normal_overlay_pixel_counts[i] = 0;
+        normal_overlay_frame_views[i].pixels = nullptr;
+        normal_overlay_frame_views[i].count = 0;
+    }
+}
+
+static bool animation_set_normal_overlay_frame(int frame_index, animation_overlay_pixel_t* pixels, size_t count)
+{
+    if (frame_index < 1 || frame_index > 2) {
+        if (pixels != nullptr) {
+            free(pixels);
+        }
+        return false;
+    }
+    
+    size_t idx = static_cast<size_t>(frame_index - 1);
+    if (normal_overlay_pixels_runtime[idx] != nullptr) {
+        free(normal_overlay_pixels_runtime[idx]);
+    }
+    
+    normal_overlay_pixels_runtime[idx] = pixels;
+    normal_overlay_pixel_counts[idx] = count;
+    return true;
+}
+
+const animation_overlay_frame_t* animation_get_normal_overlay_frame(int frame_index)
+{
+    if (frame_index < 1 || frame_index > 2) {
+        return nullptr;
+    }
+    
+    size_t idx = static_cast<size_t>(frame_index - 1);
+    normal_overlay_frame_views[idx].pixels = normal_overlay_pixels_runtime[idx];
+    normal_overlay_frame_views[idx].count = normal_overlay_pixel_counts[idx];
+    return &normal_overlay_frame_views[idx];
+}
+
+static void animation_clear_embarrass_overlay_frames(void)
+{
+    for (size_t i = 0; i < EMBARRASS_OVERLAY_FRAME_COUNT; ++i) {
+        if (embarrass_overlay_pixels_runtime[i] != nullptr) {
+            free(embarrass_overlay_pixels_runtime[i]);
+            embarrass_overlay_pixels_runtime[i] = nullptr;
+        }
+        embarrass_overlay_pixel_counts[i] = 0;
+        embarrass_overlay_frame_views[i].pixels = nullptr;
+        embarrass_overlay_frame_views[i].count = 0;
+    }
+}
+
+static bool animation_set_embarrass_overlay_frame(int frame_index, animation_overlay_pixel_t* pixels, size_t count)
+{
+    if (frame_index < 1 || frame_index > 2) {
+        if (pixels != nullptr) {
+            free(pixels);
+        }
+        return false;
+    }
+    
+    size_t idx = static_cast<size_t>(frame_index - 1);
+    if (embarrass_overlay_pixels_runtime[idx] != nullptr) {
+        free(embarrass_overlay_pixels_runtime[idx]);
+    }
+    
+    embarrass_overlay_pixels_runtime[idx] = pixels;
+    embarrass_overlay_pixel_counts[idx] = count;
+    return true;
+}
+
+const animation_overlay_frame_t* animation_get_embarrass_overlay_frame(int frame_index)
+{
+    if (frame_index < 1 || frame_index > 2) {
+        return nullptr;
+    }
+    
+    size_t idx = static_cast<size_t>(frame_index - 1);
+    embarrass_overlay_frame_views[idx].pixels = embarrass_overlay_pixels_runtime[idx];
+    embarrass_overlay_frame_views[idx].count = embarrass_overlay_pixel_counts[idx];
+    return &embarrass_overlay_frame_views[idx];
+}
+
+static void animation_clear_fire_overlay_frames(void)
+{
+    for (size_t i = 0; i < FIRE_OVERLAY_FRAME_COUNT; ++i) {
+        if (fire_overlay_pixels_runtime[i] != nullptr) {
+            free(fire_overlay_pixels_runtime[i]);
+            fire_overlay_pixels_runtime[i] = nullptr;
+        }
+        fire_overlay_pixel_counts[i] = 0;
+        fire_overlay_frame_views[i].pixels = nullptr;
+        fire_overlay_frame_views[i].count = 0;
+    }
+}
+
+static bool animation_set_fire_overlay_frame(int frame_index, animation_overlay_pixel_t* pixels, size_t count)
+{
+    if (frame_index < 1 || frame_index > 3) {
+        if (pixels != nullptr) {
+            free(pixels);
+        }
+        return false;
+    }
+    
+    size_t idx = static_cast<size_t>(frame_index - 1);
+    if (fire_overlay_pixels_runtime[idx] != nullptr) {
+        free(fire_overlay_pixels_runtime[idx]);
+    }
+    
+    fire_overlay_pixels_runtime[idx] = pixels;
+    fire_overlay_pixel_counts[idx] = count;
+    return true;
+}
+
+const animation_overlay_frame_t* animation_get_fire_overlay_frame(int frame_index)
+{
+    if (frame_index < 1 || frame_index > 3) {
+        return nullptr;
+    }
+    
+    size_t idx = static_cast<size_t>(frame_index - 1);
+    fire_overlay_frame_views[idx].pixels = fire_overlay_pixels_runtime[idx];
+    fire_overlay_frame_views[idx].count = fire_overlay_pixel_counts[idx];
+    return &fire_overlay_frame_views[idx];
+}
+
+static void animation_clear_happy_overlay_frames(void)
+{
+    for (size_t i = 0; i < HAPPY_OVERLAY_FRAME_COUNT; ++i) {
+        if (happy_overlay_pixels_runtime[i] != nullptr) {
+            free(happy_overlay_pixels_runtime[i]);
+            happy_overlay_pixels_runtime[i] = nullptr;
+        }
+        happy_overlay_pixel_counts[i] = 0;
+        happy_overlay_frame_views[i].pixels = nullptr;
+        happy_overlay_frame_views[i].count = 0;
+    }
+}
+
+static bool animation_set_happy_overlay_frame(int frame_index, animation_overlay_pixel_t* pixels, size_t count)
+{
+    if (frame_index < 1 || frame_index > 3) {
+        if (pixels != nullptr) {
+            free(pixels);
+        }
+        return false;
+    }
+    
+    size_t idx = static_cast<size_t>(frame_index - 1);
+    if (happy_overlay_pixels_runtime[idx] != nullptr) {
+        free(happy_overlay_pixels_runtime[idx]);
+    }
+    
+    happy_overlay_pixels_runtime[idx] = pixels;
+    happy_overlay_pixel_counts[idx] = count;
+    return true;
+}
+
+const animation_overlay_frame_t* animation_get_happy_overlay_frame(int frame_index)
+{
+    if (frame_index < 1 || frame_index > 3) {
+        return nullptr;
+    }
+    
+    size_t idx = static_cast<size_t>(frame_index - 1);
+    happy_overlay_frame_views[idx].pixels = happy_overlay_pixels_runtime[idx];
+    happy_overlay_frame_views[idx].count = happy_overlay_pixel_counts[idx];
+    return &happy_overlay_frame_views[idx];
+}
+
+static void animation_clear_inspiration_overlay_frames(void)
+{
+    for (size_t i = 0; i < INSPIRATION_OVERLAY_FRAME_COUNT; ++i) {
+        if (inspiration_overlay_pixels_runtime[i] != nullptr) {
+            free(inspiration_overlay_pixels_runtime[i]);
+            inspiration_overlay_pixels_runtime[i] = nullptr;
+        }
+        inspiration_overlay_pixel_counts[i] = 0;
+        inspiration_overlay_frame_views[i].pixels = nullptr;
+        inspiration_overlay_frame_views[i].count = 0;
+    }
+}
+
+static bool animation_set_inspiration_overlay_frame(int frame_index, animation_overlay_pixel_t* pixels, size_t count)
+{
+    if (frame_index < 1 || frame_index > 3) {
+        if (pixels != nullptr) {
+            free(pixels);
+        }
+        return false;
+    }
+    
+    size_t idx = static_cast<size_t>(frame_index - 1);
+    if (inspiration_overlay_pixels_runtime[idx] != nullptr) {
+        free(inspiration_overlay_pixels_runtime[idx]);
+    }
+    
+    inspiration_overlay_pixels_runtime[idx] = pixels;
+    inspiration_overlay_pixel_counts[idx] = count;
+    return true;
+}
+
+const animation_overlay_frame_t* animation_get_inspiration_overlay_frame(int frame_index)
+{
+    if (frame_index < 1 || frame_index > 3) {
+        return nullptr;
+    }
+    
+    size_t idx = static_cast<size_t>(frame_index - 1);
+    inspiration_overlay_frame_views[idx].pixels = inspiration_overlay_pixels_runtime[idx];
+    inspiration_overlay_frame_views[idx].count = inspiration_overlay_pixel_counts[idx];
+    return &inspiration_overlay_frame_views[idx];
+}
+// extern const lv_image_dsc_t embarrass1;
+// extern const lv_image_dsc_t embarrass2;
+// extern const lv_image_dsc_t embarrass3;
+// extern const lv_image_dsc_t fire1;
+// extern const lv_image_dsc_t fire2;
+// extern const lv_image_dsc_t fire3;
+// extern const lv_image_dsc_t fire4;
+// extern const lv_image_dsc_t inspiration1;
+// extern const lv_image_dsc_t inspiration2;
+// extern const lv_image_dsc_t inspiration3;
+// extern const lv_image_dsc_t inspiration4;
+// extern const lv_image_dsc_t normal1;
+// extern const lv_image_dsc_t normal2;
+// extern const lv_image_dsc_t normal3;
+// extern const lv_image_dsc_t question1;
+// extern const lv_image_dsc_t question2;
+// extern const lv_image_dsc_t question3;
+// extern const lv_image_dsc_t question4;
+// extern const lv_image_dsc_t shy1;
+// extern const lv_image_dsc_t shy2;
+// extern const lv_image_dsc_t sleep1;
+// extern const lv_image_dsc_t sleep2;
+// extern const lv_image_dsc_t sleep3;
+// extern const lv_image_dsc_t sleep4;
+// extern const lv_image_dsc_t happy1;
+// extern const lv_image_dsc_t happy2;
+// extern const lv_image_dsc_t happy3;
+// extern const lv_image_dsc_t happy4;
+
+// const lv_image_dsc_t *embarrass_i[3] = {
+//     &embarrass1,
+//     &embarrass2,
+//     &embarrass3};
+
+// const lv_image_dsc_t *fire_i[4] = {
+//     &fire1,
+//     &fire2,
+//     &fire3,
+//     &fire4};
+
+// const lv_image_dsc_t *inspiration_i[4] = {
+//     &inspiration1,
+//     &inspiration2,
+//     &inspiration3,
+//     &inspiration4};
+
+// Note: normal1, normal2, normal3 are now loaded from SPIFFS dynamically
+// This array is kept for backward compatibility but will be overridden by SPIFFS
+// const lv_image_dsc_t *normal_i[3] = {
+//     &normal1,
+//     &normal2,
+//     &normal3};
+
+// const lv_image_dsc_t *question_i[4] = {
+//     &question1,
+//     &question2,
+//     &question3,
+//     &question4};
+
+// const lv_image_dsc_t *shy_i[2] = {
+//     &shy1,
+//     &shy2};
+
+// const lv_image_dsc_t *sleep_i[4] = {
+//     &sleep1,
+//     &sleep2,
+//     &sleep3,
+//     &sleep4};
+// const lv_image_dsc_t *happy_i[4] = {
+//     &happy1,
+//     &happy2,
+//     &happy3,
+//     &happy4};
+
+// Animation_t static_normal = {
+//     .imges = normal_i,
+//     .animations = (int[]){0},
+//     .len = 1,
+//     .use_spiffs = false,
+//     .spiffs_imgs = NULL};
+// Animation_t animation_embressed = {
+//     .imges = embarrass_i,
+//     .animations = (int[]){0, 1, 2},
+//     .len = 3,
+//     .use_spiffs = false,
+//     .spiffs_imgs = NULL};
+// Animation_t animation_fire = {
+//     .imges = fire_i,
+//     .animations = (int[]){0, 1, 2, 3},
+//     .len = 4,
+//     .use_spiffs = false,
+//     .spiffs_imgs = NULL};
+// Animation_t animation_inspiration = {
+//     .imges = inspiration_i,
+//     .animations = (int[]){0, 1, 2, 3},
+//     .len = 4,
+//     .use_spiffs = false,
+//     .spiffs_imgs = NULL};
+// Animation_t animation_normal = {
+//     .imges = normal_i,
+//     .animations = (int[]){0, 1, 2},
+//     .len = 3,
+//     .use_spiffs = false,
+//     .spiffs_imgs = NULL};
+// Animation_t animation_question = {
+//     .imges = question_i,
+//     .animations = (int[]){0, 1, 2, 3},
+//     .len = 4,
+//     .use_spiffs = false,
+//     .spiffs_imgs = NULL};
+// Animation_t animation_shy = {
+//     .imges = shy_i,
+//     .animations = (int[]){0, 1},
+//     .len = 2,
+//     .use_spiffs = false,
+//     .spiffs_imgs = NULL};
+// Animation_t animation_sleep = {
+//     .imges = sleep_i,
+//     .animations = (int[]){0, 1, 2, 3},
+//     .len = 4,
+//     .use_spiffs = false,
+//     .spiffs_imgs = NULL};
+// Animation_t animation_happy = {
+//     .imges = happy_i,
+//     .animations = (int[]){0, 1, 2, 3},
+//     .len = 4,
+//     .use_spiffs = false,
+//     .spiffs_imgs = NULL};
+
+// Global SPIFFS-based normal animation
+static Animation_t spiffs_normal = {0};
+
+// Global SPIFFS-based embarrass animation
+static Animation_t spiffs_embarrass = {0};
+
+// Global SPIFFS-based fire animation
+static Animation_t spiffs_fire = {0};
+
+// Global SPIFFS-based happy animation
+static Animation_t spiffs_happy = {0};
+
+// Global SPIFFS-based inspiration animation
+static Animation_t spiffs_inspiration = {0};
+
+// Global SPIFFS-based question animation
+static Animation_t spiffs_question = {0};
+
+// Global SPIFFS-based shy animation
+static Animation_t spiffs_shy = {0};
+
+// Global SPIFFS-based sleep animation
+static Animation_t spiffs_sleep = {0};
+
+// Function to get the appropriate animation (static or SPIFFS)
+Animation_t* get_animation(int index) {
+    switch(index) {
+        case 0: // ANIMATION_STATIC_NORMAL
+            return animation_get_normal_animation(); // This will return SPIFFS or static
+        case 1: // ANIMATION_EMBARRESSED
+            // return &animation_embressed; // Commented out - using SPIFFS only
+            return animation_get_embarrass_animation(); // Use SPIFFS or fallback
+        case 2: // ANIMATION_FIRE
+            // return &animation_fire; // Commented out - using SPIFFS only
+            return animation_get_fire_animation(); // Use SPIFFS or fallback
+        case 3: // ANIMATION_INSPIRATION
+            // return &animation_inspiration; // Commented out - using SPIFFS only
+            return animation_get_inspiration_animation(); // Use SPIFFS or fallback
+        case 4: // ANIMATION_NORMAL
+            // return &animation_normal; // Commented out - using SPIFFS only
+            return animation_get_normal_animation(); // Use SPIFFS or fallback
+        case 5: // ANIMATION_QUESTION
+            // return &animation_question; // Commented out - using SPIFFS only
+            return animation_get_question_animation(); // Use SPIFFS or fallback
+        case 6: // ANIMATION_SHY
+            // return &animation_shy; // Commented out - using SPIFFS only
+            return animation_get_shy_animation(); // Use SPIFFS or fallback
+        case 7: // ANIMATION_SLEEP
+            // return &animation_sleep; // Commented out - using SPIFFS only
+            return animation_get_sleep_animation(); // Use SPIFFS or fallback
+        case 8: // ANIMATION_HAPPY
+            // return &animation_happy; // Commented out - using SPIFFS only
+            return animation_get_happy_animation(); // Use SPIFFS or fallback
+        default:
+            // return &static_normal; // Commented out - using SPIFFS only
+            return animation_get_normal_animation(); // Use SPIFFS or fallback
+    }
+}
+
+// Keep the old array for backward compatibility, but use get_animation() instead
+Animation_t *animations[] = {
+    NULL,  // &static_normal,  // This will be overridden by get_animation(0) - commented out
+    NULL,  // &animation_embressed,  // commented out - using SPIFFS only
+    NULL,  // &animation_fire,  // commented out - using SPIFFS only
+    NULL,  // &animation_inspiration,  // commented out - using SPIFFS only
+    NULL,  // &animation_normal,  // commented out - using SPIFFS only
+    NULL,  // &animation_question,  // commented out - using SPIFFS only
+    NULL,  // &animation_shy,  // commented out - using SPIFFS only
+    NULL,  // &animation_sleep,  // commented out - using SPIFFS only
+    NULL};  // &animation_happy,  // commented out - using SPIFFS only
+
+static int now_animation = 0;
+int pos = 0;
+TaskHandle_t animation_task_handle = nullptr;
+
+// CRITICAL FIX: Create a minimal fallback animation to prevent crashes
+static Animation_t fallback_animation = {
+    .imges = nullptr,
+    .animations = nullptr, 
+    .len = 1,
+    .use_spiffs = false,
+    .spiffs_imgs = nullptr
+};
+
+void plat_animation_task(void *arg)
+{
+    auto display = Board::GetInstance().GetDisplay();
+    while (1)
+    {
+        ESP_LOGD("plat_animation_task", "now_animation: %d, pos: %d", now_animation, pos);
+        pos++;
+        
+        // Use get_animation() to get the appropriate animation (static or SPIFFS)
+        Animation_t* current_anim = get_animation(now_animation);
+        
+        // CRITICAL FIX: Check for NULL animation to prevent crashes
+        if (current_anim == NULL) {
+            // COMMENTED OUT: Warning obsolete since animations are now loaded from SD card
+            // ESP_LOGW("plat_animation_task", "Animation %d is not available, skipping frame", now_animation);
+            vTaskDelay(pdMS_TO_TICKS(500));
+            continue;
+        }
+        
+        if (pos >= current_anim->len)
+        {
+            pos = 0;
+        }
+        // Pass frame index for canvas-based composition (normal2/normal3 overlay)
+        display->SetEmotionImg(current_anim->imges[current_anim->animations[pos]], current_anim->animations[pos]);
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
+}
+
+void animation_set_now_animation(int animation)
+{
+    if (animation_task_handle == nullptr)
+    {
+        xTaskCreate(plat_animation_task, "plat_animation_task", 2048, nullptr, 4, &animation_task_handle);
+    }
+    if (animation < 0 || animation >= ANIMATION_NUM)
+    {
+        ESP_LOGW("animation_set_now_animation", "Invalid animation index: %d, using neutral", animation);
+        animation = ANIMATION_STATIC_NORMAL;
+    }
+    
+    ESP_LOGI("animation_set_now_animation", "Set now animation: %d", animation);
+    now_animation = animation;
+    pos = 0;
+}
+
+int animation_get_now_animation(void)
+{
+    return now_animation;
+}
+
+// SPIFFS Animation Functions
+static bool spiffs_initialized = false;
+
+void animation_init_spiffs(void)
+{
+    ESP_LOGI("animation", "=== animation_init_spiffs() called ===");
+    
+    if (spiffs_initialized) {
+        ESP_LOGW("animation", "SPIFFS already initialized, skipping");
+        return;
+    }
+    
+    ESP_LOGI("animation", "Initializing SPIFFS with partition 'animations'...");
+    
+    // Check if animations partition exists
+    const esp_partition_t* partition = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_SPIFFS, "animations");
+    if (partition == NULL) {
+        ESP_LOGE("animation", "❌ animations partition not found!");
+        ESP_LOGE("animation", "Check partition table: partitions/v1/16m.csv should contain 'animations, data, spiffs, 0x100000, 5M,'");
+        return;
+    }
+    
+    ESP_LOGI("animation", "✅ animations partition found:");
+    ESP_LOGI("animation", "  Address: 0x%x", partition->address);
+    ESP_LOGI("animation", "  Size: %d bytes (%d MB)", partition->size, partition->size / (1024 * 1024));
+    
+    esp_vfs_spiffs_conf_t config = {
+        .base_path = "/spiffs",
+        .partition_label = "animations",
+        .max_files = 10,
+        .format_if_mount_failed = true,
+    };
+    
+    esp_err_t ret = esp_vfs_spiffs_register(&config);
+    if (ret != ESP_OK) {
+        ESP_LOGE("animation", "Failed to initialize SPIFFS (%s)", esp_err_to_name(ret));
+        ESP_LOGE("animation", "Check: 1) animations partition exists, 2) partition size is correct, 3) no other SPIFFS conflicts");
+        return;
+    }
+    
+    spiffs_initialized = true;
+    ESP_LOGI("animation", "✅ SPIFFS initialized successfully at /spiffs");
+    
+    // Verify SPIFFS is working by checking if we can access the filesystem (with retry)
+    ESP_LOGI("animation", "Verifying SPIFFS filesystem access...");
+    int retry_count = 0;
+    bool mount_verified = false;
+    
+    while (retry_count < 10 && !mount_verified) {
+        // Try to open the SPIFFS directory - this is more reliable than stat("/spiffs")
+        DIR* dir = opendir("/spiffs");
+        if (dir != NULL) {
+            closedir(dir);
+            mount_verified = true;
+            ESP_LOGI("animation", "✅ SPIFFS filesystem verified: /spiffs accessible (attempt %d)", retry_count + 1);
+        } else {
+            retry_count++;
+            ESP_LOGD("animation", "Filesystem not ready, retrying... (attempt %d/10)", retry_count);
+            vTaskDelay(pdMS_TO_TICKS(50)); // Wait 50ms between retries
+        }
+    }
+    
+    if (!mount_verified) {
+        ESP_LOGW("animation", "⚠️ SPIFFS filesystem verification failed after 10 attempts");
+        ESP_LOGW("animation", "This may be a timing issue, but SPIFFS should still work");
+    }
+    
+    // Try to load SPIFFS animations
+    ESP_LOGI("animation", "Loading SPIFFS animations...");
+    animation_load_spiffs_animations();
+}
+
+void test_spiffs_debug(void)
+{
+    ESP_LOGI("animation", "=== SPIFFS Debug Test ===");
+    
+    // Check SPIFFS partition info
+    size_t total = 0, used = 0;
+    esp_err_t ret = esp_spiffs_info("animations", &total, &used);
+    if (ret == ESP_OK) {
+        ESP_LOGI("animation", "SPIFFS partition info:");
+        ESP_LOGI("animation", "  Total: %d bytes", total);
+        ESP_LOGI("animation", "  Used: %d bytes", used);
+        ESP_LOGI("animation", "  Free: %d bytes", total - used);
+    } else {
+        ESP_LOGE("animation", "Failed to get SPIFFS info: %s", esp_err_to_name(ret));
+    }
+    
+    // List files in SPIFFS
+    ESP_LOGI("animation", "Listing files in /spiffs/");
+    DIR* dir = opendir("/spiffs");
+    if (dir != NULL) {
+        struct dirent* entry;
+        while ((entry = readdir(dir)) != NULL) {
+            ESP_LOGI("animation", "  Found file: %s", entry->d_name);
+            
+            // Get file size
+            char full_path[512];
+            int ret = snprintf(full_path, sizeof(full_path), "/spiffs/%s", entry->d_name);
+            if (ret >= sizeof(full_path)) {
+                ESP_LOGW("animation", "Path too long, skipping: %s", entry->d_name);
+                continue;
+            }
+            struct stat st;
+            if (stat(full_path, &st) == 0) {
+                ESP_LOGI("animation", "    Size: %ld bytes", st.st_size);
+            }
+        }
+        closedir(dir);
+    } else {
+        ESP_LOGE("animation", "Failed to open /spiffs directory");
+    }
+    
+    // Test opening specific files - COMMENTED OUT TO REDUCE LOG SPAM
+    /*
+    const char* test_files[] = {
+        "normal1.bin", "normal2.bin", "normal3.bin", 
+        "embarrass1.bin", "embarrass2.bin", "embarrass3.bin", 
+        "fire1.bin", "fire2.bin", "fire3.bin", "fire4.bin", 
+        "happy1.bin", "happy2.bin", "happy3.bin", "happy4.bin",
+        "inspiration1.bin", "inspiration2.bin", "inspiration3.bin", "inspiration4.bin",
+        "question1.bin", "question2.bin", "question3.bin", "question4.bin",
+        "shy1.bin", "shy2.bin",
+        "sleep1.bin", "sleep2.bin", "sleep3.bin", "sleep4.bin"
+    };
+    for (int i = 0; i < 26; i++) {
+        char full_path[512];
+        int ret = snprintf(full_path, sizeof(full_path), "/spiffs/%s", test_files[i]);
+        if (ret >= sizeof(full_path)) {
+            ESP_LOGW("animation", "Path too long, skipping: %s", test_files[i]);
+            continue;
+        }
+        
+        FILE* f = fopen(full_path, "rb");
+        if (f != NULL) {
+            ESP_LOGI("animation", "✅ Successfully opened %s", test_files[i]);
+            fclose(f);
+        } else {
+            ESP_LOGE("animation", "❌ Failed to open %s", test_files[i]);
+        }
+    }
+    */
+    
+    ESP_LOGI("animation", "=== SPIFFS Debug Test Complete ===");
+}
+
+void animation_load_spiffs_animations(void)
+{
+    if (!spiffs_initialized) {
+        ESP_LOGW("animation", "SPIFFS not initialized, skipping SPIFFS animation loading");
+        return;
+    }
+    
+    ESP_LOGI("animation", "Attempting to load animations from SPIFFS...");
+    
+    // Debug SPIFFS contents
+    test_spiffs_debug();
+    
+    // Load from SPIFFS - restored from SD card implementation
+    // First try to load ALL animations from mega file
+    ESP_LOGI("animation", "Attempting to load ALL animations from mega file...");
+    if (animation_load_all_from_mega_file()) {
+        ESP_LOGI("animation", "🎉 Successfully loaded ALL animations from mega file!");
+        ESP_LOGI("animation", "   - All 8 animation types loaded in one operation");
+        ESP_LOGI("animation", "   - Total of 28 frames loaded from animations_mega.bin");
+        ESP_LOGI("animation", "   - Ultimate optimization achieved!");
+        return; // Success! No need to load individual animations
+    }
+    
+    // Try to load ALL animations from SD card as fallback
+    ESP_LOGI("animation", "Attempting to load ALL animations from SD card...");
+    
+    // Debug SD card status before attempting to load
+    SdCard::DebugStatus();
+    
+    if (animation_load_all_from_sd_card()) {
+        ESP_LOGI("animation", "🎉 Successfully loaded ALL animations from SD card!");
+        ESP_LOGI("animation", "   - All 8 animation types loaded in one operation");
+        ESP_LOGI("animation", "   - Total of 28 frames loaded from animations_mega.bin on SD card");
+        ESP_LOGI("animation", "   - Ultimate optimization achieved!");
+        return; // Success! No need to load individual animations
+    }
+    
+    // Fall back to individual animation loading from SPIFFS
+    ESP_LOGI("animation", "Mega file not found, loading individual animations from SPIFFS...");
+    
+    // Try to load normal animation from SPIFFS
+    ESP_LOGI("animation", "Attempting to load normal animation from SPIFFS...");
+    bool normal_loaded = animation_load_normal_from_spiffs();
+    
+    // Try to load embarrass animation from SPIFFS
+    ESP_LOGI("animation", "Attempting to load embarrass animation from SPIFFS...");
+    bool embarrass_loaded = animation_load_embarrass_from_spiffs();
+    
+    // Try to load fire animation from SPIFFS
+    ESP_LOGI("animation", "Attempting to load fire animation from SPIFFS...");
+    bool fire_loaded = animation_load_fire_from_spiffs();
+    
+    // Try to load happy animation from SPIFFS
+    ESP_LOGI("animation", "Attempting to load happy animation from SPIFFS...");
+    bool happy_loaded = animation_load_happy_from_spiffs();
+    
+    // Try to load inspiration animation from SPIFFS
+    ESP_LOGI("animation", "Attempting to load inspiration animation from SPIFFS...");
+    bool inspiration_loaded = animation_load_inspiration_from_spiffs();
+    
+    // Try to load question animation from SPIFFS
+    ESP_LOGI("animation", "Attempting to load question animation from SPIFFS...");
+    bool question_loaded = animation_load_question_from_spiffs();
+    
+    // Try to load shy animation from SPIFFS
+    ESP_LOGI("animation", "Attempting to load shy animation from SPIFFS...");
+    bool shy_loaded = animation_load_shy_from_spiffs();
+    
+    // Try to load sleep animation from SPIFFS
+    ESP_LOGI("animation", "Attempting to load sleep animation from SPIFFS...");
+    bool sleep_loaded = animation_load_sleep_from_spiffs();
+    
+    // COMMENTED OUT: Fall back to individual animation loading from SD card
+    // ESP_LOGI("animation", "Mega file not found on SD card, loading individual animations from SD card...");
+    // 
+    // // Try to load normal animation from SD card
+    // ESP_LOGI("animation", "Attempting to load normal animation from SD card...");
+    // bool normal_loaded = animation_load_normal_from_sd_card();
+    // 
+    // // Try to load embarrass animation from SD card
+    // ESP_LOGI("animation", "Attempting to load embarrass animation from SD card...");
+    // bool embarrass_loaded = animation_load_embarrass_from_sd_card();
+    // 
+    // // Try to load fire animation from SD card
+    // ESP_LOGI("animation", "Attempting to load fire animation from SD card...");
+    // bool fire_loaded = animation_load_fire_from_sd_card();
+    // 
+    // // Try to load happy animation from SD card
+    // ESP_LOGI("animation", "Attempting to load happy animation from SD card...");
+    // bool happy_loaded = animation_load_happy_from_sd_card();
+    // 
+    // // Try to load inspiration animation from SD card
+    // ESP_LOGI("animation", "Attempting to load inspiration animation from SD card...");
+    // bool inspiration_loaded = animation_load_inspiration_from_sd_card();
+    // 
+    // // Try to load question animation from SD card
+    // ESP_LOGI("animation", "Attempting to load question animation from SD card...");
+    // bool question_loaded = animation_load_question_from_sd_card();
+    // 
+    // // Try to load shy animation from SD card
+    // ESP_LOGI("animation", "Attempting to load shy animation from SD card...");
+    // bool shy_loaded = animation_load_shy_from_sd_card();
+    // 
+    // // Try to load sleep animation from SD card
+    // ESP_LOGI("animation", "Attempting to load sleep animation from SD card...");
+    // bool sleep_loaded = animation_load_sleep_from_sd_card();
+    
+    if (normal_loaded || embarrass_loaded || fire_loaded || happy_loaded || inspiration_loaded || question_loaded || shy_loaded || sleep_loaded) {
+        ESP_LOGI("animation", "✅ SPIFFS animations loaded successfully!");
+        if (normal_loaded) {
+            ESP_LOGI("animation", "   - Normal animation now uses SPIFFS (normal1.bin, normal2.bin, normal3.bin)");
+            ESP_LOGI("animation", "   - Normal SPIFFS animation has %d frames", spiffs_normal.len);
+        }
+        if (embarrass_loaded) {
+            ESP_LOGI("animation", "   - Embarrass animation now uses SPIFFS (embarrass1.bin, embarrass2.bin, embarrass3.bin)");
+            ESP_LOGI("animation", "   - Embarrass SPIFFS animation has %d frames", spiffs_embarrass.len);
+        }
+        if (fire_loaded) {
+            ESP_LOGI("animation", "   - Fire animation now uses SPIFFS (fire1.bin, fire2.bin, fire3.bin, fire4.bin)");
+            ESP_LOGI("animation", "   - Fire SPIFFS animation has %d frames", spiffs_fire.len);
+        }
+        if (happy_loaded) {
+            ESP_LOGI("animation", "   - Happy animation now uses SPIFFS (happy1.bin, happy2.bin, happy3.bin, happy4.bin)");
+            ESP_LOGI("animation", "   - Happy SPIFFS animation has %d frames", spiffs_happy.len);
+        }
+        if (inspiration_loaded) {
+            ESP_LOGI("animation", "   - Inspiration animation now uses SPIFFS (inspiration1.bin, inspiration2.bin, inspiration3.bin, inspiration4.bin)");
+            ESP_LOGI("animation", "   - Inspiration SPIFFS animation has %d frames", spiffs_inspiration.len);
+        }
+        if (question_loaded) {
+            ESP_LOGI("animation", "   - Question animation now uses SPIFFS (question1.bin, question2.bin, question3.bin, question4.bin)");
+            ESP_LOGI("animation", "   - Question SPIFFS animation has %d frames", spiffs_question.len);
+        }
+        if (shy_loaded) {
+            ESP_LOGI("animation", "   - Shy animation now uses SPIFFS (shy1.bin, shy2.bin)");
+            ESP_LOGI("animation", "   - Shy SPIFFS animation has %d frames", spiffs_shy.len);
+        }
+        if (sleep_loaded) {
+            ESP_LOGI("animation", "   - Sleep animation now uses SPIFFS (sleep1.bin, sleep2.bin, sleep3.bin, sleep4.bin)");
+            ESP_LOGI("animation", "   - Sleep SPIFFS animation has %d frames", spiffs_sleep.len);
+        }
+    } else {
+        ESP_LOGW("animation", "❌ No animations could be loaded from SPIFFS");
+        ESP_LOGW("animation", "   - Check if animations partition is properly formatted");
+        ESP_LOGW("animation", "   - Check if animation files exist in SPIFFS");
+        ESP_LOGW("animation", "   - Will fall back to static animations");
+    }
+}
+
+bool animation_load_from_spiffs(const char* filename, lv_image_dsc_t* img_dsc)
+{
+    if (!spiffs_initialized) {
+        ESP_LOGE("animation", "SPIFFS not initialized");
+        return false;
+    }
+    
+    char full_path[64];
+    snprintf(full_path, sizeof(full_path), "/spiffs/%s", filename);
+    
+    FILE* f = fopen(full_path, "rb");
+    if (f == NULL) {
+        ESP_LOGE("animation", "Failed to open %s", full_path);
+        return false;
+    }
+    
+    // Get file size
+    fseek(f, 0, SEEK_END);
+    size_t file_size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    
+    ESP_LOGI("animation", "Loading %s: %d bytes", filename, file_size);
+    
+    // The .bin files contain a custom format: 6 uint32_t header + raw pixel data
+    // Header format: magic, color_format, flags, width, height, stride
+    uint32_t header_data[6];
+    if (fread(header_data, sizeof(uint32_t), 6, f) != 6) {
+        ESP_LOGE("animation", "Failed to read image header from %s", full_path);
+        fclose(f);
+        return false;
+    }
+    
+    // Validate the magic number (0x4C56474C = "LVGL" in little endian)
+    if (header_data[0] != 0x4C56474C) {
+        ESP_LOGE("animation", "Invalid image magic in %s: 0x%x (expected 0x4C56474C)", filename, header_data[0]);
+        fclose(f);
+        return false;
+    }
+    
+    // Calculate remaining data size
+    size_t header_size = 6 * sizeof(uint32_t);
+    size_t remaining_size = file_size - header_size;
+    
+    // Set up the LVGL image descriptor
+    img_dsc->header.magic = LV_IMAGE_HEADER_MAGIC;
+    img_dsc->header.cf = (lv_color_format_t)header_data[1];  // color_format
+    img_dsc->header.flags = (uint32_t)header_data[2];        // flags
+    img_dsc->header.w = (uint32_t)header_data[3];            // width
+    img_dsc->header.h = (uint32_t)header_data[4];            // height
+    img_dsc->header.stride = (uint32_t)header_data[5];       // stride
+    img_dsc->data_size = remaining_size;
+    
+    // Allocate memory for pixel data
+    img_dsc->data = (const uint8_t*)malloc(img_dsc->data_size);
+    if (img_dsc->data == NULL) {
+        ESP_LOGE("animation", "Failed to allocate %d bytes for image data", img_dsc->data_size);
+        fclose(f);
+        return false;
+    }
+    
+    // Read pixel data
+    if (fread((void*)img_dsc->data, 1, img_dsc->data_size, f) != img_dsc->data_size) {
+        ESP_LOGE("animation", "Failed to read image data from %s", full_path);
+        free((void*)img_dsc->data);
+        img_dsc->data = NULL;
+        fclose(f);
+        return false;
+    }
+    
+    ESP_LOGI("animation", "Loaded image: %dx%d, format=%d, data_size=%d", 
+             img_dsc->header.w, img_dsc->header.h, img_dsc->header.cf, img_dsc->data_size);
+    
+    fclose(f);
+    ESP_LOGI("animation", "Successfully loaded %s from SPIFFS (%d bytes)", filename, img_dsc->data_size);
+    return true;
+}
+
+bool animation_create_spiffs_animation(Animation_t* anim, const char* filenames[], int count)
+{
+    ESP_LOGI("animation", "Creating SPIFFS animation with %d frames", count);
+    
+    if (!spiffs_initialized) {
+        ESP_LOGE("animation", "SPIFFS not initialized");
+        return false;
+    }
+    
+    // Allocate memory for SPIFFS images
+    anim->spiffs_imgs = (lv_image_dsc_t**)malloc(count * sizeof(lv_image_dsc_t*));
+    if (anim->spiffs_imgs == NULL) {
+        ESP_LOGE("animation", "Failed to allocate memory for SPIFFS images");
+        return false;
+    }
+    
+    // Allocate memory for each image descriptor
+    for (int i = 0; i < count; i++) {
+        anim->spiffs_imgs[i] = (lv_image_dsc_t*)malloc(sizeof(lv_image_dsc_t));
+        if (anim->spiffs_imgs[i] == NULL) {
+            ESP_LOGE("animation", "Failed to allocate memory for image %d", i);
+        // Clean up previously allocated memory
+        for (int j = 0; j < i; j++) {
+            if (anim->spiffs_imgs[j]) {
+                if (anim->spiffs_imgs[j]->data) free((void*)anim->spiffs_imgs[j]->data);
+                free(anim->spiffs_imgs[j]);
+            }
+        }
+            free(anim->spiffs_imgs);
+            anim->spiffs_imgs = NULL;
+            return false;
+        }
+        
+        // Initialize the image descriptor
+        anim->spiffs_imgs[i]->data = NULL;
+        anim->spiffs_imgs[i]->data_size = 0;
+        
+        // Load image from SPIFFS
+        ESP_LOGI("animation", "Loading frame %d: %s", i, filenames[i]);
+        if (!animation_load_from_spiffs(filenames[i], anim->spiffs_imgs[i])) {
+            ESP_LOGE("animation", "Failed to load %s from SPIFFS", filenames[i]);
+            // Clean up - only free what was actually allocated
+            for (int j = 0; j <= i; j++) {
+                if (anim->spiffs_imgs[j]) {
+                    if (anim->spiffs_imgs[j]->data) {
+                        free((void*)anim->spiffs_imgs[j]->data);
+                    }
+                    free(anim->spiffs_imgs[j]);
+                }
+            }
+            free(anim->spiffs_imgs);
+            anim->spiffs_imgs = NULL;
+            return false;
+        }
+        ESP_LOGI("animation", "Successfully loaded frame %d: %s", i, filenames[i]);
+    }
+    
+    // Set up animation structure
+    anim->imges = (const lv_image_dsc_t**)anim->spiffs_imgs;
+    anim->use_spiffs = true;
+    anim->len = count;
+    
+    // Create animation sequence (0, 1, 2, ...)
+    anim->animations = (int*)malloc(count * sizeof(int));
+    if (anim->animations == NULL) {
+        ESP_LOGE("animation", "Failed to allocate memory for animation sequence");
+        // Clean up images
+        for (int i = 0; i < count; i++) {
+            if (anim->spiffs_imgs[i]) {
+                if (anim->spiffs_imgs[i]->data) free((void*)anim->spiffs_imgs[i]->data);
+                free(anim->spiffs_imgs[i]);
+            }
+        }
+        free(anim->spiffs_imgs);
+        anim->spiffs_imgs = NULL;
+        return false;
+    }
+    
+    for (int i = 0; i < count; i++) {
+        anim->animations[i] = i;
+    }
+    
+    ESP_LOGI("animation", "Successfully created SPIFFS animation with %d frames", count);
+    return true;
+}
+
+bool animation_create_spiffs_animation_from_merged(Animation_t* anim, const char* merged_filename, int count)
+{
+    ESP_LOGI("animation", "Creating SPIFFS animation from merged file %s with %d frames", merged_filename, count);
+    
+    if (!spiffs_initialized) {
+        ESP_LOGE("animation", "SPIFFS not initialized");
+        return false;
+    }
+    
+    char full_path[64];
+    snprintf(full_path, sizeof(full_path), "/spiffs/%s", merged_filename);
+    
+    FILE* f = fopen(full_path, "rb");
+    if (f == NULL) {
+        ESP_LOGE("animation", "Failed to open merged file %s", full_path);
+        return false;
+    }
+    
+    // Allocate memory for SPIFFS images
+    anim->spiffs_imgs = (lv_image_dsc_t**)malloc(count * sizeof(lv_image_dsc_t*));
+    if (anim->spiffs_imgs == NULL) {
+        ESP_LOGE("animation", "Failed to allocate memory for SPIFFS images");
+        fclose(f);
+        return false;
+    }
+    
+    // Initialize all image descriptors
+    for (int i = 0; i < count; i++) {
+        anim->spiffs_imgs[i] = (lv_image_dsc_t*)malloc(sizeof(lv_image_dsc_t));
+        if (anim->spiffs_imgs[i] == NULL) {
+            ESP_LOGE("animation", "Failed to allocate memory for image %d", i);
+            // Clean up previously allocated memory
+            for (int j = 0; j < i; j++) {
+                if (anim->spiffs_imgs[j]) {
+                    if (anim->spiffs_imgs[j]->data) free((void*)anim->spiffs_imgs[j]->data);
+                    free(anim->spiffs_imgs[j]);
+                }
+            }
+            free(anim->spiffs_imgs);
+            anim->spiffs_imgs = NULL;
+            fclose(f);
+            return false;
+        }
+        
+        // Initialize the image descriptor
+        anim->spiffs_imgs[i]->data = NULL;
+        anim->spiffs_imgs[i]->data_size = 0;
+    }
+    
+    // Read each frame from the merged file
+    for (int i = 0; i < count; i++) {
+        ESP_LOGI("animation", "Loading frame %d from merged file", i);
+        
+        // Read header (6 uint32_t values)
+        uint32_t header_data[6];
+        if (fread(header_data, sizeof(uint32_t), 6, f) != 6) {
+            ESP_LOGE("animation", "Failed to read header for frame %d", i);
+            // Clean up
+            for (int j = 0; j <= i; j++) {
+                if (anim->spiffs_imgs[j] && anim->spiffs_imgs[j]->data) {
+                    free((void*)anim->spiffs_imgs[j]->data);
+                }
+            }
+            for (int j = 0; j < count; j++) {
+                if (anim->spiffs_imgs[j]) {
+                    free(anim->spiffs_imgs[j]);
+                }
+            }
+            free(anim->spiffs_imgs);
+            anim->spiffs_imgs = NULL;
+            fclose(f);
+            return false;
+        }
+        
+        // Validate the magic number (0x4C56474C = "LVGL" in little endian)
+        if (header_data[0] != 0x4C56474C) {
+            ESP_LOGE("animation", "Invalid image magic for frame %d: 0x%x (expected 0x4C56474C)", i, header_data[0]);
+            // Clean up
+            for (int j = 0; j <= i; j++) {
+                if (anim->spiffs_imgs[j] && anim->spiffs_imgs[j]->data) {
+                    free((void*)anim->spiffs_imgs[j]->data);
+                }
+            }
+            for (int j = 0; j < count; j++) {
+                if (anim->spiffs_imgs[j]) {
+                    free(anim->spiffs_imgs[j]);
+                }
+            }
+            free(anim->spiffs_imgs);
+            anim->spiffs_imgs = NULL;
+            fclose(f);
+            return false;
+        }
+        
+        // Calculate data size from image dimensions
+        uint32_t width = header_data[3];
+        uint32_t height = header_data[4];
+        uint32_t stride = header_data[5];
+        size_t data_size = height * stride;
+        
+        // Set up the LVGL image descriptor
+        anim->spiffs_imgs[i]->header.magic = LV_IMAGE_HEADER_MAGIC;
+        anim->spiffs_imgs[i]->header.cf = (lv_color_format_t)header_data[1];  // color_format
+        anim->spiffs_imgs[i]->header.flags = (uint32_t)header_data[2];        // flags
+        anim->spiffs_imgs[i]->header.w = width;                               // width
+        anim->spiffs_imgs[i]->header.h = height;                              // height
+        anim->spiffs_imgs[i]->header.stride = stride;                         // stride
+        anim->spiffs_imgs[i]->data_size = data_size;
+        
+        // Allocate memory for pixel data
+        anim->spiffs_imgs[i]->data = (const uint8_t*)malloc(data_size);
+        if (anim->spiffs_imgs[i]->data == NULL) {
+            ESP_LOGE("animation", "Failed to allocate memory for frame %d data (%d bytes)", i, data_size);
+            // Clean up
+            for (int j = 0; j <= i; j++) {
+                if (anim->spiffs_imgs[j] && anim->spiffs_imgs[j]->data) {
+                    free((void*)anim->spiffs_imgs[j]->data);
+                }
+            }
+            for (int j = 0; j < count; j++) {
+                if (anim->spiffs_imgs[j]) {
+                    free(anim->spiffs_imgs[j]);
+                }
+            }
+            free(anim->spiffs_imgs);
+            anim->spiffs_imgs = NULL;
+            fclose(f);
+            return false;
+        }
+        
+        // Read pixel data
+        if (fread((void*)anim->spiffs_imgs[i]->data, 1, data_size, f) != data_size) {
+            ESP_LOGE("animation", "Failed to read pixel data for frame %d", i);
+            // Clean up
+            for (int j = 0; j <= i; j++) {
+                if (anim->spiffs_imgs[j] && anim->spiffs_imgs[j]->data) {
+                    free((void*)anim->spiffs_imgs[j]->data);
+                }
+            }
+            for (int j = 0; j < count; j++) {
+                if (anim->spiffs_imgs[j]) {
+                    free(anim->spiffs_imgs[j]);
+                }
+            }
+            free(anim->spiffs_imgs);
+            anim->spiffs_imgs = NULL;
+            fclose(f);
+            return false;
+        }
+        
+        ESP_LOGI("animation", "Successfully loaded frame %d: %dx%d, %d bytes", i, width, height, data_size);
+    }
+    
+    fclose(f);
+    
+    // Set up animation structure
+    anim->imges = (const lv_image_dsc_t**)anim->spiffs_imgs;
+    anim->use_spiffs = true;
+    anim->len = count;
+    
+    // Create animation sequence (0, 1, 2, ...)
+    anim->animations = (int*)malloc(count * sizeof(int));
+    if (anim->animations == NULL) {
+        ESP_LOGE("animation", "Failed to allocate memory for animation sequence");
+        // Clean up images
+        for (int i = 0; i < count; i++) {
+            if (anim->spiffs_imgs[i]) {
+                if (anim->spiffs_imgs[i]->data) free((void*)anim->spiffs_imgs[i]->data);
+                free(anim->spiffs_imgs[i]);
+            }
+        }
+        free(anim->spiffs_imgs);
+        anim->spiffs_imgs = NULL;
+        return false;
+    }
+    
+    for (int i = 0; i < count; i++) {
+        anim->animations[i] = i;
+    }
+    
+    ESP_LOGI("animation", "Successfully created SPIFFS animation from merged file with %d frames", count);
+    return true;
+}
+
+bool animation_load_normal_from_spiffs(void)
+{
+    if (!spiffs_initialized) {
+        ESP_LOGE("animation", "SPIFFS not initialized");
+        return false;
+    }
+    
+    // Clean up existing SPIFFS normal animation if any
+    animation_cleanup_spiffs_animation(&spiffs_normal);
+    
+    // First try to load from merged file
+    ESP_LOGI("animation", "Attempting to load normal animation from merged file...");
+    if (animation_create_spiffs_animation_from_merged(&spiffs_normal, "normal_all.bin", 3)) {
+        ESP_LOGI("animation", "✅ Successfully loaded normal animation from merged file");
+        return true;
+    }
+    
+    // Fall back to individual files
+    ESP_LOGI("animation", "Merged file not found, trying individual files...");
+    const char* normal_frames[] = {"normal1.bin", "normal2.bin", "normal3.bin"};
+    
+    if (animation_create_spiffs_animation(&spiffs_normal, normal_frames, 3)) {
+        ESP_LOGI("animation", "✅ Successfully loaded normal animation from individual SPIFFS files");
+        return true;
+    } else {
+        ESP_LOGE("animation", "❌ Failed to load normal animation from SPIFFS (both merged and individual files)");
+        return false;
+    }
+}
+
+bool animation_load_embarrass_from_spiffs(void)
+{
+    if (!spiffs_initialized) {
+        ESP_LOGE("animation", "SPIFFS not initialized");
+        return false;
+    }
+    
+    // Clean up existing SPIFFS embarrass animation if any
+    animation_cleanup_spiffs_animation(&spiffs_embarrass);
+    
+    // Load embarrass animation from SPIFFS
+    const char* embarrass_frames[] = {"embarrass1.bin", "embarrass2.bin", "embarrass3.bin"};
+    
+    if (animation_create_spiffs_animation(&spiffs_embarrass, embarrass_frames, 3)) {
+        ESP_LOGI("animation", "✅ Successfully loaded embarrass animation from SPIFFS");
+        return true;
+    } else {
+        ESP_LOGE("animation", "❌ Failed to load embarrass animation from SPIFFS");
+        return false;
+    }
+}
+
+bool animation_load_fire_from_spiffs(void)
+{
+    if (!spiffs_initialized) {
+        ESP_LOGE("animation", "SPIFFS not initialized");
+        return false;
+    }
+    
+    // Clean up existing SPIFFS fire animation if any
+    animation_cleanup_spiffs_animation(&spiffs_fire);
+    
+    // Load fire animation from SPIFFS
+    const char* fire_frames[] = {"fire1.bin", "fire2.bin", "fire3.bin", "fire4.bin"};
+    
+    if (animation_create_spiffs_animation(&spiffs_fire, fire_frames, 4)) {
+        ESP_LOGI("animation", "✅ Successfully loaded fire animation from SPIFFS");
+        return true;
+    } else {
+        ESP_LOGE("animation", "❌ Failed to load fire animation from SPIFFS");
+        return false;
+    }
+}
+
+bool animation_load_happy_from_spiffs(void)
+{
+    if (!spiffs_initialized) {
+        ESP_LOGE("animation", "SPIFFS not initialized");
+        return false;
+    }
+    
+    // Clean up existing SPIFFS happy animation if any
+    animation_cleanup_spiffs_animation(&spiffs_happy);
+    
+    // Load happy animation from SPIFFS
+    const char* happy_frames[] = {"happy1.bin", "happy2.bin", "happy3.bin", "happy4.bin"};
+    
+    if (animation_create_spiffs_animation(&spiffs_happy, happy_frames, 4)) {
+        ESP_LOGI("animation", "✅ Successfully loaded happy animation from SPIFFS");
+        return true;
+    } else {
+        ESP_LOGE("animation", "❌ Failed to load happy animation from SPIFFS");
+        return false;
+    }
+}
+
+bool animation_load_inspiration_from_spiffs(void)
+{
+    if (!spiffs_initialized) {
+        ESP_LOGE("animation", "SPIFFS not initialized");
+        return false;
+    }
+    
+    // Clean up existing SPIFFS inspiration animation if any
+    animation_cleanup_spiffs_animation(&spiffs_inspiration);
+    
+    // Load inspiration animation from SPIFFS
+    const char* inspiration_frames[] = {"inspiration1.bin", "inspiration2.bin", "inspiration3.bin", "inspiration4.bin"};
+    
+    if (animation_create_spiffs_animation(&spiffs_inspiration, inspiration_frames, 4)) {
+        ESP_LOGI("animation", "✅ Successfully loaded inspiration animation from SPIFFS");
+        return true;
+    } else {
+        ESP_LOGE("animation", "❌ Failed to load inspiration animation from SPIFFS");
+        return false;
+    }
+}
+
+bool animation_load_question_from_spiffs(void)
+{
+    if (!spiffs_initialized) {
+        ESP_LOGE("animation", "SPIFFS not initialized");
+        return false;
+    }
+    
+    // Clean up existing SPIFFS question animation if any
+    animation_cleanup_spiffs_animation(&spiffs_question);
+    
+    // Load question animation from SPIFFS
+    const char* question_frames[] = {"question1.bin", "question2.bin", "question3.bin", "question4.bin"};
+    
+    if (animation_create_spiffs_animation(&spiffs_question, question_frames, 4)) {
+        ESP_LOGI("animation", "✅ Successfully loaded question animation from SPIFFS");
+        return true;
+    } else {
+        ESP_LOGE("animation", "❌ Failed to load question animation from SPIFFS");
+        return false;
+    }
+}
+
+bool animation_load_shy_from_spiffs(void)
+{
+    if (!spiffs_initialized) {
+        ESP_LOGE("animation", "SPIFFS not initialized");
+        return false;
+    }
+    
+    // Clean up existing SPIFFS shy animation if any
+    animation_cleanup_spiffs_animation(&spiffs_shy);
+    
+    // Load shy animation from SPIFFS
+    const char* shy_frames[] = {"shy1.bin", "shy2.bin"};
+    
+    if (animation_create_spiffs_animation(&spiffs_shy, shy_frames, 2)) {
+        ESP_LOGI("animation", "✅ Successfully loaded shy animation from SPIFFS");
+        return true;
+    } else {
+        ESP_LOGE("animation", "❌ Failed to load shy animation from SPIFFS");
+        return false;
+    }
+}
+
+bool animation_load_sleep_from_spiffs(void)
+{
+    if (!spiffs_initialized) {
+        ESP_LOGE("animation", "SPIFFS not initialized");
+        return false;
+    }
+    
+    // Clean up existing SPIFFS sleep animation if any
+    animation_cleanup_spiffs_animation(&spiffs_sleep);
+    
+    // Load sleep animation from SPIFFS
+    const char* sleep_frames[] = {"sleep1.bin", "sleep2.bin", "sleep3.bin", "sleep4.bin"};
+    
+    if (animation_create_spiffs_animation(&spiffs_sleep, sleep_frames, 4)) {
+        ESP_LOGI("animation", "✅ Successfully loaded sleep animation from SPIFFS");
+        return true;
+    } else {
+        ESP_LOGE("animation", "❌ Failed to load sleep animation from SPIFFS");
+        return false;
+    }
+}
+
+void animation_cleanup_spiffs_animation(Animation_t* anim)
+{
+    if (anim && anim->use_spiffs && anim->spiffs_imgs) {
+        // Track which pointers we've already freed to avoid double-free
+        // (needed for normal animation where normal2/normal3 reuse normal1's descriptor)
+        for (int i = 0; i < anim->len; i++) {
+            if (anim->spiffs_imgs[i]) {
+                // Check if we've already freed this pointer (duplicate pointer check)
+                bool already_freed = false;
+                for (int j = 0; j < i; j++) {
+                    if (anim->spiffs_imgs[j] == anim->spiffs_imgs[i]) {
+                        already_freed = true;
+                        break;
+                    }
+                }
+                
+                if (!already_freed) {
+                    if (anim->spiffs_imgs[i]->data) {
+                        free((void*)anim->spiffs_imgs[i]->data);
+                    }
+                    free(anim->spiffs_imgs[i]);
+                }
+            }
+        }
+        free(anim->spiffs_imgs);
+        anim->spiffs_imgs = NULL;
+    }
+    
+    if (anim && anim->animations) {
+        free(anim->animations);
+        anim->animations = NULL;
+    }
+    
+    // Reset animation structure
+    anim->imges = NULL;
+    anim->len = 0;
+    anim->use_spiffs = false;
+}
+
+// Function to get the appropriate normal animation (static or SPIFFS)
+Animation_t* animation_get_normal_animation(void)
+{
+    // Check if SPIFFS normal animation is loaded and valid
+    if (spiffs_normal.use_spiffs && spiffs_normal.imges && spiffs_normal.len > 0) {
+        // ESP_LOGI("animation", "Using SPIFFS-based normal animation");
+        return &spiffs_normal;
+    } else {
+        // COMMENTED OUT: These warnings are obsolete since animations are now loaded from SD card
+        // ESP_LOGI("animation", "Static normal animation not available - using SPIFFS fallback");
+        // return &static_normal; // Commented out - static normal not available
+        // Create a minimal fallback animation or return NULL
+        // ESP_LOGW("animation", "No normal animation available (neither SPIFFS nor static)");
+        // CRITICAL FIX: Return a minimal fallback instead of NULL to prevent crashes
+        // ESP_LOGW("animation", "Creating minimal fallback for normal animation");
+        return NULL; // This will be handled by the fallback logic in plat_animation_task
+    }
+}
+
+// Function to get the appropriate embarrass animation (static or SPIFFS)
+Animation_t* animation_get_embarrass_animation(void)
+{
+    // Check if SPIFFS embarrass animation is loaded and valid
+    if (spiffs_embarrass.use_spiffs && spiffs_embarrass.imges && spiffs_embarrass.len > 0) {
+        // ESP_LOGI("animation", "Using SPIFFS-based embarrass animation");
+        return &spiffs_embarrass;
+    } else {
+        ESP_LOGI("animation", "Static embarrass animation not available - using SPIFFS fallback");
+        // return &animation_embressed; // Commented out - static embarrass not available
+        // Create a minimal fallback animation or return NULL
+        ESP_LOGW("animation", "No embarrass animation available (neither SPIFFS nor static)");
+        return NULL; // or create a minimal fallback
+    }
+}
+
+// Function to get the appropriate fire animation (static or SPIFFS)
+Animation_t* animation_get_fire_animation(void)
+{
+    // Check if SPIFFS fire animation is loaded and valid
+    if (spiffs_fire.use_spiffs && spiffs_fire.imges && spiffs_fire.len > 0) {
+        // ESP_LOGI("animation", "Using SPIFFS-based fire animation");
+        return &spiffs_fire;
+    } else {
+        ESP_LOGI("animation", "Static fire animation not available - using SPIFFS fallback");
+        // return &animation_fire; // Commented out - static fire not available
+        // Create a minimal fallback animation or return NULL
+        ESP_LOGW("animation", "No fire animation available (neither SPIFFS nor static)");
+        return NULL; // or create a minimal fallback
+    }
+}
+
+// Function to get the appropriate happy animation (static or SPIFFS)
+Animation_t* animation_get_happy_animation(void)
+{
+    // Check if SPIFFS happy animation is loaded and valid
+    if (spiffs_happy.use_spiffs && spiffs_happy.imges && spiffs_happy.len > 0) {
+        // ESP_LOGI("animation", "Using SPIFFS-based happy animation");
+        return &spiffs_happy;
+    } else {
+        ESP_LOGI("animation", "Static happy animation not available - using SPIFFS fallback");
+        // return &animation_happy; // Commented out - static happy not available
+        // Create a minimal fallback animation or return NULL
+        ESP_LOGW("animation", "No happy animation available (neither SPIFFS nor static)");
+        return NULL; // or create a minimal fallback
+    }
+}
+
+// Function to get the appropriate inspiration animation (static or SPIFFS)
+Animation_t* animation_get_inspiration_animation(void)
+{
+    // Check if SPIFFS inspiration animation is loaded and valid
+    if (spiffs_inspiration.use_spiffs && spiffs_inspiration.imges && spiffs_inspiration.len > 0) {
+        // ESP_LOGI("animation", "Using SPIFFS-based inspiration animation");
+        return &spiffs_inspiration;
+    } else {
+        ESP_LOGI("animation", "Static inspiration animation not available - using SPIFFS fallback");
+        // return &animation_inspiration; // Commented out - static inspiration not available
+        // Create a minimal fallback animation or return NULL
+        ESP_LOGW("animation", "No inspiration animation available (neither SPIFFS nor static)");
+        return NULL; // or create a minimal fallback
+    }
+}
+
+// Function to get the appropriate question animation (static or SPIFFS)
+Animation_t* animation_get_question_animation(void)
+{
+    // Check if SPIFFS question animation is loaded and valid
+    if (spiffs_question.use_spiffs && spiffs_question.imges && spiffs_question.len > 0) {
+        // ESP_LOGI("animation", "Using SPIFFS-based question animation");
+        return &spiffs_question;
+    } else {
+        ESP_LOGI("animation", "Static question animation not available - using SPIFFS fallback");
+        // return &animation_question; // Commented out - static question not available
+        // Create a minimal fallback animation or return NULL
+        ESP_LOGW("animation", "No question animation available (neither SPIFFS nor static)");
+        return NULL; // or create a minimal fallback
+    }
+}
+
+// Function to get the appropriate shy animation (static or SPIFFS)
+Animation_t* animation_get_shy_animation(void)
+{
+    // Check if SPIFFS shy animation is loaded and valid
+    if (spiffs_shy.use_spiffs && spiffs_shy.imges && spiffs_shy.len > 0) {
+        // ESP_LOGI("animation", "Using SPIFFS-based shy animation");
+        return &spiffs_shy;
+    } else {
+        ESP_LOGI("animation", "Static shy animation not available - using SPIFFS fallback");
+        // return &animation_shy; // Commented out - static shy not available
+        // Create a minimal fallback animation or return NULL
+        ESP_LOGW("animation", "No shy animation available (neither SPIFFS nor static)");
+        return NULL; // or create a minimal fallback
+    }
+}
+
+// Function to get the appropriate sleep animation (static or SPIFFS)
+Animation_t* animation_get_sleep_animation(void)
+{
+    // Check if SPIFFS sleep animation is loaded and valid
+    if (spiffs_sleep.use_spiffs && spiffs_sleep.imges && spiffs_sleep.len > 0) {
+        // ESP_LOGI("animation", "Using SPIFFS-based sleep animation");
+        return &spiffs_sleep;
+    } else {
+        ESP_LOGI("animation", "Static sleep animation not available - using SPIFFS fallback");
+        // return &animation_sleep; // Commented out - static sleep not available
+        // Create a minimal fallback animation or return NULL
+        // ESP_LOGW("animation", "No sleep animation available (neither SPIFFS nor static)");
+        return NULL; // or create a minimal fallback
+    }
+}
+
+void animation_show_current_sources(void)
+{
+    ESP_LOGI("animation", "=== Current Animation Sources ===");
+    
+    for (int i = 0; i < ANIMATION_NUM; i++) {
+        Animation_t* anim = get_animation(i);
+        const char* anim_names[] = {
+            "STATIC_NORMAL", "EMBARRESSED", "FIRE", "INSPIRATION", "NORMAL",
+            "QUESTION", "SHY", "SLEEP", "HAPPY"
+        };
+        
+        if (anim->use_spiffs) {
+            ESP_LOGI("animation", "  %s: SPIFFS (dynamic, RAM)", anim_names[i]);
+        } else {
+            ESP_LOGI("animation", "  %s: Static (img/, Flash)", anim_names[i]);
+        }
+    }
+    ESP_LOGI("animation", "=================================");
+}
+
+bool animation_is_using_merged_files(void)
+{
+    if (!spiffs_initialized) {
+        ESP_LOGD("animation", "SPIFFS not initialized");
+        return false;
+    }
+    
+    // First check for mega file (ultimate optimization)
+    char mega_path[64];
+    snprintf(mega_path, sizeof(mega_path), "/spiffs/animations_mega.bin");
+    FILE* f = fopen(mega_path, "rb");
+    if (f != NULL) {
+        fclose(f);
+        ESP_LOGD("animation", "Mega file detected (animations_mega.bin exists)");
+        return true;
+    }
+    
+    // Check for individual merged animation files
+    const char* merged_files[] = {
+        "normal_all.bin",
+        "happy_all.bin", 
+        "fire_all.bin",
+        "embarrass_all.bin",
+        "inspiration_all.bin",
+        "question_all.bin",
+        "shy_all.bin",
+        "sleep_all.bin"
+    };
+    
+    for (int i = 0; i < 8; i++) {
+        char merged_path[64];
+        snprintf(merged_path, sizeof(merged_path), "/spiffs/%s", merged_files[i]);
+        
+        FILE* f = fopen(merged_path, "rb");
+        if (f != NULL) {
+            fclose(f);
+            ESP_LOGD("animation", "Merged files detected (%s exists)", merged_files[i]);
+            return true;
+        }
+    }
+    
+    ESP_LOGD("animation", "No merged files detected");
+    return false;
+}
+
+bool animation_load_all_from_mega_file(void)
+{
+    if (!spiffs_initialized) {
+        ESP_LOGE("animation", "SPIFFS not initialized");
+        return false;
+    }
+    
+    ESP_LOGI("animation", "Attempting to load ALL animations from mega file...");
+    
+    char mega_path[64];
+    snprintf(mega_path, sizeof(mega_path), "/spiffs/animations_mega.bin");
+    
+    FILE* f = fopen(mega_path, "rb");
+    if (f == NULL) {
+        ESP_LOGD("animation", "Mega file not found: %s", mega_path);
+        return false;
+    }
+    
+    // Animation frame counts: Normal(3), Embarrass(3), Fire(4), Happy(4), Inspiration(4), Question(4), Shy(2), Sleep(4)
+    int animation_frame_counts[] = {3, 3, 4, 4, 4, 4, 2, 4};
+    Animation_t* animations[] = {
+        &spiffs_normal, &spiffs_embarrass, &spiffs_fire, &spiffs_happy,
+        &spiffs_inspiration, &spiffs_question, &spiffs_shy, &spiffs_sleep
+    };
+    
+    int total_frames = 0;
+    for (int i = 0; i < 8; i++) {
+        total_frames += animation_frame_counts[i];
+    }
+    
+    ESP_LOGI("animation", "Loading %d total frames from mega file", total_frames);
+    
+    // Clean up existing animations
+    for (int i = 0; i < 8; i++) {
+        animation_cleanup_spiffs_animation(animations[i]);
+    }
+    
+    // Allocate memory for all SPIFFS images
+    lv_image_dsc_t** all_spiffs_imgs = (lv_image_dsc_t**)malloc(total_frames * sizeof(lv_image_dsc_t*));
+    if (all_spiffs_imgs == NULL) {
+        ESP_LOGE("animation", "Failed to allocate memory for all SPIFFS images");
+        fclose(f);
+        return false;
+    }
+    
+    // Initialize all image descriptors
+    for (int i = 0; i < total_frames; i++) {
+        all_spiffs_imgs[i] = (lv_image_dsc_t*)malloc(sizeof(lv_image_dsc_t));
+        if (all_spiffs_imgs[i] == NULL) {
+            ESP_LOGE("animation", "Failed to allocate memory for image %d", i);
+            // Clean up
+            for (int j = 0; j < i; j++) {
+                if (all_spiffs_imgs[j]) {
+                    if (all_spiffs_imgs[j]->data) free((void*)all_spiffs_imgs[j]->data);
+                    free(all_spiffs_imgs[j]);
+                }
+            }
+            free(all_spiffs_imgs);
+            fclose(f);
+            return false;
+        }
+        
+        all_spiffs_imgs[i]->data = NULL;
+        all_spiffs_imgs[i]->data_size = 0;
+    }
+    
+    // Read all frames from mega file
+    int current_frame = 0;
+    bool success = true;
+    
+    animation_clear_normal_overlay_frames();
+    animation_clear_embarrass_overlay_frames();
+    animation_clear_fire_overlay_frames();
+    animation_clear_happy_overlay_frames();
+    animation_clear_inspiration_overlay_frames();
+    
+    for (int anim_idx = 0; anim_idx < 8 && success; anim_idx++) {
+        int frame_count = animation_frame_counts[anim_idx];
+        Animation_t* anim = animations[anim_idx];
+        
+        ESP_LOGI("animation", "Loading animation %d: %d frames", anim_idx, frame_count);
+        
+        // Allocate memory for this animation's images
+        anim->spiffs_imgs = (lv_image_dsc_t**)malloc(frame_count * sizeof(lv_image_dsc_t*));
+        if (anim->spiffs_imgs == NULL) {
+            ESP_LOGE("animation", "Failed to allocate memory for animation %d images", anim_idx);
+            success = false;
+            break;
+        }
+        
+        // Load frames for this animation
+        // Special handling for normal animation (anim_idx == 0): reuse normal1's image descriptor for normal2 and normal3
+        // Special handling for embarrass animation (anim_idx == 1): reuse embarrass1's image descriptor for embarrass2 and embarrass3
+        // Special handling for fire animation (anim_idx == 2): reuse fire1's image descriptor for fire2, fire3, fire4
+        // Special handling for happy animation (anim_idx == 3): reuse happy1's image descriptor for happy2, happy3, happy4
+        // Special handling for inspiration animation (anim_idx == 4): reuse inspiration1's image descriptor for inspiration2, inspiration3, inspiration4
+        bool is_normal_animation = (anim_idx == 0);  // Normal animation is first (index 0)
+        bool is_embarrass_animation = (anim_idx == 1);  // Embarrass animation is second (index 1)
+        bool is_fire_animation = (anim_idx == 2);  // Fire animation is third (index 2)
+        bool is_happy_animation = (anim_idx == 3);  // Happy animation is fourth (index 3)
+        bool is_inspiration_animation = (anim_idx == 4);  // Inspiration animation is fifth (index 4)
+        lv_image_dsc_t* normal1_base_frame = NULL;  // Will store normal1's descriptor for reuse
+        lv_image_dsc_t* embarrass1_base_frame = NULL;  // Will store embarrass1's descriptor for reuse
+        lv_image_dsc_t* fire1_base_frame = NULL;  // Will store fire1's descriptor for reuse
+        lv_image_dsc_t* happy1_base_frame = NULL;  // Will store happy1's descriptor for reuse
+        lv_image_dsc_t* inspiration1_base_frame = NULL;  // Will store inspiration1's descriptor for reuse
+        
+        for (int frame_idx = 0; frame_idx < frame_count && success; frame_idx++) {
+            ESP_LOGD("animation", "Loading frame %d from mega file", current_frame);
+            
+            // Read header (6 uint32_t values)
+            uint32_t header_data[6];
+            if (fread(header_data, sizeof(uint32_t), 6, f) != 6) {
+                ESP_LOGE("animation", "Failed to read header for frame %d", current_frame);
+                success = false;
+                break;
+            }
+            
+            // Validate the magic number
+            if (header_data[0] != 0x4C56474C) {
+                ESP_LOGE("animation", "Invalid image magic for frame %d: 0x%x", current_frame, header_data[0]);
+                success = false;
+                break;
+            }
+            
+            // Calculate data size from image dimensions
+            uint32_t width = header_data[3];
+            uint32_t height = header_data[4];
+            uint32_t stride = header_data[5];
+            size_t data_size = height * stride;
+            bool is_overlay_frame = ((is_normal_animation || is_embarrass_animation || is_fire_animation || 
+                                     is_happy_animation || is_inspiration_animation) && 
+                                    (frame_idx > 0) && (header_data[1] == LV_IMAGE_CF_OVERLAY_PIXELS));
+            
+            if (is_overlay_frame) {
+                uint32_t entry_count = width; // width field reused to store entry count
+                
+                animation_overlay_pixel_t* overlay_pixels = nullptr;
+                if (entry_count > 0) {
+                    size_t expected_size = entry_count * sizeof(animation_overlay_pixel_t);
+                    if (expected_size != data_size) {
+                        ESP_LOGW("animation", "Overlay payload size mismatch for frame %d (entries=%u, expected=%zu, actual=%zu)",
+                                 current_frame, entry_count, expected_size, data_size);
+                    }
+                }
+                
+                if (entry_count > 0) {
+                    overlay_pixels = (animation_overlay_pixel_t*)malloc(entry_count * sizeof(animation_overlay_pixel_t));
+                    if (overlay_pixels == nullptr) {
+                        ESP_LOGE("animation", "Failed to allocate memory for overlay pixels (frame %d, count=%u)", current_frame, entry_count);
+                        success = false;
+                        break;
+                    }
+                    
+                    for (uint32_t i = 0; i < entry_count; ++i) {
+                        uint16_t components[3];
+                        if (fread(components, sizeof(uint16_t), 3, f) != 3) {
+                            ESP_LOGE("animation", "Failed to read overlay pixel %u for frame %d", i, current_frame);
+                            free(overlay_pixels);
+                            success = false;
+                            break;
+                        }
+                        overlay_pixels[i].x = components[0];
+                        overlay_pixels[i].y = components[1];
+                        overlay_pixels[i].color = components[2];
+                    }
+                    
+                    if (!success) {
+                        break;
+                    }
+                    
+                    size_t consumed = entry_count * sizeof(animation_overlay_pixel_t);
+                    if (data_size > consumed) {
+                        size_t remaining = data_size - consumed;
+                        if (fseek(f, remaining, SEEK_CUR) != 0) {
+                            ESP_LOGE("animation", "Failed to skip overlay padding for frame %d", current_frame);
+                            free(overlay_pixels);
+                            success = false;
+                            break;
+                        }
+                    }
+                } else if (data_size > 0) {
+                    if (fseek(f, data_size, SEEK_CUR) != 0) {
+                        ESP_LOGE("animation", "Failed to skip overlay payload for frame %d", current_frame);
+                        success = false;
+                        break;
+                    }
+                }
+                
+                bool overlay_set = false;
+                if (is_normal_animation) {
+                    overlay_set = animation_set_normal_overlay_frame(frame_idx, overlay_pixels, entry_count);
+                    if (!overlay_set) {
+                        ESP_LOGE("animation", "Failed to store normal overlay pixels for frame %d", current_frame);
+                    } else if (normal1_base_frame == nullptr) {
+                        ESP_LOGE("animation", "Overlay frame %d encountered before base normal frame loaded", frame_idx);
+                        overlay_set = false;
+                    } else {
+                        anim->spiffs_imgs[frame_idx] = normal1_base_frame;
+                        ESP_LOGI("animation", "Loaded %u sparse overlay pixels for normal%d (frame %d)", entry_count, frame_idx + 1, current_frame);
+                    }
+                } else if (is_embarrass_animation) {
+                    overlay_set = animation_set_embarrass_overlay_frame(frame_idx, overlay_pixels, entry_count);
+                    if (!overlay_set) {
+                        ESP_LOGE("animation", "Failed to store embarrass overlay pixels for frame %d", current_frame);
+                    } else if (embarrass1_base_frame == nullptr) {
+                        ESP_LOGE("animation", "Overlay frame %d encountered before base embarrass frame loaded", frame_idx);
+                        overlay_set = false;
+                    } else {
+                        anim->spiffs_imgs[frame_idx] = embarrass1_base_frame;
+                        ESP_LOGI("animation", "Loaded %u sparse overlay pixels for embarrass%d (frame %d)", entry_count, frame_idx + 1, current_frame);
+                    }
+                } else if (is_fire_animation) {
+                    overlay_set = animation_set_fire_overlay_frame(frame_idx, overlay_pixels, entry_count);
+                    if (!overlay_set) {
+                        ESP_LOGE("animation", "Failed to store fire overlay pixels for frame %d", current_frame);
+                    } else if (fire1_base_frame == nullptr) {
+                        ESP_LOGE("animation", "Overlay frame %d encountered before base fire frame loaded", frame_idx);
+                        overlay_set = false;
+                    } else {
+                        anim->spiffs_imgs[frame_idx] = fire1_base_frame;
+                        ESP_LOGI("animation", "Loaded %u sparse overlay pixels for fire%d (frame %d)", entry_count, frame_idx + 1, current_frame);
+                    }
+                } else if (is_happy_animation) {
+                    overlay_set = animation_set_happy_overlay_frame(frame_idx, overlay_pixels, entry_count);
+                    if (!overlay_set) {
+                        ESP_LOGE("animation", "Failed to store happy overlay pixels for frame %d", current_frame);
+                    } else if (happy1_base_frame == nullptr) {
+                        ESP_LOGE("animation", "Overlay frame %d encountered before base happy frame loaded", frame_idx);
+                        overlay_set = false;
+                    } else {
+                        anim->spiffs_imgs[frame_idx] = happy1_base_frame;
+                        ESP_LOGI("animation", "Loaded %u sparse overlay pixels for happy%d (frame %d)", entry_count, frame_idx + 1, current_frame);
+                    }
+                } else if (is_inspiration_animation) {
+                    overlay_set = animation_set_inspiration_overlay_frame(frame_idx, overlay_pixels, entry_count);
+                    if (!overlay_set) {
+                        ESP_LOGE("animation", "Failed to store inspiration overlay pixels for frame %d", current_frame);
+                    } else if (inspiration1_base_frame == nullptr) {
+                        ESP_LOGE("animation", "Overlay frame %d encountered before base inspiration frame loaded", frame_idx);
+                        overlay_set = false;
+                    } else {
+                        anim->spiffs_imgs[frame_idx] = inspiration1_base_frame;
+                        ESP_LOGI("animation", "Loaded %u sparse overlay pixels for inspiration%d (frame %d)", entry_count, frame_idx + 1, current_frame);
+                    }
+                }
+                
+                if (!overlay_set) {
+                    if (overlay_pixels != nullptr) {
+                        free(overlay_pixels);
+                    }
+                    success = false;
+                    break;
+                }
+                
+                current_frame++;
+                continue;
+            }
+            
+            // For normal animation (legacy mega files): reuse normal1's descriptor for normal2 and normal3
+            if (is_normal_animation && frame_idx > 0) {
+                if (fseek(f, data_size, SEEK_CUR) != 0) {
+                    ESP_LOGE("animation", "Failed to skip pixel data for frame %d", current_frame);
+                    success = false;
+                    break;
+                }
+                
+                anim->spiffs_imgs[frame_idx] = normal1_base_frame;
+                ESP_LOGI("animation", "Reusing normal1's image descriptor for normal%d (frame %d)", frame_idx + 1, current_frame);
+                current_frame++;
+                continue;
+            }
+            
+            // Set up the LVGL image descriptor (for normal1 or other animations)
+            lv_image_dsc_t* img_dsc = all_spiffs_imgs[current_frame];
+            img_dsc->header.magic = LV_IMAGE_HEADER_MAGIC;
+            img_dsc->header.cf = (lv_color_format_t)header_data[1];
+            img_dsc->header.flags = (uint32_t)header_data[2];
+            img_dsc->header.w = width;
+            img_dsc->header.h = height;
+            img_dsc->header.stride = stride;
+            img_dsc->data_size = data_size;
+            
+            // Allocate memory for pixel data
+            img_dsc->data = (const uint8_t*)malloc(data_size);
+            if (img_dsc->data == NULL) {
+                ESP_LOGE("animation", "Failed to allocate memory for frame %d data (%d bytes)", current_frame, data_size);
+                success = false;
+                break;
+            }
+            
+            // Read pixel data
+            if (fread((void*)img_dsc->data, 1, data_size, f) != data_size) {
+                ESP_LOGE("animation", "Failed to read pixel data for frame %d", current_frame);
+                success = false;
+                break;
+            }
+            
+            // Assign to animation
+            anim->spiffs_imgs[frame_idx] = img_dsc;
+            
+            // Store normal1's descriptor for reuse by normal2 and normal3
+            if (is_normal_animation && frame_idx == 0) {
+                normal1_base_frame = img_dsc;
+                ESP_LOGI("animation", "Loaded normal1 (base frame) for reuse by normal2 and normal3");
+            }
+            
+            // Store embarrass1's descriptor for reuse by embarrass2 and embarrass3
+            if (is_embarrass_animation && frame_idx == 0) {
+                embarrass1_base_frame = img_dsc;
+                ESP_LOGI("animation", "Loaded embarrass1 (base frame) for reuse by embarrass2 and embarrass3");
+            }
+            
+            ESP_LOGD("animation", "Successfully loaded frame %d: %dx%d, %d bytes", current_frame, width, height, data_size);
+            current_frame++;
+        }
+        
+        if (success) {
+            // Set up animation structure
+            anim->imges = (const lv_image_dsc_t**)anim->spiffs_imgs;
+            anim->use_spiffs = true;
+            anim->len = frame_count;
+            
+            // Create animation sequence (0, 1, 2, ...)
+            anim->animations = (int*)malloc(frame_count * sizeof(int));
+            if (anim->animations == NULL) {
+                ESP_LOGE("animation", "Failed to allocate memory for animation %d sequence", anim_idx);
+                success = false;
+                break;
+            }
+            
+            for (int i = 0; i < frame_count; i++) {
+                anim->animations[i] = i;
+            }
+            
+            ESP_LOGI("animation", "✅ Successfully loaded animation %d with %d frames", anim_idx, frame_count);
+        }
+    }
+    
+    fclose(f);
+    
+    if (success) {
+        ESP_LOGI("animation", "✅ Successfully loaded ALL animations from mega file (%d total frames)", total_frames);
+        return true;
+    } else {
+        ESP_LOGE("animation", "❌ Failed to load animations from mega file");
+        animation_clear_normal_overlay_frames();
+        animation_clear_embarrass_overlay_frames();
+        animation_clear_fire_overlay_frames();
+        animation_clear_happy_overlay_frames();
+        animation_clear_inspiration_overlay_frames();
+        
+        // Clean up on failure
+        for (int i = 0; i < total_frames; i++) {
+            if (all_spiffs_imgs[i]) {
+                if (all_spiffs_imgs[i]->data) free((void*)all_spiffs_imgs[i]->data);
+                free(all_spiffs_imgs[i]);
+            }
+        }
+        free(all_spiffs_imgs);
+        
+        // Clean up partial animations
+        for (int i = 0; i < 8; i++) {
+            animation_cleanup_spiffs_animation(animations[i]);
+        }
+        
+        return false;
+    }
+}
+
+// ============================================================================
+// SD CARD ANIMATION LOADING FUNCTIONS
+// ============================================================================
+
+bool animation_load_from_sd_card(const char* filename, lv_image_dsc_t* img_dsc)
+{
+    if (!SdCard::IsMounted()) {
+        ESP_LOGE("animation", "SD card not mounted");
+        return false;
+    }
+    
+    char full_path[128];
+    snprintf(full_path, sizeof(full_path), "/sdcard/%s", filename);
+    
+    FILE* f = fopen(full_path, "rb");
+    if (f == NULL) {
+        ESP_LOGE("animation", "Failed to open %s", full_path);
+        return false;
+    }
+    
+    // Get file size
+    fseek(f, 0, SEEK_END);
+    size_t file_size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    
+    ESP_LOGI("animation", "Loading %s from SD card: %d bytes", filename, file_size);
+    
+    // The .bin files contain a custom format: 6 uint32_t header + raw pixel data
+    // Header format: magic, color_format, flags, width, height, stride
+    uint32_t header_data[6];
+    if (fread(header_data, sizeof(uint32_t), 6, f) != 6) {
+        ESP_LOGE("animation", "Failed to read image header from %s", full_path);
+        fclose(f);
+        return false;
+    }
+    
+    // Validate the magic number (0x4C56474C = "LVGL" in little endian)
+    if (header_data[0] != 0x4C56474C) {
+        ESP_LOGE("animation", "Invalid image magic in %s: 0x%x (expected 0x4C56474C)", filename, header_data[0]);
+        fclose(f);
+        return false;
+    }
+    
+    // Calculate remaining data size
+    size_t header_size = 6 * sizeof(uint32_t);
+    size_t remaining_size = file_size - header_size;
+    
+    // Set up the LVGL image descriptor
+    img_dsc->header.magic = LV_IMAGE_HEADER_MAGIC;
+    img_dsc->header.cf = (lv_color_format_t)header_data[1];  // color_format
+    img_dsc->header.flags = (uint32_t)header_data[2];        // flags
+    img_dsc->header.w = (uint32_t)header_data[3];            // width
+    img_dsc->header.h = (uint32_t)header_data[4];            // height
+    img_dsc->header.stride = (uint32_t)header_data[5];       // stride
+    img_dsc->data_size = remaining_size;
+    
+    // Allocate memory for pixel data
+    img_dsc->data = (const uint8_t*)malloc(img_dsc->data_size);
+    if (img_dsc->data == NULL) {
+        ESP_LOGE("animation", "Failed to allocate %d bytes for image data", img_dsc->data_size);
+        fclose(f);
+        return false;
+    }
+    
+    // Read pixel data
+    if (fread((void*)img_dsc->data, 1, img_dsc->data_size, f) != img_dsc->data_size) {
+        ESP_LOGE("animation", "Failed to read image data from %s", full_path);
+        free((void*)img_dsc->data);
+        img_dsc->data = NULL;
+        fclose(f);
+        return false;
+    }
+    
+    ESP_LOGI("animation", "Loaded image from SD card: %dx%d, format=%d, data_size=%d", 
+             img_dsc->header.w, img_dsc->header.h, img_dsc->header.cf, img_dsc->data_size);
+    
+    fclose(f);
+    ESP_LOGI("animation", "Successfully loaded %s from SD card (%d bytes)", filename, img_dsc->data_size);
+    return true;
+}
+
+bool animation_create_sd_card_animation(Animation_t* anim, const char* filenames[], int count)
+{
+    ESP_LOGI("animation", "Creating SD card animation with %d frames", count);
+    
+    if (!SdCard::IsMounted()) {
+        ESP_LOGE("animation", "SD card not mounted");
+        return false;
+    }
+    
+    // Allocate memory for SD card images
+    anim->spiffs_imgs = (lv_image_dsc_t**)malloc(count * sizeof(lv_image_dsc_t*));
+    if (anim->spiffs_imgs == NULL) {
+        ESP_LOGE("animation", "Failed to allocate memory for SD card images");
+        return false;
+    }
+    
+    // Allocate memory for each image descriptor
+    for (int i = 0; i < count; i++) {
+        anim->spiffs_imgs[i] = (lv_image_dsc_t*)malloc(sizeof(lv_image_dsc_t));
+        if (anim->spiffs_imgs[i] == NULL) {
+            ESP_LOGE("animation", "Failed to allocate memory for image %d", i);
+            // Clean up previously allocated memory
+            for (int j = 0; j < i; j++) {
+                if (anim->spiffs_imgs[j]) {
+                    if (anim->spiffs_imgs[j]->data) free((void*)anim->spiffs_imgs[j]->data);
+                    free(anim->spiffs_imgs[j]);
+                }
+            }
+            free(anim->spiffs_imgs);
+            anim->spiffs_imgs = NULL;
+            return false;
+        }
+        
+        // Initialize the image descriptor
+        anim->spiffs_imgs[i]->data = NULL;
+        anim->spiffs_imgs[i]->data_size = 0;
+        
+        // Load image from SD card
+        ESP_LOGI("animation", "Loading frame %d: %s", i, filenames[i]);
+        if (!animation_load_from_sd_card(filenames[i], anim->spiffs_imgs[i])) {
+            ESP_LOGE("animation", "Failed to load %s from SD card", filenames[i]);
+            // Clean up - only free what was actually allocated
+            for (int j = 0; j <= i; j++) {
+                if (anim->spiffs_imgs[j]) {
+                    if (anim->spiffs_imgs[j]->data) {
+                        free((void*)anim->spiffs_imgs[j]->data);
+                    }
+                    free(anim->spiffs_imgs[j]);
+                }
+            }
+            free(anim->spiffs_imgs);
+            anim->spiffs_imgs = NULL;
+            return false;
+        }
+        ESP_LOGI("animation", "Successfully loaded frame %d: %s", i, filenames[i]);
+    }
+    
+    // Set up animation structure
+    anim->imges = (const lv_image_dsc_t**)anim->spiffs_imgs;
+    anim->use_spiffs = true;
+    anim->len = count;
+    
+    // Create animation sequence (0, 1, 2, ...)
+    anim->animations = (int*)malloc(count * sizeof(int));
+    if (anim->animations == NULL) {
+        ESP_LOGE("animation", "Failed to allocate memory for animation sequence");
+        // Clean up images
+        for (int i = 0; i < count; i++) {
+            if (anim->spiffs_imgs[i]) {
+                if (anim->spiffs_imgs[i]->data) free((void*)anim->spiffs_imgs[i]->data);
+                free(anim->spiffs_imgs[i]);
+            }
+        }
+        free(anim->spiffs_imgs);
+        anim->spiffs_imgs = NULL;
+        return false;
+    }
+    
+    for (int i = 0; i < count; i++) {
+        anim->animations[i] = i;
+    }
+    
+    ESP_LOGI("animation", "Successfully created SD card animation with %d frames", count);
+    return true;
+}
+
+bool animation_create_sd_card_animation_from_merged(Animation_t* anim, const char* merged_filename, int count)
+{
+    ESP_LOGI("animation", "Creating SD card animation from merged file %s with %d frames", merged_filename, count);
+    
+    if (!SdCard::IsMounted()) {
+        ESP_LOGE("animation", "SD card not mounted");
+        return false;
+    }
+    
+    char full_path[128];
+    snprintf(full_path, sizeof(full_path), "/sdcard/%s", merged_filename);
+    
+    FILE* f = fopen(full_path, "rb");
+    if (f == NULL) {
+        ESP_LOGE("animation", "Failed to open merged file %s", full_path);
+        return false;
+    }
+    
+    // Allocate memory for SD card images
+    anim->spiffs_imgs = (lv_image_dsc_t**)malloc(count * sizeof(lv_image_dsc_t*));
+    if (anim->spiffs_imgs == NULL) {
+        ESP_LOGE("animation", "Failed to allocate memory for SD card images");
+        fclose(f);
+        return false;
+    }
+    
+    // Initialize all image descriptors
+    for (int i = 0; i < count; i++) {
+        anim->spiffs_imgs[i] = (lv_image_dsc_t*)malloc(sizeof(lv_image_dsc_t));
+        if (anim->spiffs_imgs[i] == NULL) {
+            ESP_LOGE("animation", "Failed to allocate memory for image %d", i);
+            // Clean up previously allocated memory
+            for (int j = 0; j < i; j++) {
+                if (anim->spiffs_imgs[j]) {
+                    if (anim->spiffs_imgs[j]->data) free((void*)anim->spiffs_imgs[j]->data);
+                    free(anim->spiffs_imgs[j]);
+                }
+            }
+            free(anim->spiffs_imgs);
+            anim->spiffs_imgs = NULL;
+            fclose(f);
+            return false;
+        }
+        
+        // Initialize the image descriptor
+        anim->spiffs_imgs[i]->data = NULL;
+        anim->spiffs_imgs[i]->data_size = 0;
+    }
+    
+    // Read each frame from the merged file
+    for (int i = 0; i < count; i++) {
+        ESP_LOGI("animation", "Loading frame %d from merged file on SD card", i);
+        
+        // Read header (6 uint32_t values)
+        uint32_t header_data[6];
+        if (fread(header_data, sizeof(uint32_t), 6, f) != 6) {
+            ESP_LOGE("animation", "Failed to read header for frame %d", i);
+            // Clean up
+            for (int j = 0; j <= i; j++) {
+                if (anim->spiffs_imgs[j] && anim->spiffs_imgs[j]->data) {
+                    free((void*)anim->spiffs_imgs[j]->data);
+                }
+            }
+            for (int j = 0; j < count; j++) {
+                if (anim->spiffs_imgs[j]) {
+                    free(anim->spiffs_imgs[j]);
+                }
+            }
+            free(anim->spiffs_imgs);
+            anim->spiffs_imgs = NULL;
+            fclose(f);
+            return false;
+        }
+        
+        // Validate the magic number (0x4C56474C = "LVGL" in little endian)
+        if (header_data[0] != 0x4C56474C) {
+            ESP_LOGE("animation", "Invalid image magic for frame %d: 0x%x (expected 0x4C56474C)", i, header_data[0]);
+            // Clean up
+            for (int j = 0; j <= i; j++) {
+                if (anim->spiffs_imgs[j] && anim->spiffs_imgs[j]->data) {
+                    free((void*)anim->spiffs_imgs[j]->data);
+                }
+            }
+            for (int j = 0; j < count; j++) {
+                if (anim->spiffs_imgs[j]) {
+                    free(anim->spiffs_imgs[j]);
+                }
+            }
+            free(anim->spiffs_imgs);
+            anim->spiffs_imgs = NULL;
+            fclose(f);
+            return false;
+        }
+        
+        // Calculate data size from image dimensions
+        uint32_t width = header_data[3];
+        uint32_t height = header_data[4];
+        uint32_t stride = header_data[5];
+        size_t data_size = height * stride;
+        
+        // Set up the LVGL image descriptor
+        anim->spiffs_imgs[i]->header.magic = LV_IMAGE_HEADER_MAGIC;
+        anim->spiffs_imgs[i]->header.cf = (lv_color_format_t)header_data[1];  // color_format
+        anim->spiffs_imgs[i]->header.flags = (uint32_t)header_data[2];        // flags
+        anim->spiffs_imgs[i]->header.w = width;                               // width
+        anim->spiffs_imgs[i]->header.h = height;                              // height
+        anim->spiffs_imgs[i]->header.stride = stride;                         // stride
+        anim->spiffs_imgs[i]->data_size = data_size;
+        
+        // Allocate memory for pixel data
+        anim->spiffs_imgs[i]->data = (const uint8_t*)malloc(data_size);
+        if (anim->spiffs_imgs[i]->data == NULL) {
+            ESP_LOGE("animation", "Failed to allocate memory for frame %d data (%d bytes)", i, data_size);
+            // Clean up
+            for (int j = 0; j <= i; j++) {
+                if (anim->spiffs_imgs[j] && anim->spiffs_imgs[j]->data) {
+                    free((void*)anim->spiffs_imgs[j]->data);
+                }
+            }
+            for (int j = 0; j < count; j++) {
+                if (anim->spiffs_imgs[j]) {
+                    free(anim->spiffs_imgs[j]);
+                }
+            }
+            free(anim->spiffs_imgs);
+            anim->spiffs_imgs = NULL;
+            fclose(f);
+            return false;
+        }
+        
+        // Read pixel data
+        if (fread((void*)anim->spiffs_imgs[i]->data, 1, data_size, f) != data_size) {
+            ESP_LOGE("animation", "Failed to read pixel data for frame %d", i);
+            // Clean up
+            for (int j = 0; j <= i; j++) {
+                if (anim->spiffs_imgs[j] && anim->spiffs_imgs[j]->data) {
+                    free((void*)anim->spiffs_imgs[j]->data);
+                }
+            }
+            for (int j = 0; j < count; j++) {
+                if (anim->spiffs_imgs[j]) {
+                    free(anim->spiffs_imgs[j]);
+                }
+            }
+            free(anim->spiffs_imgs);
+            anim->spiffs_imgs = NULL;
+            fclose(f);
+            return false;
+        }
+        
+        ESP_LOGI("animation", "Successfully loaded frame %d: %dx%d, %d bytes", i, width, height, data_size);
+    }
+    
+    fclose(f);
+    
+    // Set up animation structure
+    anim->imges = (const lv_image_dsc_t**)anim->spiffs_imgs;
+    anim->use_spiffs = true;
+    anim->len = count;
+    
+    // Create animation sequence (0, 1, 2, ...)
+    anim->animations = (int*)malloc(count * sizeof(int));
+    if (anim->animations == NULL) {
+        ESP_LOGE("animation", "Failed to allocate memory for animation sequence");
+        // Clean up images
+        for (int i = 0; i < count; i++) {
+            if (anim->spiffs_imgs[i]) {
+                if (anim->spiffs_imgs[i]->data) free((void*)anim->spiffs_imgs[i]->data);
+                free(anim->spiffs_imgs[i]);
+            }
+        }
+        free(anim->spiffs_imgs);
+        anim->spiffs_imgs = NULL;
+        return false;
+    }
+    
+    for (int i = 0; i < count; i++) {
+        anim->animations[i] = i;
+    }
+    
+    ESP_LOGI("animation", "Successfully created SD card animation from merged file with %d frames", count);
+    return true;
+}
+
+bool animation_load_all_from_sd_card(void)
+{
+    ESP_LOGI("animation", "Checking SD card mount status...");
+    if (!SdCard::IsMounted()) {
+        ESP_LOGE("animation", "SD card not mounted - cannot load animations from SD card");
+        ESP_LOGE("animation", "This may happen if SD card initialization failed during startup");
+        return false;
+    }
+    
+    ESP_LOGI("animation", "✅ SD card is mounted, proceeding with animation loading...");
+    ESP_LOGI("animation", "Attempting to load ALL animations from SD card mega file...");
+    
+    animation_clear_normal_overlay_frames();
+    animation_clear_embarrass_overlay_frames();
+    animation_clear_fire_overlay_frames();
+    animation_clear_happy_overlay_frames();
+    animation_clear_inspiration_overlay_frames();
+    
+    // First, let's list what files are actually on the SD card
+    ESP_LOGI("animation", "Listing files on SD card to debug...");
+    DIR* dir = opendir("/sdcard");
+    if (dir != NULL) {
+        struct dirent* entry;
+        int file_count = 0;
+        while ((entry = readdir(dir)) != NULL) {
+            if (entry->d_type == DT_REG) {  // Regular file
+                file_count++;
+                ESP_LOGI("animation", "  Found file on SD card: %s", entry->d_name);
+                
+                // Check file size
+                char full_path[512];
+                snprintf(full_path, sizeof(full_path), "/sdcard/%s", entry->d_name);
+                struct stat st;
+                if (stat(full_path, &st) == 0) {
+                    ESP_LOGI("animation", "    Size: %ld bytes", st.st_size);
+                }
+            }
+        }
+        closedir(dir);
+        ESP_LOGI("animation", "Total files found on SD card: %d", file_count);
+    } else {
+        ESP_LOGE("animation", "Failed to open /sdcard directory");
+        return false;
+    }
+    
+    char mega_path[128];
+    snprintf(mega_path, sizeof(mega_path), "/sdcard/test.bin");
+    
+    ESP_LOGI("animation", "Attempting to open mega file: %s", mega_path);
+    FILE* f = fopen(mega_path, "rb");
+    if (f == NULL) {
+        ESP_LOGE("animation", "❌ Failed to open mega file: %s (errno: %d)", mega_path, errno);
+        ESP_LOGE("animation", "Make sure test.bin exists in the root of the SD card");
+        
+        // Check if there are any files with similar names and try to use them
+        ESP_LOGI("animation", "Checking for animation files on SD card...");
+        DIR* dir2 = opendir("/sdcard");
+        if (dir2 != NULL) {
+            struct dirent* entry;
+            char found_animation_file[256] = {0};
+            while ((entry = readdir(dir2)) != NULL) {
+                if (entry->d_type == DT_REG) {
+                    // Check for various patterns that could be the mega file
+                    if (strstr(entry->d_name, "mega") != NULL || 
+                        strstr(entry->d_name, "ANIMAT") != NULL ||
+                        strstr(entry->d_name, "animation") != NULL ||
+                        (strstr(entry->d_name, ".bin") != NULL && strlen(found_animation_file) == 0)) {
+                        
+                        ESP_LOGI("animation", "  Found potential animation file: %s", entry->d_name);
+                        if (strlen(found_animation_file) == 0) {
+                            strncpy(found_animation_file, entry->d_name, sizeof(found_animation_file) - 1);
+                        }
+                    }
+                }
+            }
+            closedir(dir2);
+            
+            // If we found an animation file, try to use it
+            if (strlen(found_animation_file) > 0) {
+                ESP_LOGI("animation", "🎯 Found animation file: %s, attempting to use it as mega file", found_animation_file);
+                char alternative_path[512];
+                snprintf(alternative_path, sizeof(alternative_path), "/sdcard/%s", found_animation_file);
+                
+                FILE* alt_f = fopen(alternative_path, "rb");
+                if (alt_f != NULL) {
+                    ESP_LOGI("animation", "✅ Successfully opened animation file: %s", alternative_path);
+                    f = alt_f;   // Use the alternative file
+                    strncpy(mega_path, alternative_path, sizeof(mega_path) - 1);
+                    mega_path[sizeof(mega_path) - 1] = '\0';
+                } else {
+                    ESP_LOGE("animation", "❌ Failed to open animation file: %s", alternative_path);
+                    return false;
+                }
+            } else {
+                ESP_LOGE("animation", "No animation files found on SD card");
+                return false;
+            }
+        } else {
+            ESP_LOGE("animation", "Failed to open /sdcard directory for alternative search");
+            return false;
+        }
+    }
+    
+    // Get file size for verification
+    fseek(f, 0, SEEK_END);
+    long file_size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    ESP_LOGI("animation", "✅ Successfully opened mega file: %s (%ld bytes)", mega_path, file_size);
+    
+    // Animation frame counts: Normal(3), Embarrass(3), Fire(4), Happy(4), Inspiration(4), Question(4), Shy(2), Sleep(4)
+    int animation_frame_counts[] = {3, 3, 4, 4, 4, 4, 2, 4};
+    Animation_t* animations[] = {
+        &spiffs_normal, &spiffs_embarrass, &spiffs_fire, &spiffs_happy,
+        &spiffs_inspiration, &spiffs_question, &spiffs_shy, &spiffs_sleep
+    };
+    
+    int total_frames = 0;
+    for (int i = 0; i < 8; i++) {
+        total_frames += animation_frame_counts[i];
+    }
+    
+    ESP_LOGI("animation", "Loading %d total frames from SD card mega file", total_frames);
+    
+    // Clean up existing animations
+    for (int i = 0; i < 8; i++) {
+        animation_cleanup_spiffs_animation(animations[i]);
+    }
+    
+    // Allocate memory for all SD card images
+    lv_image_dsc_t** all_sd_card_imgs = (lv_image_dsc_t**)malloc(total_frames * sizeof(lv_image_dsc_t*));
+    if (all_sd_card_imgs == NULL) {
+        ESP_LOGE("animation", "Failed to allocate memory for all SD card images");
+        fclose(f);
+        return false;
+    }
+    
+    // Initialize all image descriptors
+    for (int i = 0; i < total_frames; i++) {
+        all_sd_card_imgs[i] = (lv_image_dsc_t*)malloc(sizeof(lv_image_dsc_t));
+        if (all_sd_card_imgs[i] == NULL) {
+            ESP_LOGE("animation", "Failed to allocate memory for image %d", i);
+            // Clean up
+            for (int j = 0; j < i; j++) {
+                if (all_sd_card_imgs[j]) {
+                    if (all_sd_card_imgs[j]->data) free((void*)all_sd_card_imgs[j]->data);
+                    free(all_sd_card_imgs[j]);
+                }
+            }
+            free(all_sd_card_imgs);
+            fclose(f);
+            return false;
+        }
+        
+        all_sd_card_imgs[i]->data = NULL;
+        all_sd_card_imgs[i]->data_size = 0;
+    }
+    
+    // Read all frames from mega file
+    int current_frame = 0;
+    bool success = true;
+    
+    for (int anim_idx = 0; anim_idx < 8 && success; anim_idx++) {
+        int frame_count = animation_frame_counts[anim_idx];
+        Animation_t* anim = animations[anim_idx];
+        
+        ESP_LOGI("animation", "Loading animation %d from SD card: %d frames", anim_idx, frame_count);
+        
+        // Allocate memory for this animation's images
+        anim->spiffs_imgs = (lv_image_dsc_t**)malloc(frame_count * sizeof(lv_image_dsc_t*));
+        if (anim->spiffs_imgs == NULL) {
+            ESP_LOGE("animation", "Failed to allocate memory for animation %d images", anim_idx);
+            success = false;
+            break;
+        }
+        
+        // Load frames for this animation
+        // Special handling for normal animation (anim_idx == 0): reuse normal1's image descriptor for normal2 and normal3
+        // Special handling for embarrass animation (anim_idx == 1): reuse embarrass1's image descriptor for embarrass2 and embarrass3
+        // Special handling for fire animation (anim_idx == 2): reuse fire1's image descriptor for fire2, fire3, fire4
+        // Special handling for happy animation (anim_idx == 3): reuse happy1's image descriptor for happy2, happy3, happy4
+        // Special handling for inspiration animation (anim_idx == 4): reuse inspiration1's image descriptor for inspiration2, inspiration3, inspiration4
+        bool is_normal_animation = (anim_idx == 0);  // Normal animation is first (index 0)
+        bool is_embarrass_animation = (anim_idx == 1);  // Embarrass animation is second (index 1)
+        bool is_fire_animation = (anim_idx == 2);  // Fire animation is third (index 2)
+        bool is_happy_animation = (anim_idx == 3);  // Happy animation is fourth (index 3)
+        bool is_inspiration_animation = (anim_idx == 4);  // Inspiration animation is fifth (index 4)
+        lv_image_dsc_t* normal1_base_frame = NULL;  // Will store normal1's descriptor for reuse
+        lv_image_dsc_t* embarrass1_base_frame = NULL;  // Will store embarrass1's descriptor for reuse
+        lv_image_dsc_t* fire1_base_frame = NULL;  // Will store fire1's descriptor for reuse
+        lv_image_dsc_t* happy1_base_frame = NULL;  // Will store happy1's descriptor for reuse
+        lv_image_dsc_t* inspiration1_base_frame = NULL;  // Will store inspiration1's descriptor for reuse
+        
+        for (int frame_idx = 0; frame_idx < frame_count && success; frame_idx++) {
+            ESP_LOGD("animation", "Loading frame %d from SD card mega file", current_frame);
+            
+            // Read header (6 uint32_t values)
+            uint32_t header_data[6];
+            if (fread(header_data, sizeof(uint32_t), 6, f) != 6) {
+                ESP_LOGE("animation", "Failed to read header for frame %d", current_frame);
+                success = false;
+                break;
+            }
+            
+            // Validate the magic number
+            if (header_data[0] != 0x4C56474C) {
+                ESP_LOGE("animation", "Invalid image magic for frame %d: 0x%x", current_frame, header_data[0]);
+                success = false;
+                break;
+            }
+            
+            // Calculate data size from image dimensions
+            uint32_t width = header_data[3];
+            uint32_t height = header_data[4];
+            uint32_t stride = header_data[5];
+            size_t data_size = height * stride;
+            bool is_overlay_frame = ((is_normal_animation || is_embarrass_animation || is_fire_animation || 
+                                     is_happy_animation || is_inspiration_animation) && 
+                                    (frame_idx > 0) && (header_data[1] == LV_IMAGE_CF_OVERLAY_PIXELS));
+            
+            if (is_overlay_frame) {
+                uint32_t entry_count = width;
+                
+                animation_overlay_pixel_t* overlay_pixels = nullptr;
+                if (entry_count > 0) {
+                    size_t expected_size = entry_count * sizeof(animation_overlay_pixel_t);
+                    if (expected_size != data_size) {
+                        ESP_LOGW("animation", "Overlay payload size mismatch for SD frame %d (entries=%u, expected=%zu, actual=%zu)",
+                                 current_frame, entry_count, expected_size, data_size);
+                    }
+                }
+                
+                if (entry_count > 0) {
+                    overlay_pixels = (animation_overlay_pixel_t*)malloc(entry_count * sizeof(animation_overlay_pixel_t));
+                    if (overlay_pixels == nullptr) {
+                        ESP_LOGE("animation", "Failed to allocate memory for SD overlay pixels (frame %d, count=%u)", current_frame, entry_count);
+                        success = false;
+                        break;
+                    }
+                    
+                    for (uint32_t i = 0; i < entry_count; ++i) {
+                        uint16_t components[3];
+                        if (fread(components, sizeof(uint16_t), 3, f) != 3) {
+                            ESP_LOGE("animation", "Failed to read SD overlay pixel %u for frame %d", i, current_frame);
+                            free(overlay_pixels);
+                            success = false;
+                            break;
+                        }
+                        overlay_pixels[i].x = components[0];
+                        overlay_pixels[i].y = components[1];
+                        overlay_pixels[i].color = components[2];
+                    }
+                    
+                    if (!success) {
+                        break;
+                    }
+                    
+                    size_t consumed = entry_count * sizeof(animation_overlay_pixel_t);
+                    if (data_size > consumed) {
+                        size_t remaining = data_size - consumed;
+                        if (fseek(f, remaining, SEEK_CUR) != 0) {
+                            ESP_LOGE("animation", "Failed to skip SD overlay padding for frame %d", current_frame);
+                            free(overlay_pixels);
+                            success = false;
+                            break;
+                        }
+                    }
+                } else if (data_size > 0) {
+                    if (fseek(f, data_size, SEEK_CUR) != 0) {
+                        ESP_LOGE("animation", "Failed to skip SD overlay payload for frame %d", current_frame);
+                        success = false;
+                        break;
+                    }
+                }
+                
+                bool overlay_set = false;
+                if (is_normal_animation) {
+                    overlay_set = animation_set_normal_overlay_frame(frame_idx, overlay_pixels, entry_count);
+                    if (!overlay_set) {
+                        ESP_LOGE("animation", "Failed to store SD normal overlay pixels for frame %d", current_frame);
+                    } else if (normal1_base_frame == nullptr) {
+                        ESP_LOGE("animation", "SD overlay frame %d encountered before base normal frame loaded", frame_idx);
+                        overlay_set = false;
+                    } else {
+                        anim->spiffs_imgs[frame_idx] = normal1_base_frame;
+                        ESP_LOGI("animation", "Loaded %u sparse SD overlay pixels for normal%d (frame %d)", entry_count, frame_idx + 1, current_frame);
+                    }
+                } else if (is_embarrass_animation) {
+                    overlay_set = animation_set_embarrass_overlay_frame(frame_idx, overlay_pixels, entry_count);
+                    if (!overlay_set) {
+                        ESP_LOGE("animation", "Failed to store SD embarrass overlay pixels for frame %d", current_frame);
+                    } else if (embarrass1_base_frame == nullptr) {
+                        ESP_LOGE("animation", "SD overlay frame %d encountered before base embarrass frame loaded", frame_idx);
+                        overlay_set = false;
+                    } else {
+                        anim->spiffs_imgs[frame_idx] = embarrass1_base_frame;
+                        ESP_LOGI("animation", "Loaded %u sparse SD overlay pixels for embarrass%d (frame %d)", entry_count, frame_idx + 1, current_frame);
+                    }
+                } else if (is_fire_animation) {
+                    overlay_set = animation_set_fire_overlay_frame(frame_idx, overlay_pixels, entry_count);
+                    if (!overlay_set) {
+                        ESP_LOGE("animation", "Failed to store SD fire overlay pixels for frame %d", current_frame);
+                    } else if (fire1_base_frame == nullptr) {
+                        ESP_LOGE("animation", "SD overlay frame %d encountered before base fire frame loaded", frame_idx);
+                        overlay_set = false;
+                    } else {
+                        anim->spiffs_imgs[frame_idx] = fire1_base_frame;
+                        ESP_LOGI("animation", "Loaded %u sparse SD overlay pixels for fire%d (frame %d)", entry_count, frame_idx + 1, current_frame);
+                    }
+                } else if (is_happy_animation) {
+                    overlay_set = animation_set_happy_overlay_frame(frame_idx, overlay_pixels, entry_count);
+                    if (!overlay_set) {
+                        ESP_LOGE("animation", "Failed to store SD happy overlay pixels for frame %d", current_frame);
+                    } else if (happy1_base_frame == nullptr) {
+                        ESP_LOGE("animation", "SD overlay frame %d encountered before base happy frame loaded", frame_idx);
+                        overlay_set = false;
+                    } else {
+                        anim->spiffs_imgs[frame_idx] = happy1_base_frame;
+                        ESP_LOGI("animation", "Loaded %u sparse SD overlay pixels for happy%d (frame %d)", entry_count, frame_idx + 1, current_frame);
+                    }
+                } else if (is_inspiration_animation) {
+                    overlay_set = animation_set_inspiration_overlay_frame(frame_idx, overlay_pixels, entry_count);
+                    if (!overlay_set) {
+                        ESP_LOGE("animation", "Failed to store SD inspiration overlay pixels for frame %d", current_frame);
+                    } else if (inspiration1_base_frame == nullptr) {
+                        ESP_LOGE("animation", "SD overlay frame %d encountered before base inspiration frame loaded", frame_idx);
+                        overlay_set = false;
+                    } else {
+                        anim->spiffs_imgs[frame_idx] = inspiration1_base_frame;
+                        ESP_LOGI("animation", "Loaded %u sparse SD overlay pixels for inspiration%d (frame %d)", entry_count, frame_idx + 1, current_frame);
+                    }
+                }
+                
+                if (!overlay_set) {
+                    if (overlay_pixels != nullptr) {
+                        free(overlay_pixels);
+                    }
+                    success = false;
+                    break;
+                }
+                
+                current_frame++;
+                continue;
+            }
+            
+            if (is_normal_animation && frame_idx > 0) {
+                if (fseek(f, data_size, SEEK_CUR) != 0) {
+                    ESP_LOGE("animation", "Failed to skip pixel data for frame %d", current_frame);
+                    success = false;
+                    break;
+                }
+                
+                anim->spiffs_imgs[frame_idx] = normal1_base_frame;
+                ESP_LOGI("animation", "Reusing normal1's image descriptor for normal%d (frame %d)", frame_idx + 1, current_frame);
+                current_frame++;
+                continue;
+            }
+            
+            // Set up the LVGL image descriptor (for normal1 or other animations)
+            lv_image_dsc_t* img_dsc = all_sd_card_imgs[current_frame];
+            img_dsc->header.magic = LV_IMAGE_HEADER_MAGIC;
+            img_dsc->header.cf = (lv_color_format_t)header_data[1];
+            img_dsc->header.flags = (uint32_t)header_data[2];
+            img_dsc->header.w = width;
+            img_dsc->header.h = height;
+            img_dsc->header.stride = stride;
+            img_dsc->data_size = data_size;
+            
+            // Allocate memory for pixel data
+            img_dsc->data = (const uint8_t*)malloc(data_size);
+            if (img_dsc->data == NULL) {
+                ESP_LOGE("animation", "Failed to allocate memory for frame %d data (%d bytes)", current_frame, data_size);
+                success = false;
+                break;
+            }
+            
+            // Read pixel data
+            if (fread((void*)img_dsc->data, 1, data_size, f) != data_size) {
+                ESP_LOGE("animation", "Failed to read pixel data for frame %d", current_frame);
+                success = false;
+                break;
+            }
+            
+            // Assign to animation
+            anim->spiffs_imgs[frame_idx] = img_dsc;
+            
+            // Store normal1's descriptor for reuse by normal2 and normal3
+            if (is_normal_animation && frame_idx == 0) {
+                normal1_base_frame = img_dsc;
+                ESP_LOGI("animation", "Loaded normal1 (base frame) for reuse by normal2 and normal3");
+            }
+            
+            // Store embarrass1's descriptor for reuse by embarrass2 and embarrass3
+            if (is_embarrass_animation && frame_idx == 0) {
+                embarrass1_base_frame = img_dsc;
+                ESP_LOGI("animation", "Loaded embarrass1 (base frame) for reuse by embarrass2 and embarrass3");
+            }
+            
+            // Store fire1's descriptor for reuse by fire2, fire3, and fire4
+            if (is_fire_animation && frame_idx == 0) {
+                fire1_base_frame = img_dsc;
+                ESP_LOGI("animation", "Loaded fire1 (base frame) for reuse by fire2, fire3, and fire4");
+            }
+            
+            // Store happy1's descriptor for reuse by happy2, happy3, and happy4
+            if (is_happy_animation && frame_idx == 0) {
+                happy1_base_frame = img_dsc;
+                ESP_LOGI("animation", "Loaded happy1 (base frame) for reuse by happy2, happy3, and happy4");
+            }
+            
+            // Store inspiration1's descriptor for reuse by inspiration2, inspiration3, and inspiration4
+            if (is_inspiration_animation && frame_idx == 0) {
+                inspiration1_base_frame = img_dsc;
+                ESP_LOGI("animation", "Loaded inspiration1 (base frame) for reuse by inspiration2, inspiration3, and inspiration4");
+            }
+            
+            ESP_LOGD("animation", "Successfully loaded frame %d: %dx%d, %d bytes", current_frame, width, height, data_size);
+            current_frame++;
+        }
+        
+        if (success) {
+            // Set up animation structure
+            anim->imges = (const lv_image_dsc_t**)anim->spiffs_imgs;
+            anim->use_spiffs = true;
+            anim->len = frame_count;
+            
+            // Create animation sequence (0, 1, 2, ...)
+            anim->animations = (int*)malloc(frame_count * sizeof(int));
+            if (anim->animations == NULL) {
+                ESP_LOGE("animation", "Failed to allocate memory for animation %d sequence", anim_idx);
+                success = false;
+                break;
+            }
+            
+            for (int i = 0; i < frame_count; i++) {
+                anim->animations[i] = i;
+            }
+            
+            ESP_LOGI("animation", "✅ Successfully loaded animation %d from SD card with %d frames", anim_idx, frame_count);
+        }
+    }
+    
+    fclose(f);
+    
+    if (success) {
+        ESP_LOGI("animation", "✅ Successfully loaded ALL animations from SD card mega file (%d total frames)", total_frames);
+        return true;
+    } else {
+        ESP_LOGE("animation", "❌ Failed to load animations from SD card mega file");
+        animation_clear_normal_overlay_frames();
+        
+        // Clean up on failure
+        for (int i = 0; i < total_frames; i++) {
+            if (all_sd_card_imgs[i]) {
+                if (all_sd_card_imgs[i]->data) free((void*)all_sd_card_imgs[i]->data);
+                free(all_sd_card_imgs[i]);
+            }
+        }
+        free(all_sd_card_imgs);
+        
+        // Clean up partial animations
+        for (int i = 0; i < 8; i++) {
+            animation_cleanup_spiffs_animation(animations[i]);
+        }
+        
+        return false;
+    }
+}
+
+// Individual animation loading functions for SD card
+bool animation_load_normal_from_sd_card(void)
+{
+    ESP_LOGI("animation", "Checking SD card mount status for normal animation...");
+    if (!SdCard::IsMounted()) {
+        ESP_LOGE("animation", "SD card not mounted - cannot load normal animation from SD card");
+        return false;
+    }
+    
+    ESP_LOGI("animation", "✅ SD card is mounted, loading normal animation...");
+    
+    // Clean up existing SD card normal animation if any
+    animation_cleanup_spiffs_animation(&spiffs_normal);
+    
+    // First try to load from merged file
+    ESP_LOGI("animation", "Attempting to load normal animation from merged file on SD card...");
+    if (animation_create_sd_card_animation_from_merged(&spiffs_normal, "normal_all.bin", 3)) {
+        ESP_LOGI("animation", "✅ Successfully loaded normal animation from merged file on SD card");
+        return true;
+    }
+    
+    // Fall back to individual files
+    ESP_LOGI("animation", "Merged file not found on SD card, trying individual files...");
+    const char* normal_frames[] = {"normal1.bin", "normal2.bin", "normal3.bin"};
+    
+    if (animation_create_sd_card_animation(&spiffs_normal, normal_frames, 3)) {
+        ESP_LOGI("animation", "✅ Successfully loaded normal animation from individual SD card files");
+        return true;
+    } else {
+        ESP_LOGE("animation", "❌ Failed to load normal animation from SD card (both merged and individual files)");
+        return false;
+    }
+}
+
+bool animation_load_embarrass_from_sd_card(void)
+{
+    if (!SdCard::IsMounted()) {
+        ESP_LOGE("animation", "SD card not mounted");
+        return false;
+    }
+    
+    // Clean up existing SD card embarrass animation if any
+    animation_cleanup_spiffs_animation(&spiffs_embarrass);
+    
+    // Load embarrass animation from SD card
+    const char* embarrass_frames[] = {"embarrass1.bin", "embarrass2.bin", "embarrass3.bin"};
+    
+    if (animation_create_sd_card_animation(&spiffs_embarrass, embarrass_frames, 3)) {
+        ESP_LOGI("animation", "✅ Successfully loaded embarrass animation from SD card");
+        return true;
+    } else {
+        ESP_LOGE("animation", "❌ Failed to load embarrass animation from SD card");
+        return false;
+    }
+}
+
+bool animation_load_fire_from_sd_card(void)
+{
+    if (!SdCard::IsMounted()) {
+        ESP_LOGE("animation", "SD card not mounted");
+        return false;
+    }
+    
+    // Clean up existing SD card fire animation if any
+    animation_cleanup_spiffs_animation(&spiffs_fire);
+    
+    // Load fire animation from SD card
+    const char* fire_frames[] = {"fire1.bin", "fire2.bin", "fire3.bin", "fire4.bin"};
+    
+    if (animation_create_sd_card_animation(&spiffs_fire, fire_frames, 4)) {
+        ESP_LOGI("animation", "✅ Successfully loaded fire animation from SD card");
+        return true;
+    } else {
+        ESP_LOGE("animation", "❌ Failed to load fire animation from SD card");
+        return false;
+    }
+}
+
+bool animation_load_happy_from_sd_card(void)
+{
+    if (!SdCard::IsMounted()) {
+        ESP_LOGE("animation", "SD card not mounted");
+        return false;
+    }
+    
+    // Clean up existing SD card happy animation if any
+    animation_cleanup_spiffs_animation(&spiffs_happy);
+    
+    // Load happy animation from SD card
+    const char* happy_frames[] = {"happy1.bin", "happy2.bin", "happy3.bin", "happy4.bin"};
+    
+    if (animation_create_sd_card_animation(&spiffs_happy, happy_frames, 4)) {
+        ESP_LOGI("animation", "✅ Successfully loaded happy animation from SD card");
+        return true;
+    } else {
+        ESP_LOGE("animation", "❌ Failed to load happy animation from SD card");
+        return false;
+    }
+}
+
+bool animation_load_inspiration_from_sd_card(void)
+{
+    if (!SdCard::IsMounted()) {
+        ESP_LOGE("animation", "SD card not mounted");
+        return false;
+    }
+    
+    // Clean up existing SD card inspiration animation if any
+    animation_cleanup_spiffs_animation(&spiffs_inspiration);
+    
+    // Load inspiration animation from SD card
+    const char* inspiration_frames[] = {"inspiration1.bin", "inspiration2.bin", "inspiration3.bin", "inspiration4.bin"};
+    
+    if (animation_create_sd_card_animation(&spiffs_inspiration, inspiration_frames, 4)) {
+        ESP_LOGI("animation", "✅ Successfully loaded inspiration animation from SD card");
+        return true;
+    } else {
+        ESP_LOGE("animation", "❌ Failed to load inspiration animation from SD card");
+        return false;
+    }
+}
+
+bool animation_load_question_from_sd_card(void)
+{
+    if (!SdCard::IsMounted()) {
+        ESP_LOGE("animation", "SD card not mounted");
+        return false;
+    }
+    
+    // Clean up existing SD card question animation if any
+    animation_cleanup_spiffs_animation(&spiffs_question);
+    
+    // Load question animation from SD card
+    const char* question_frames[] = {"question1.bin", "question2.bin", "question3.bin", "question4.bin"};
+    
+    if (animation_create_sd_card_animation(&spiffs_question, question_frames, 4)) {
+        ESP_LOGI("animation", "✅ Successfully loaded question animation from SD card");
+        return true;
+    } else {
+        ESP_LOGE("animation", "❌ Failed to load question animation from SD card");
+        return false;
+    }
+}
+
+bool animation_load_shy_from_sd_card(void)
+{
+    if (!SdCard::IsMounted()) {
+        ESP_LOGE("animation", "SD card not mounted");
+        return false;
+    }
+    
+    // Clean up existing SD card shy animation if any
+    animation_cleanup_spiffs_animation(&spiffs_shy);
+    
+    // Load shy animation from SD card
+    const char* shy_frames[] = {"shy1.bin", "shy2.bin"};
+    
+    if (animation_create_sd_card_animation(&spiffs_shy, shy_frames, 2)) {
+        ESP_LOGI("animation", "✅ Successfully loaded shy animation from SD card");
+        return true;
+    } else {
+        ESP_LOGE("animation", "❌ Failed to load shy animation from SD card");
+        return false;
+    }
+}
+
+bool animation_load_sleep_from_sd_card(void)
+{
+    if (!SdCard::IsMounted()) {
+        ESP_LOGE("animation", "SD card not mounted");
+        return false;
+    }
+    
+    // Clean up existing SD card sleep animation if any
+    animation_cleanup_spiffs_animation(&spiffs_sleep);
+    
+    // Load sleep animation from SD card
+    const char* sleep_frames[] = {"sleep1.bin", "sleep2.bin", "sleep3.bin", "sleep4.bin"};
+    
+    if (animation_create_sd_card_animation(&spiffs_sleep, sleep_frames, 4)) {
+        ESP_LOGI("animation", "✅ Successfully loaded sleep animation from SD card");
+        return true;
+    } else {
+        ESP_LOGE("animation", "❌ Failed to load sleep animation from SD card");
+        return false;
+    }
+}
