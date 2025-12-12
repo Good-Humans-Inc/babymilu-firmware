@@ -47,6 +47,10 @@ void AnimationUpdater::Initialize() {
     // Load configuration from NVS
     LoadConfiguration();
     
+    // Force reset download success flag on every reboot to enable cloud download
+    first_download_success_.store(false);
+    ESP_LOGI(TAG, "Reset download success flag - will download from cloud on next check");
+    
     ESP_LOGI(TAG, "Animation Updater initialized");
     ESP_LOGI(TAG, "  Server URL: %s", server_url_.c_str());
     ESP_LOGI(TAG, "  Check Interval: %u seconds", check_interval_seconds_);
@@ -298,42 +302,33 @@ void AnimationUpdater::UpdateLoop() {
     // Wait a bit before first check to let the system stabilize
     vTaskDelay(pdMS_TO_TICKS(5000)); // 5 seconds
     
-    // Startup guard: if local file exists and matches remote content length, skip immediate re-download.
-    // Still re-check periodically per check_interval.
-    size_t remote_len = 0;
-    if (GetRemoteMegaContentLength(remote_len) && remote_len > 0) {
-        size_t local_len = GetLocalMegaFileSize("/sdcard/test.bin");
-        if (local_len == remote_len && ValidateMegaAnimationFileFromDisk("/sdcard/test.bin")) {
-            ESP_LOGI(TAG, "Local mega file matches remote size (%u). Skipping download at startup.", (unsigned int)remote_len);
-            first_download_success_.store(true);
-        } else {
-            ESP_LOGI(TAG, "Local mega file missing/mismatch (local %u vs remote %u). Will download.", (unsigned int)local_len, (unsigned int)remote_len);
-        }
-    } else {
-        ESP_LOGW(TAG, "Could not get remote Content-Length at startup; proceeding with normal logic.");
-    }
+    // REMOVED: Startup guard - always download from cloud on reboot
+    // This ensures we get the latest animations from GCS bucket every reboot
+    ESP_LOGI(TAG, "Starting cloud download from GCS bucket on reboot...");
+    
+    // First download attempt on every reboot (before entering loop)
+    bool first_attempt = true;
     
     while (is_running_.load()) {
-        // COMMENTED OUT: HTTP server checking for HTTPS testing
-        // if (enabled_.load() && !first_download_success_.load()) {
-        //     CheckServerForUpdates();
-        // } else if (first_download_success_.load()) {
-        //     ESP_LOGI(TAG, "First download successful, skipping update checks");
-        //     // Continue the loop but skip the actual update check
-        // }
-        
-        // HTTPS DOWNLOAD: Check for animations_mega.bin updates
+        // HTTPS DOWNLOAD: Always download animations_mega.bin from GCS bucket on reboot
         if (enabled_.load()) {
-            if (!first_download_success_.load()) {
-                ESP_LOGI(TAG, "Attempting to download animations_mega.bin from HTTPS server...");
-                TestHttpsDownload();
+            // On first loop iteration (every reboot), always attempt download
+            if (first_attempt || !first_download_success_.load()) {
+                ESP_LOGI(TAG, "Attempting to download animations_mega.bin from GCS bucket...");
+                bool success = TestHttpsDownload();
+                if (success) {
+                    ESP_LOGI(TAG, "Successfully downloaded animations from GCS bucket");
+                } else {
+                    ESP_LOGW(TAG, "Failed to download from GCS bucket, will retry on next check");
+                }
+                first_attempt = false;
             } else {
-                // Skip download attempts after first successful download
-                ESP_LOGD(TAG, "First download already successful, skipping further download attempts");
+                // After successful download in this boot cycle, skip further downloads
+                ESP_LOGD(TAG, "Download already successful this boot, skipping further downloads");
             }
         }
         
-        // Wait for the specified interval
+        // Wait for the specified interval before next check
         vTaskDelay(pdMS_TO_TICKS(check_interval_seconds_ * 1000));
     }
     
@@ -790,6 +785,9 @@ bool AnimationUpdater::DownloadAnimationFile(const std::string& url, const std::
 
 // NEW: Download animations_mega.bin specifically
 bool AnimationUpdater::DownloadMegaAnimationFile(const std::string& url) {
+    ESP_LOGI(TAG, "=== DownloadMegaAnimationFile() called ===");
+    ESP_LOGI(TAG, "URL: %s", url.c_str());
+    
     try {
         // Check if SD card is available (try to use it if possible)
         bool use_sd_card = false;
@@ -981,10 +979,19 @@ bool AnimationUpdater::DownloadMegaAnimationFile(const std::string& url) {
         const size_t buf_size = 8192;
         size_t total_read = 0;
         bool download_success = true;
+        
+        // Progress logging
+        size_t last_logged_bytes = 0;
+        const size_t log_interval = 100000; // Log every 100KB
+        uint32_t last_log_time = esp_timer_get_time() / 1000;
+        const uint32_t log_time_interval = 2000; // Log at least every 2 seconds
+        
         uint32_t timeout_start = esp_timer_get_time() / 1000; // Start time in ms
         uint32_t timeout_duration = 600000; // 10 minutes timeout (increased for large files)
         uint32_t last_read_time = timeout_start;
         uint32_t read_timeout = 60000; // 1 minute timeout between reads (to detect stalled downloads)
+        
+        ESP_LOGI(TAG, "Starting download...");
         
         while (download_success) {
             // Check for overall timeout
@@ -1047,14 +1054,26 @@ bool AnimationUpdater::DownloadMegaAnimationFile(const std::string& url) {
             
             total_read += bytes_read;
             
-            // Log progress every 50KB
-            if (total_read % 51200 == 0) {
+            // Log progress more frequently - every 100KB or every 2 seconds, whichever comes first
+            uint32_t current_time = esp_timer_get_time() / 1000;
+            bool should_log = false;
+            
+            if (total_read - last_logged_bytes >= log_interval) {
+                should_log = true;
+                last_logged_bytes = total_read;
+            } else if (current_time - last_log_time >= log_time_interval) {
+                should_log = true;
+                last_log_time = current_time;
+            }
+            
+            if (should_log) {
                 if (unknown_length) {
                     ESP_LOGI(TAG, "Download progress: %u bytes downloaded", (unsigned int)total_read);
                 } else {
-                    // Log progress, but don't trust Content-Length - continue reading until connection closes
-                    ESP_LOGI(TAG, "Download progress: %u bytes downloaded (server reported %u bytes)", 
-                             (unsigned int)total_read, (unsigned int)content_length);
+                    // Calculate percentage if we know the content length
+                    float percent = (content_length > 0) ? (float(total_read) / float(content_length)) * 100.0f : 0.0f;
+                    ESP_LOGI(TAG, "Download progress: %u / %u bytes (%.1f%%)", 
+                             (unsigned int)total_read, (unsigned int)content_length, percent);
                     // Warn if we've exceeded reported Content-Length (likely incorrect header)
                     if (total_read > content_length) {
                         ESP_LOGW(TAG, "⚠️  Downloaded %u bytes exceeds reported Content-Length (%u) - server header may be incorrect, continuing...", 
@@ -1112,7 +1131,19 @@ bool AnimationUpdater::DownloadMegaAnimationFile(const std::string& url) {
         // Additional sync delay for SD card to ensure data is fully written
         vTaskDelay(pdMS_TO_TICKS(500));
         
-        ESP_LOGI(TAG, "Successfully downloaded and saved %s (%u bytes)", filename, (unsigned int)total_read);
+        // Calculate download time and speed
+        uint32_t download_time_ms = (esp_timer_get_time() / 1000) - timeout_start;
+        float download_speed_kbps = (download_time_ms > 0) ? (float(total_read) / 1024.0f) / (float(download_time_ms) / 1000.0f) : 0.0f;
+        
+        ESP_LOGI(TAG, "=== Download completed successfully ===");
+        ESP_LOGI(TAG, "File: %s", filename);
+        ESP_LOGI(TAG, "Size: %u bytes", (unsigned int)total_read);
+        ESP_LOGI(TAG, "Time: %u ms (%.2f seconds)", download_time_ms, download_time_ms / 1000.0f);
+        ESP_LOGI(TAG, "Speed: %.2f KB/s", download_speed_kbps);
+        if (!unknown_length && content_length > 0) {
+            float percent = (float(total_read) / float(content_length)) * 100.0f;
+            ESP_LOGI(TAG, "Progress: %.1f%% complete", percent);
+        }
         
         // Reload animations from SD card
         ESP_LOGI(TAG, "Reloading animations from SD card...");
