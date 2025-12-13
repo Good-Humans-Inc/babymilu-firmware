@@ -13,19 +13,33 @@ def rgb_to_rgb565(r, g, b):
     # Standard RGB565 conversion: ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3)
     return ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3)
 
-def pixels_differ(r1, g1, b1, r2, g2, b2, threshold=0):
+def pixels_differ(r1, g1, b1, r2, g2, b2, threshold=0, compare_rgb565=False):
     """
     Check if two pixels are different.
     threshold: maximum difference per channel to be considered the same (default: 0 = exact match)
+    compare_rgb565: if True, compares in RGB565 space; if False, compares in RGB888 space
     """
-    return (abs(r1 - r2) > threshold or 
-            abs(g1 - g2) > threshold or 
-            abs(b1 - b2) > threshold)
+    if compare_rgb565:
+        # Compare in RGB565 space (more efficient since output is RGB565)
+        rgb565_1 = rgb_to_rgb565(r1, g1, b1)
+        rgb565_2 = rgb_to_rgb565(r2, g2, b2)
+        return rgb565_1 != rgb565_2
+    else:
+        # Compare in RGB888 space
+        return (abs(r1 - r2) > threshold or 
+                abs(g1 - g2) > threshold or 
+                abs(b1 - b2) > threshold)
 
-def extract_difference_pixels(image1_path, image2_path, diff_threshold=0):
+def extract_difference_pixels(image1_path, image2_path, diff_threshold=0, compare_rgb565=True):
     """
     Extract pixels that differ between image1 and image2.
     Returns pixels from image2 that are different from image1.
+    
+    Args:
+        image1_path: Path to first image
+        image2_path: Path to second image
+        diff_threshold: Threshold for RGB888 comparison (ignored if compare_rgb565=True)
+        compare_rgb565: If True, compares in RGB565 space (recommended for RGB565 output)
     """
     pixels = []
     
@@ -43,10 +57,13 @@ def extract_difference_pixels(image1_path, image2_path, diff_threshold=0):
         width = min(width1, width2)
         height = min(height1, height2)
         
+        comparison_space = "RGB565" if compare_rgb565 else "RGB888"
         print(f"Processing images:")
         print(f"  Image1: {width1}x{height1}, mode: {img1.mode}")
         print(f"  Image2: {width2}x{height2}, mode: {img2.mode}")
-        print(f"  Comparing: {width}x{height} pixels (diff threshold: {diff_threshold})")
+        print(f"  Comparing: {width}x{height} pixels in {comparison_space} space")
+        if not compare_rgb565:
+            print(f"  Diff threshold: {diff_threshold}")
         
         # Iterate through all pixels
         for y in range(height):
@@ -55,7 +72,7 @@ def extract_difference_pixels(image1_path, image2_path, diff_threshold=0):
                 r2, g2, b2 = img2.getpixel((x, y))
                 
                 # If pixels differ, include the pixel from image2
-                if pixels_differ(r1, g1, b1, r2, g2, b2, diff_threshold):
+                if pixels_differ(r1, g1, b1, r2, g2, b2, diff_threshold, compare_rgb565):
                     rgb565 = rgb_to_rgb565(r2, g2, b2)
                     pixels.append((x, y, rgb565))
     
@@ -95,14 +112,26 @@ def generate_overlay_header(pixels, output_header, header_guard_name="EMBARRASS_
 
 if __name__ == "__main__":
     if len(sys.argv) < 3:
-        print("Usage: python generate_diff_overlay.py <image1> <image2> <output.h> [diff_threshold]")
-        print("  diff_threshold: maximum difference per channel to be considered the same (default: 0 = exact match)")
+        print("Usage: python generate_diff_overlay.py <image1> <image2> <output.h> [--rgb888] [diff_threshold]")
+        print("  --rgb888: Compare in RGB888 space (default: RGB565 space, recommended)")
+        print("  diff_threshold: maximum difference per channel for RGB888 comparison (default: 0 = exact match)")
+        print("\nNote: RGB565 comparison is recommended since output format is RGB565.")
+        print("      This reduces false positives where pixels differ in RGB888 but match in RGB565.")
         sys.exit(1)
     
     image1_path = sys.argv[1]
     image2_path = sys.argv[2]
     output_header = sys.argv[3]
-    diff_threshold = int(sys.argv[4]) if len(sys.argv) > 4 else 0
+    
+    # Check for --rgb888 flag
+    compare_rgb565 = True
+    diff_threshold = 0
+    if len(sys.argv) > 4:
+        if sys.argv[4] == "--rgb888":
+            compare_rgb565 = False
+            diff_threshold = int(sys.argv[5]) if len(sys.argv) > 5 else 0
+        else:
+            diff_threshold = int(sys.argv[4])
     
     if not os.path.exists(image1_path):
         print(f"Error: Input image1 {image1_path} not found")
@@ -112,8 +141,9 @@ if __name__ == "__main__":
         print(f"Error: Input image2 {image2_path} not found")
         sys.exit(1)
     
-    print(f"Finding pixel differences from {image1_path} to {image2_path} (diff threshold: {diff_threshold})")
-    pixels = extract_difference_pixels(image1_path, image2_path, diff_threshold)
+    comparison_mode = "RGB888" if not compare_rgb565 else "RGB565"
+    print(f"Finding pixel differences from {image1_path} to {image2_path} (comparison: {comparison_mode})")
+    pixels = extract_difference_pixels(image1_path, image2_path, diff_threshold, compare_rgb565)
     print(f"Found {len(pixels)} different pixels")
     
     # Generate header guard name from output filename

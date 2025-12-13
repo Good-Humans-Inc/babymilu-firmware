@@ -43,83 +43,119 @@ def find_emotion_frames(input_dir):
     
     return emotions
 
-def generate_overlays(emotions, overlay_dir, diff_threshold=0, target_size=None):
-    """Generate overlay .h files for all emotions (resizes images if target_size provided)"""
+def resize_and_convert_to_rgb(emotions, target_size):
+    """Resize all PNG images and convert them to RGB mode (for RGB565 processing)"""
     from PIL import Image
     import tempfile
     import shutil
     
+    temp_dir = None
+    resized_files = {}
+    
+    try:
+        if target_size:
+            temp_dir = Path(tempfile.mkdtemp())
+            print(f"\nStep 1: Resizing and converting all images to RGB mode...")
+            
+            for emotion, frames in emotions.items():
+                resized_files[emotion] = {}
+                
+                for frame_num, img_path in frames.items():
+                    try:
+                        with Image.open(img_path) as img:
+                            original_size = img.size
+                            original_mode = img.mode
+                            
+                            # Resize if needed
+                            if img.size != target_size:
+                                img_resized = img.resize(target_size, Image.Resampling.LANCZOS)
+                            else:
+                                img_resized = img.copy()
+                            
+                            # Convert to RGB mode (removes alpha, ensures RGB565 compatibility)
+                            if img_resized.mode != 'RGB':
+                                if img_resized.mode == 'RGBA':
+                                    # Convert RGBA to RGB (alpha channel removed)
+                                    img_resized = img_resized.convert('RGB')
+                                elif img_resized.mode in ('LA', 'P'):
+                                    # Convert other modes with potential alpha to RGB
+                                    img_resized = img_resized.convert('RGB')
+                                else:
+                                    # Convert any other mode to RGB
+                                    img_resized = img_resized.convert('RGB')
+                            
+                            # Save resized RGB image with original base name (for create_mega_animations.py to find)
+                            # e.g., normal1.png, normal2.png, etc.
+                            original_name = Path(img_path).name
+                            base_name = original_name.rsplit('.', 1)[0]  # Remove extension
+                            resized_path = temp_dir / f"{base_name}.png"
+                            img_resized.save(resized_path, "PNG")
+                            resized_files[emotion][frame_num] = str(resized_path)
+                            
+                            if original_size != target_size or original_mode != 'RGB':
+                                print(f"  {emotion}{frame_num}: {original_size} ({original_mode}) → {target_size} (RGB)")
+                            else:
+                                print(f"  {emotion}{frame_num}: Already {target_size} (RGB)")
+                    
+                    except Exception as e:
+                        print(f"  ✗ Error processing {emotion}{frame_num}: {e}")
+                        # Keep original path if resize fails
+                        resized_files[emotion][frame_num] = img_path
+            
+            print(f"✓ All images resized and converted to RGB mode")
+            return resized_files, temp_dir
+        else:
+            # No resizing needed, return original paths
+            return {emotion: frames.copy() for emotion, frames in emotions.items()}, None
+    
+    except Exception as e:
+        print(f"✗ Error in resize_and_convert_to_rgb: {e}")
+        if temp_dir and temp_dir.exists():
+            shutil.rmtree(temp_dir)
+        return {emotion: frames.copy() for emotion, frames in emotions.items()}, None
+
+def generate_overlays(emotions, overlay_dir, diff_threshold=0, target_size=None, resized_files=None):
+    """Generate overlay .h files for all emotions (uses pre-resized RGB images)"""
     overlay_dir = Path(overlay_dir)
     overlay_dir.mkdir(parents=True, exist_ok=True)
     
     generated = {}
     script_path = Path(__file__).parent.parent / "images" / "frame difference" / "generate_diff_overlay.py"
-    temp_dir = None
     
-    try:
-        # Create temp directory for resized images if needed
-        if target_size:
-            temp_dir = Path(tempfile.mkdtemp())
+    # Use resized files if provided, otherwise use original files
+    files_to_use = resized_files if resized_files else emotions
+    
+    print(f"\nStep 2: Generating overlay files...")
+    for emotion, frames in files_to_use.items():
+        if 1 not in frames:
+            continue
         
-        for emotion, frames in emotions.items():
-            if 1 not in frames:
-                continue
-            
-            overlays = {}
-            sorted_frame_nums = sorted(frames.keys())
-            
-            # Generate sequential overlays: frame1→frame2, frame2→frame3, frame3→frame4
-            for i in range(len(sorted_frame_nums) - 1):
-                frame_num_from = sorted_frame_nums[i]
-                frame_num_to = sorted_frame_nums[i + 1]
-                
-                frame_from = frames[frame_num_from]
-                frame_to = frames[frame_num_to]
-                overlay_file = overlay_dir / f"{emotion}_overlay{frame_num_to}.h"
-                
-                # Resize frames if needed
-                if target_size:
-                    with Image.open(frame_from) as img:
-                        original_size = img.size
-                        if img.size != target_size:
-                            img_resized = img.resize(target_size, Image.Resampling.LANCZOS)
-                            frame_from_resized = temp_dir / f"{emotion}_frame{frame_num_from}_resized.jpg"
-                            img_resized.save(frame_from_resized, "JPEG", quality=95)
-                            frame_from = str(frame_from_resized)
-                            print(f"    Resized {emotion} frame {frame_num_from} from {original_size} to {target_size}")
-                        else:
-                            print(f"    {emotion} frame {frame_num_from} already {target_size}, no resize needed")
-                    
-                    with Image.open(frame_to) as img:
-                        original_size = img.size
-                        if img.size != target_size:
-                            img_resized = img.resize(target_size, Image.Resampling.LANCZOS)
-                            frame_to_resized = temp_dir / f"{emotion}_frame{frame_num_to}_resized.jpg"
-                            img_resized.save(frame_to_resized, "JPEG", quality=95)
-                            frame_to = str(frame_to_resized)
-                            print(f"    Resized {emotion} frame {frame_num_to} from {original_size} to {target_size}")
-                        else:
-                            print(f"    {emotion} frame {frame_num_to} already {target_size}, no resize needed")
-                
-                print(f"Generating {emotion} overlay{frame_num_to}.h (frame {frame_num_from}→{frame_num_to})...")
-                result = subprocess.run([
-                    sys.executable, str(script_path),
-                    frame_from, frame_to, str(overlay_file), str(diff_threshold)
-                ], capture_output=True, text=True)
-                
-                if result.returncode == 0:
-                    overlays[frame_num_to] = str(overlay_file)
-                    print(f"  ✓ Generated {overlay_file.name}")
-                else:
-                    print(f"  ✗ Failed: {result.stderr}")
-            
-            if overlays:
-                generated[emotion] = overlays
+        overlays = {}
+        sorted_frame_nums = sorted(frames.keys())
         
-    finally:
-        # Clean up temp directory
-        if temp_dir and temp_dir.exists():
-            shutil.rmtree(temp_dir)
+        # Generate overlays: frame1→frame2, frame1→frame3, frame1→frame4
+        frame_num_from = sorted_frame_nums[0]  # Always use frame 1 as the base
+        for i in range(1, len(sorted_frame_nums)):
+            frame_num_to = sorted_frame_nums[i]
+            
+            frame_from = frames[frame_num_from]
+            frame_to = frames[frame_num_to]
+            overlay_file = overlay_dir / f"{emotion}_overlay{frame_num_to}.h"
+            
+            print(f"Generating {emotion} overlay{frame_num_to}.h (frame {frame_num_from}→{frame_num_to})...")
+            result = subprocess.run([
+                sys.executable, str(script_path),
+                frame_from, frame_to, str(overlay_file), str(diff_threshold)
+            ], capture_output=True, text=True)
+            
+            if result.returncode == 0:
+                overlays[frame_num_to] = str(overlay_file)
+                print(f"  ✓ Generated {overlay_file.name}")
+            else:
+                print(f"  ✗ Failed: {result.stderr}")
+        
+        if overlays:
+            generated[emotion] = overlays
     
     return generated
 
@@ -131,7 +167,7 @@ def create_mega_bin(input_dir, output_file, size=(256, 256), format=None):
     if format:
         cmd.extend(["--format", format])
     
-    print(f"\nCreating mega animation file...")
+    print(f"\nStep 3: Creating mega animation file from RGB images...")
     result = subprocess.run(cmd)
     return result.returncode == 0
 
@@ -170,20 +206,31 @@ def main():
     emotions = find_emotion_frames(input_dir)
     print(f"Found {len(emotions)} emotions: {', '.join(emotions.keys())}")
     
-    # Generate overlays (resize images to target size first)
+    # Step 1: Resize all PNGs and convert to RGB mode (for RGB565)
+    resized_files, temp_dir = resize_and_convert_to_rgb(emotions, size)
+    
+    # Step 2: Generate overlays using resized RGB images
     overlay_dir = Path(__file__).parent.parent / "images" / "frame difference"
-    print(f"\nGenerating overlay files in {overlay_dir}...")
-    print(f"Resizing images to {size[0]}x{size[1]} before generating overlays...")
-    generated = generate_overlays(emotions, overlay_dir, threshold, target_size=size)
+    generated = generate_overlays(emotions, overlay_dir, threshold, target_size=size, resized_files=resized_files)
     
-    # Create mega bin
-    success = create_mega_bin(input_dir, output_file, size, format)
+    # Step 3: Create mega bin using resized RGB images
+    # Use temp_dir if we resized images, otherwise use original input_dir
+    input_dir_for_bin = str(temp_dir) if temp_dir else input_dir
     
-    if success:
-        print(f"\n✓ Success! Mega animation file: {output_file}")
-    else:
-        print(f"\n✗ Failed to create mega animation file")
-        sys.exit(1)
+    try:
+        success = create_mega_bin(input_dir_for_bin, output_file, size, format)
+        
+        if success:
+            print(f"\n✓ Success! Mega animation file: {output_file}")
+        else:
+            print(f"\n✗ Failed to create mega animation file")
+            sys.exit(1)
+    finally:
+        # Clean up temp directory
+        if temp_dir and temp_dir.exists():
+            import shutil
+            shutil.rmtree(temp_dir)
+            print(f"Cleaned up temporary directory")
 
 if __name__ == "__main__":
     main()

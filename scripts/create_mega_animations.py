@@ -129,6 +129,15 @@ def get_default_sleep_overlay_paths():
         4: frame_diff_dir / "sleep_overlay4.h"
     }
 
+def get_default_normal_overlay_paths():
+    """Return default paths to normal overlay headers relative to repo root."""
+    script_dir = Path(__file__).resolve().parent
+    frame_diff_dir = script_dir.parent / "images" / "frame difference"
+    return {
+        2: frame_diff_dir / "normal_overlay2.h",
+        3: frame_diff_dir / "normal_overlay3.h"
+    }
+
 def load_overlay_pixels(header_path):
     """Parse overlay pixel data from overlay_pixels.h"""
     path = Path(header_path)
@@ -511,7 +520,7 @@ class AnimationSet:
         return sum(len(frame) for frame in self.frames)
 
 def create_mega_animations(input_dir, output_file, target_size=(256, 256), force_format=None,
-                           overlay_pixels=None, embarrass_overlays=None, fire_overlays=None,
+                           normal_overlays=None, embarrass_overlays=None, fire_overlays=None,
                            happy_overlays=None, inspiration_overlays=None, question_overlays=None,
                            shy_overlays=None, sleep_overlays=None):
     """Create mega animation file with all animations"""
@@ -521,15 +530,17 @@ def create_mega_animations(input_dir, output_file, target_size=(256, 256), force
     print(f"Output file: {output_file}")
     print(f"Target size: {target_size[0]}x{target_size[1]}")
     
-    # Configure normal animation overlay usage if pixels are provided
+    # Configure normal animation overlay usage if overlays are provided
     normal_overlay_config = None
     normal_min_files = 3
-    if overlay_pixels:
+    if normal_overlays:
+        # Convert frame numbers (2, 3) to frame indices (1, 2)
+        normal_overlays_indices = {idx - 1: pixels for idx, pixels in normal_overlays.items() if idx in [2, 3]}
         normal_overlay_config = {
             "type": "overlay_pixels",
-            "pixels": overlay_pixels,
+            "pixels": normal_overlays_indices,  # Dict format: {1: pixels, 2: pixels}
             "base_frame_index": 0,
-            "target_frames": [1, 2],
+            "target_frames": [1, 2],  # Frame indices 1 and 2 (normal2 and normal3)
         }
         normal_min_files = 1
         print("Normal animation will reuse base frame with overlay pixels for frames 2 and 3")
@@ -737,10 +748,14 @@ Examples:
                        help='Target image size (default: 256 256)')
     parser.add_argument('--format', choices=['RGB565', 'RGB565A8', 'RGB888', 'ARGB8888'], 
                        help='Force color format (auto-detect if not specified)')
-    parser.add_argument('--overlay-header',
-                        default=str(get_default_overlay_header_path()),
-                        help='Path to overlay_pixels.h for deriving Normal frame overlays (default: %(default)s). '
-                             'Set to "none" to disable overlay-based frames.')
+    parser.add_argument('--normal-overlay2',
+                        default=None,
+                        help='Path to normal_overlay2.h (default: images/frame difference/normal_overlay2.h). '
+                             'Set to "none" to disable normal overlay frames.')
+    parser.add_argument('--normal-overlay3',
+                        default=None,
+                        help='Path to normal_overlay3.h (default: images/frame difference/normal_overlay3.h). '
+                             'Set to "none" to disable normal overlay frames.')
     parser.add_argument('--embarrass-overlay2',
                         default=None,
                         help='Path to embarrass_overlay2.h (default: images/frame difference/embarrass_overlay2.h). '
@@ -773,12 +788,26 @@ def main():
     else:
         print("Using automatic color format detection")
     
-    # Load overlay pixels if requested
-    overlay_pixels = None
-    if args.overlay_header and args.overlay_header.lower() != "none":
-        overlay_pixels = load_overlay_pixels(args.overlay_header)
-        if not overlay_pixels:
-            overlay_pixels = None
+    # Load normal overlays if requested
+    normal_overlays = None
+    default_normal_paths = get_default_normal_overlay_paths()
+    
+    overlay2_path = args.normal_overlay2 if args.normal_overlay2 is not None else str(default_normal_paths[2])
+    overlay3_path = args.normal_overlay3 if args.normal_overlay3 is not None else str(default_normal_paths[3])
+    
+    if overlay2_path.lower() != "none" and overlay3_path.lower() != "none":
+        normal_overlays = {}
+        if overlay2_path.lower() != "none":
+            pixels2 = load_overlay_pixels(overlay2_path)
+            if pixels2:
+                normal_overlays[2] = pixels2  # Frame number 2 (normal2)
+        if overlay3_path.lower() != "none":
+            pixels3 = load_overlay_pixels(overlay3_path)
+            if pixels3:
+                normal_overlays[3] = pixels3  # Frame number 3 (normal3)
+        
+        if not normal_overlays:
+            normal_overlays = None
     else:
         print("Normal overlay-based frame generation disabled by user request")
     
@@ -841,7 +870,7 @@ def main():
         args.output_file, 
         target_size=tuple(args.size),
         force_format=force_format,
-        overlay_pixels=overlay_pixels,
+        normal_overlays=normal_overlays,
         embarrass_overlays=embarrass_overlays,
         fire_overlays=fire_overlays,
         happy_overlays=happy_overlays,
