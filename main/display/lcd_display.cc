@@ -1184,12 +1184,15 @@ static lv_image_dsc_t* compose_image_with_overlay(const lv_image_dsc_t* base_img
         uint16_t y = overlay_list[i].y;
         uint16_t color = overlay_list[i].color;
         
-        // Transform coordinates if display is rotated 180 degrees
+        // Always apply 180° rotation to overlay coordinates to match rotated emotion1 base images
         // For 180° rotation: (x, y) -> (width - 1 - x, height - 1 - y)
-        if (rotated_180) {
-            x = (uint16_t)(img_width - 1 - x);
-            y = (uint16_t)(img_height - 1 - y);
-        }
+        // This ensures overlays align properly with the globally rotated emotion1 images
+        // Note: EchoEar uses SetDisplayRotation180(true) which rotates the entire display via LVGL
+        // Since the base images are rotated by LVGL, overlay coordinates must be rotated to match
+        /*if (img_width > 0 && img_height > 0) {
+            x = (uint16_t)((int)img_width - 1 - (int)x);
+            y = (uint16_t)((int)img_height - 1 - (int)y);
+        }*/
         
         // Check bounds
         if (x >= (uint16_t)img_width || y >= (uint16_t)img_height) {
@@ -1240,9 +1243,10 @@ void LcdDisplay::SetEmotionImg(const lv_image_dsc_t *img, int frame_index)
     
     // For overlay frames (frame_index 1, 2, or 3), compose with sparse overlay pixels
     // Base frame (frame_index 0) remains unchanged
+    // Overlays are always rotated 180° to match the globally rotated emotion1 base images
     const lv_image_dsc_t* img_to_display = img;
     if (frame_index >= 1 && frame_index <= 3) {
-        lv_image_dsc_t* composed = compose_image_with_overlay(img, frame_index, display_rotated_180_);
+        lv_image_dsc_t* composed = compose_image_with_overlay(img, frame_index, true);
         if (composed != nullptr) {
             img_to_display = composed;
         }
