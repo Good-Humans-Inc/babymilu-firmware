@@ -570,7 +570,7 @@ private:
         };
         ESP_ERROR_CHECK(iot_button_create(&pwr_btn_config, pwr_btn_driver_, &pwr_btn));
         
-        // Power button single click - volume up in volume mode only (brightness toggle removed)
+        // Power button single click - toggle brightness 0/100 (or volume up in volume mode)
         iot_button_register_cb(pwr_btn, BUTTON_SINGLE_CLICK, nullptr, [](void* button_handle, void* usr_data) {
             auto self = static_cast<CustomBoard*>(usr_data);
             ESP_LOGI(TAG, "Power button single click, volume_mode_=%d", self->volume_mode_);
@@ -579,8 +579,16 @@ private:
                 ESP_LOGI(TAG, "Volume mode active, increasing volume");
                 self->AdjustVolume(10);
             } else {
-                // Normal mode: do nothing (brightness toggle removed)
-                ESP_LOGI(TAG, "Power button single click - no action in normal mode");
+                // Normal mode: toggle brightness between 0 and 100
+                auto backlight = self->GetBacklight();
+                uint8_t current_brightness = backlight->brightness();
+                if (current_brightness == 0) {
+                    ESP_LOGI(TAG, "Brightness is 0, setting to 100");
+                    backlight->SetBrightness(100, true);
+                } else {
+                    ESP_LOGI(TAG, "Brightness is %d, setting to 0", current_brightness);
+                    backlight->SetBrightness(0, true);
+                }
             }
         }, this);
         

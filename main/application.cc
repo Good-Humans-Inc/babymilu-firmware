@@ -1565,6 +1565,13 @@ void Application::SetDeviceState(DeviceState state)
         break;
     case kDeviceStateSpeaking:
         display->SetStatus(Lang::Strings::SPEAKING);
+        
+        // Set brightness to 100 when TTS starts
+        auto backlight = board.GetBacklight();
+        if (backlight) {
+            backlight->SetBrightness(100, true);
+            ESP_LOGI(TAG, "TTS started - brightness set to 100");
+        }
 
         if (listening_mode_ != kListeningModeRealtime)
         {
