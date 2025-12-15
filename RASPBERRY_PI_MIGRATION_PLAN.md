@@ -524,3 +524,4 @@ async def handle_conversation(self):
 The architecture should mirror your ESP32 firmware's state machine and animation patterns, but leverage Python's strengths for the AI components.
 
 
+

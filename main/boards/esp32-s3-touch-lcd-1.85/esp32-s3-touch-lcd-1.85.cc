@@ -18,6 +18,7 @@
 #include <esp_lcd_panel_ops.h>
 #include <esp_lcd_st77916.h>
 #include <esp_timer.h>
+#include <esp_sleep.h>
 #include "esp_io_expander_tca9554.h"
 
 #define TAG "waveshare_lcd_1_85"
@@ -221,12 +222,16 @@ private:
     i2c_master_bus_handle_t i2c_bus_;
     esp_io_expander_handle_t io_expander = NULL;
     LcdDisplay* display_;
+    esp_lcd_panel_handle_t panel_ = nullptr;
     button_handle_t boot_btn, pwr_btn;
     button_driver_t* boot_btn_driver_ = nullptr;
     button_driver_t* pwr_btn_driver_ = nullptr;
     static CustomBoard* instance_;
     bool volume_mode_ = false;
     esp_timer_handle_t volume_display_timer_ = nullptr;
+    esp_timer_handle_t power_off_timer_ = nullptr;
+    bool power_off_timer_active_ = false;
+    int64_t long_press_start_time_ = 0;
     
 
 
@@ -355,15 +360,15 @@ private:
             .bits_per_pixel = QSPI_LCD_BIT_PER_PIXEL,    // Implemented by LCD command `3Ah` (16/18)
             .vendor_config = &vendor_config,
         };
-        ESP_ERROR_CHECK(esp_lcd_new_panel_st77916(panel_io, &panel_config, &panel));
+        ESP_ERROR_CHECK(esp_lcd_new_panel_st77916(panel_io, &panel_config, &panel_));
 
-        esp_lcd_panel_reset(panel);
-        esp_lcd_panel_init(panel);
-        esp_lcd_panel_disp_on_off(panel, true);
-        esp_lcd_panel_swap_xy(panel, DISPLAY_SWAP_XY);
-        esp_lcd_panel_mirror(panel, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y);
+        esp_lcd_panel_reset(panel_);
+        esp_lcd_panel_init(panel_);
+        esp_lcd_panel_disp_on_off(panel_, true);
+        esp_lcd_panel_swap_xy(panel_, DISPLAY_SWAP_XY);
+        esp_lcd_panel_mirror(panel_, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y);
 
-        display_ = new SpiLcdDisplay(panel_io, panel,
+        display_ = new SpiLcdDisplay(panel_io, panel_,
                                     DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_OFFSET_X, DISPLAY_OFFSET_Y, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y, DISPLAY_SWAP_XY,
                                     {
                                         .text_font = &font_puhui_16_4,
@@ -474,6 +479,34 @@ private:
         };
         ESP_ERROR_CHECK(esp_timer_create(&volume_timer_args, &volume_display_timer_));
 
+        // Create power-off timer (will be started on long press)
+        esp_timer_create_args_t power_off_timer_args = {
+            .callback = [](void* arg) {
+                auto self = static_cast<CustomBoard*>(arg);
+                ESP_LOGI(TAG, "Power-off timer expired - entering deep sleep...");
+                self->power_off_timer_active_ = false;
+                
+                // Turn off display
+                if (self->panel_ != nullptr) {
+                    esp_lcd_panel_disp_on_off(self->panel_, false);
+                }
+                
+                // Turn off backlight
+                auto backlight = self->GetBacklight();
+                if (backlight) {
+                    backlight->SetBrightness(0, true);
+                }
+                
+                // Enter deep sleep
+                esp_deep_sleep_start();
+            },
+            .arg = this,
+            .dispatch_method = ESP_TIMER_TASK,
+            .name = "power_off_timer",
+            .skip_unhandled_events = true
+        };
+        ESP_ERROR_CHECK(esp_timer_create(&power_off_timer_args, &power_off_timer_));
+
         // Boot Button
         // short_press_time must be > 0 for multiple click detection to work
         button_config_t boot_btn_config = {
@@ -527,8 +560,8 @@ private:
 
         // Power Button
         button_config_t pwr_btn_config = {
-            .long_press_time = 5000,
-            .short_press_time = 0
+            .long_press_time = 5000,  // 5 seconds for power-off
+            .short_press_time = 500  // Enable single click detection
         };
         pwr_btn_driver_ = (button_driver_t*)calloc(1, sizeof(button_driver_t));
         pwr_btn_driver_->enable_power_save = false;
@@ -537,7 +570,7 @@ private:
         };
         ESP_ERROR_CHECK(iot_button_create(&pwr_btn_config, pwr_btn_driver_, &pwr_btn));
         
-        // Power button single click - volume up in volume mode
+        // Power button single click - volume up in volume mode only (brightness toggle removed)
         iot_button_register_cb(pwr_btn, BUTTON_SINGLE_CLICK, nullptr, [](void* button_handle, void* usr_data) {
             auto self = static_cast<CustomBoard*>(usr_data);
             ESP_LOGI(TAG, "Power button single click, volume_mode_=%d", self->volume_mode_);
@@ -546,16 +579,81 @@ private:
                 ESP_LOGI(TAG, "Volume mode active, increasing volume");
                 self->AdjustVolume(10);
             } else {
-                ESP_LOGI(TAG, "Power button clicked but not in volume mode, ignoring");
+                // Normal mode: do nothing (brightness toggle removed)
+                ESP_LOGI(TAG, "Power button single click - no action in normal mode");
             }
         }, this);
         
-        // Power button long press - reboot device
+        // Power button press down - track when button is first pressed
+        iot_button_register_cb(pwr_btn, BUTTON_PRESS_DOWN, nullptr, [](void* button_handle, void* usr_data) {
+            auto self = static_cast<CustomBoard*>(usr_data);
+            self->power_off_timer_active_ = false;
+            self->long_press_start_time_ = 0;
+            ESP_LOGD(TAG, "Power button pressed down");
+        }, this);
+        
+        // Power button long press start (5s) - start power-off timer
         iot_button_register_cb(pwr_btn, BUTTON_LONG_PRESS_START, nullptr, [](void* button_handle, void* usr_data) {
             auto self = static_cast<CustomBoard*>(usr_data);
-            ESP_LOGI(TAG, "Power button long press detected, rebooting device...");
-            auto& app = Application::GetInstance();
-            app.Reboot();
+            self->long_press_start_time_ = esp_timer_get_time() / 1000; // Store time in ms
+            ESP_LOGI(TAG, "Power button long press detected (5s) - starting power-off timer, hold for 10s total to reboot");
+            
+            // Start a 5-second timer that will power off (total 10s from initial press)
+            // If user continues holding to 10s, we'll cancel this and reboot instead
+            self->power_off_timer_active_ = true;
+            ESP_ERROR_CHECK(esp_timer_start_once(self->power_off_timer_, 5000 * 1000ULL)); // 5 seconds in microseconds
+        }, this);
+        
+        // Power button long press hold - periodically check if we've reached 10s total
+        iot_button_register_cb(pwr_btn, BUTTON_LONG_PRESS_HOLD, nullptr, [](void* button_handle, void* usr_data) {
+            auto self = static_cast<CustomBoard*>(usr_data);
+            
+            // Check if button is still pressed and we have a start time
+            if (!gpio_get_level(PWR_BUTTON_GPIO) && self->long_press_start_time_ > 0) {
+                int64_t current_time = esp_timer_get_time() / 1000; // Current time in ms
+                int64_t elapsed_time = current_time - self->long_press_start_time_; // Elapsed time in ms
+                
+                // If we've held for 10s total (5s from long press start + 5s = 10s total)
+                if (elapsed_time >= 10000 && self->power_off_timer_active_) {
+                    ESP_LOGI(TAG, "Power button held for 10s total - canceling power-off, rebooting device...");
+                    esp_timer_stop(self->power_off_timer_);
+                    self->power_off_timer_active_ = false;
+                    self->long_press_start_time_ = 0;
+                    
+                    auto& app = Application::GetInstance();
+                    app.Reboot();
+                }
+            }
+        }, this);
+        
+        // Power button press up - if power-off timer is active, execute power-off immediately
+        iot_button_register_cb(pwr_btn, BUTTON_PRESS_UP, nullptr, [](void* button_handle, void* usr_data) {
+            auto self = static_cast<CustomBoard*>(usr_data);
+            
+            // If power-off timer is active and button is released, execute power-off now
+            if (self->power_off_timer_active_) {
+                ESP_LOGI(TAG, "Power button released while power-off timer active - powering off now");
+                esp_timer_stop(self->power_off_timer_);
+                self->power_off_timer_active_ = false;
+                self->long_press_start_time_ = 0;
+                
+                // Turn off display
+                if (self->panel_ != nullptr) {
+                    esp_lcd_panel_disp_on_off(self->panel_, false);
+                }
+                
+                // Turn off backlight
+                auto backlight = self->GetBacklight();
+                if (backlight) {
+                    backlight->SetBrightness(0, true);
+                }
+                
+                // Small delay to ensure display is off
+                vTaskDelay(pdMS_TO_TICKS(100));
+                
+                // Enter deep sleep
+                esp_deep_sleep_start();
+            }
         }, this);
     }
 

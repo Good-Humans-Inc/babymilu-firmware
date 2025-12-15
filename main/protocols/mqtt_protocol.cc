@@ -82,7 +82,8 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
     
     // Derive subscribe topic from publish topic (replace /up with /down)
     subscribe_topic_ = settings.GetString("subscribe_topic");
-    if (subscribe_topic_.empty() && !publish_topic_.empty()) {
+    // If subscribe_topic is empty or invalid (e.g., "null"), derive it from publish_topic
+    if ((subscribe_topic_.empty() || subscribe_topic_ == "null") && !publish_topic_.empty()) {
         subscribe_topic_ = publish_topic_;
         size_t pos = subscribe_topic_.rfind("/up");
         if (pos != std::string::npos) {
@@ -91,6 +92,10 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
             // If no /up pattern, append /down
             subscribe_topic_ += "/down";
         }
+        // Save the derived subscribe_topic to settings for future use
+        Settings write_settings("mqtt", true);
+        write_settings.SetString("subscribe_topic", subscribe_topic_);
+        ESP_LOGI(TAG, "Derived and saved subscribe_topic: %s", subscribe_topic_.c_str());
     }
 
     // MQTT endpoint must be set by application.cc from menuconfig OTA URL or OTA server response
