@@ -27,6 +27,7 @@
 #define SCHEDULE_EVENT (1 << 0)
 #define SEND_AUDIO_EVENT (1 << 1)
 #define CHECK_NEW_VERSION_DONE_EVENT (1 << 2)
+#define MAIN_EVENT_VAD_CHANGE (1 << 3)
 
 enum AecMode {
     kAecOff,
@@ -104,6 +105,11 @@ private:
     bool aborted_ = false;
     bool voice_detected_ = false;
     bool busy_decoding_audio_ = false;
+    
+    // VAD interrupt debounce state
+    int64_t speaking_start_time_us_ = 0;  // When speaking state started (for grace period)
+    int64_t vad_detected_time_us_ = 0;   // When VAD was first detected during speaking (for debounce)
+    bool vad_debounce_active_ = false;    // Whether we're currently in a debounce period
     int clock_ticks_ = 0;
     TaskHandle_t check_new_version_task_handle_ = nullptr;
 
