@@ -1,12 +1,12 @@
 tmp/
 components/
-managed_components/
+# managed_components/  # Commented out - now committed to git for team consistency
 build/
 .vscode/
 .devcontainer/
 sdkconfig.old
 sdkconfig
-dependencies.lock
+# dependencies.lock  # Commented out - now committed to git for version consistency
 .env
 releases/
 main/assets/lang_config.h
