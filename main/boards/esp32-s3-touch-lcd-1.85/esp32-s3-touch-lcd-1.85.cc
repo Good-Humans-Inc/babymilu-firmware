@@ -659,7 +659,15 @@ private:
                 // Small delay to ensure display is off
                 vTaskDelay(pdMS_TO_TICKS(100));
                 
+                // Configure GPIO wake-up source for power button (active low)
+                // This allows the device to wake from deep sleep when power button is pressed
+                ESP_LOGI(TAG, "Configuring GPIO wake-up for power button (GPIO %d)", PWR_BUTTON_GPIO);
+                // Use ext1 wake-up with bitmask for ESP32-S3 (works with any GPIO)
+                uint64_t gpio_mask = (1ULL << PWR_BUTTON_GPIO);
+                esp_sleep_enable_ext1_wakeup(gpio_mask, ESP_EXT1_WAKEUP_ANY_LOW);
+                
                 // Enter deep sleep
+                ESP_LOGI(TAG, "Entering deep sleep - press power button for 5s to wake");
                 esp_deep_sleep_start();
             }
         }, this);

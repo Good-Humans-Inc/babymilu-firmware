@@ -1563,7 +1563,7 @@ void Application::SetDeviceState(DeviceState state)
             wake_word_->StopDetection();
         }
         break;
-    case kDeviceStateSpeaking:
+    case kDeviceStateSpeaking: {
         display->SetStatus(Lang::Strings::SPEAKING);
         
         // Set brightness to 100 when TTS starts
@@ -1584,6 +1584,15 @@ void Application::SetDeviceState(DeviceState state)
 #endif
         }
         ResetDecoder();
+        break;
+    }
+    case kDeviceStateStarting:
+    case kDeviceStateWifiConfiguring:
+    case kDeviceStateUpgrading:
+    case kDeviceStateActivating:
+    case kDeviceStateAudioTesting:
+    case kDeviceStateFatalError:
+        // These states are handled elsewhere or don't require special handling here
         break;
     default:
         // Do nothing
