@@ -4,7 +4,7 @@ Mega Animation Merger - Create One Huge Animation File
 Merges ALL animation frames into a single mega .bin file for ultimate optimization.
 
 This script creates a single binary file containing all animations:
-- Normal (3 frames) - from normal_all.bin or individual files
+- Normal (15 frames: 1 base + 14 overlays) - from normal_all.bin or individual files
 - Embarrass (3 frames)
 - Fire (4 frames) 
 - Happy (4 frames)
@@ -13,7 +13,7 @@ This script creates a single binary file containing all animations:
 - Shy (2 frames)
 - Sleep (4 frames)
 
-Total: 28 frames in one file!
+Total: 40 frames in one file!
 
 Usage:
     python create_mega_animations.py input_dir/ output_mega.bin
@@ -130,12 +130,26 @@ def get_default_sleep_overlay_paths():
     }
 
 def get_default_normal_overlay_paths():
-    """Return default paths to normal overlay headers relative to repo root."""
+    """Return default paths to normal overlay headers relative to repo root.
+    Supports 15 frames: 1 base frame + 14 overlay frames (overlay2 through overlay15).
+    """
     script_dir = Path(__file__).resolve().parent
     frame_diff_dir = script_dir.parent / "images" / "frame difference"
     return {
         2: frame_diff_dir / "normal_overlay2.h",
-        3: frame_diff_dir / "normal_overlay3.h"
+        3: frame_diff_dir / "normal_overlay3.h",
+        4: frame_diff_dir / "normal_overlay4.h",
+        5: frame_diff_dir / "normal_overlay5.h",
+        6: frame_diff_dir / "normal_overlay6.h",
+        7: frame_diff_dir / "normal_overlay7.h",
+        8: frame_diff_dir / "normal_overlay8.h",
+        9: frame_diff_dir / "normal_overlay9.h",
+        10: frame_diff_dir / "normal_overlay10.h",
+        11: frame_diff_dir / "normal_overlay11.h",
+        12: frame_diff_dir / "normal_overlay12.h",
+        13: frame_diff_dir / "normal_overlay13.h",
+        14: frame_diff_dir / "normal_overlay14.h",
+        15: frame_diff_dir / "normal_overlay15.h"
     }
 
 def load_overlay_pixels(header_path):
@@ -450,23 +464,32 @@ class AnimationSet:
         
         for frame_idx in sorted_target_frames:
             frame_pixels = pixels_dict.get(frame_idx, [])
-            if not frame_pixels:
-                print(f"  ⚠️  No overlay pixels for frame {frame_idx} in {self.name}")
-                continue
             
             # Verify current base frame exists
             if current_base_index >= len(self.frames) or self.frames[current_base_index] is None:
                 print(f"  ⚠️  Base frame {current_base_index} unavailable for frame {frame_idx} in {self.name}")
                 continue
-                
-            entry_count = 0
-            overlay_payload = bytearray()
             
-            for x, y, color in frame_pixels:
-                if x >= width or y >= height:
-                    continue
-                overlay_payload.extend(struct.pack('<HHH', x, y, color & 0xFFFF))
-                entry_count += 1
+            # If no overlay pixels, reuse the previous overlay frame (or base frame if it's the first)
+            # Previous behavior (commented out): skip frame and leave original full image
+
+            '''if not frame_pixels:
+                print(f"  ⚠️  No overlay pixels for frame {frame_idx} in {self.name}")
+                continue'''
+            if not frame_pixels:
+                print(f"  ⚠️  No overlay pixels for frame {frame_idx} in {self.name}, reusing frame {current_base_index}")
+                # Create an overlay frame with 0 pixels pointing to the previous frame (reuses it)
+                entry_count = 0
+                overlay_payload = bytearray()
+            else:
+                entry_count = 0
+                overlay_payload = bytearray()
+                
+                for x, y, color in frame_pixels:
+                    if x >= width or y >= height:
+                        continue
+                    overlay_payload.extend(struct.pack('<HHH', x, y, color & 0xFFFF))
+                    entry_count += 1
             
             stride_bytes = entry_count * OVERLAY_ENTRY_SIZE_BYTES
             overlay_header = struct.pack(
@@ -483,7 +506,10 @@ class AnimationSet:
                 self.frames.append(None)
             
             self.frames[frame_idx] = overlay_header + bytes(overlay_payload)
-            print(f"    ✅ Stored {entry_count} sparse overlay pixels for frame {frame_idx} (applied on frame {current_base_index})")
+            if entry_count > 0:
+                print(f"    ✅ Stored {entry_count} sparse overlay pixels for frame {frame_idx} (applied on frame {current_base_index})")
+            else:
+                print(f"    ✅ Created frame {frame_idx} reusing frame {current_base_index} (no overlay pixels)")
             
             # Next overlay builds on this frame
             current_base_index = frame_idx
@@ -532,18 +558,18 @@ def create_mega_animations(input_dir, output_file, target_size=(256, 256), force
     
     # Configure normal animation overlay usage if overlays are provided
     normal_overlay_config = None
-    normal_min_files = 3
+    normal_min_files = 15
     if normal_overlays:
-        # Convert frame numbers (2, 3) to frame indices (1, 2)
-        normal_overlays_indices = {idx - 1: pixels for idx, pixels in normal_overlays.items() if idx in [2, 3]}
+        # Convert frame numbers (2-15) to frame indices (1-14)
+        normal_overlays_indices = {idx - 1: pixels for idx, pixels in normal_overlays.items() if idx in range(2, 16)}
         normal_overlay_config = {
             "type": "overlay_pixels",
-            "pixels": normal_overlays_indices,  # Dict format: {1: pixels, 2: pixels}
+            "pixels": normal_overlays_indices,  # Dict format: {1: pixels, 2: pixels, ..., 14: pixels}
             "base_frame_index": 0,
-            "target_frames": [1, 2],  # Frame indices 1 and 2 (normal2 and normal3)
+            "target_frames": list(range(1, 15)),  # Frame indices 1-14 (normal2 through normal15)
         }
         normal_min_files = 1
-        print("Normal animation will reuse base frame with overlay pixels for frames 2 and 3")
+        print(f"Normal animation will reuse base frame with overlay pixels for frames 2-15 ({len(normal_overlays_indices)} overlays)")
     
     # Configure embarrass animation overlay usage if overlays are provided
     embarrass_overlay_config = None
@@ -651,7 +677,7 @@ def create_mega_animations(input_dir, output_file, target_size=(256, 256), force
     animation_sets = [
         AnimationSet(
             "Normal",
-            3,
+            15,  # 1 base frame + 14 overlay frames
             merged_file="normal_all.bin",
             individual_pattern="normal*.jpg",  # Pattern used for glob, but we search multiple extensions
             min_individual_files=normal_min_files,
@@ -788,26 +814,32 @@ def main():
     else:
         print("Using automatic color format detection")
     
-    # Load normal overlays if requested
+    # Load normal overlays if requested (supports frames 2-15)
     normal_overlays = None
     default_normal_paths = get_default_normal_overlay_paths()
     
+    # Check if overlay2/overlay3 are explicitly disabled via command line
     overlay2_path = args.normal_overlay2 if args.normal_overlay2 is not None else str(default_normal_paths[2])
     overlay3_path = args.normal_overlay3 if args.normal_overlay3 is not None else str(default_normal_paths[3])
     
+    # Load all normal overlays (2-15) from default paths
+    # Only disable if overlay2 or overlay3 are explicitly set to "none"
     if overlay2_path.lower() != "none" and overlay3_path.lower() != "none":
         normal_overlays = {}
-        if overlay2_path.lower() != "none":
-            pixels2 = load_overlay_pixels(overlay2_path)
-            if pixels2:
-                normal_overlays[2] = pixels2  # Frame number 2 (normal2)
-        if overlay3_path.lower() != "none":
-            pixels3 = load_overlay_pixels(overlay3_path)
-            if pixels3:
-                normal_overlays[3] = pixels3  # Frame number 3 (normal3)
+        # Load overlays 2-15 from default paths
+        for frame_num in range(2, 16):
+            overlay_path = default_normal_paths[frame_num]
+            pixels = load_overlay_pixels(overlay_path)
+            if pixels:
+                normal_overlays[frame_num] = pixels
+            else:
+                print(f"Warning: normal_overlay{frame_num}.h not found or empty, skipping frame {frame_num}")
         
         if not normal_overlays:
             normal_overlays = None
+            print("Warning: No normal overlay files found, will use individual image files instead")
+        else:
+            print(f"Loaded {len(normal_overlays)} normal overlay files (frames {min(normal_overlays.keys())}-{max(normal_overlays.keys())})")
     else:
         print("Normal overlay-based frame generation disabled by user request")
     
