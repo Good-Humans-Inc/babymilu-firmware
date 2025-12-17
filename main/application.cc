@@ -890,8 +890,9 @@ void Application::MainEventLoop()
                 bool voice_detected = voice_detected_;
                 int64_t now_us = esp_timer_get_time();
                 
-                ESP_LOGI(TAG, "VAD change during Speaking: voice_detected=%d, aec_mode=%d, processor_running=%d",
-                    voice_detected, aec_mode_, audio_processor_->IsRunning());
+                // COMMENTED OUT: VAD change log
+                // ESP_LOGI(TAG, "VAD change during Speaking: voice_detected=%d, aec_mode=%d, processor_running=%d",
+                //     voice_detected, aec_mode_, audio_processor_->IsRunning());
                 
                 if (aec_mode_ == kAecOnDeviceSide && voice_detected) {
                     // Grace period: ignore interruptions for first 1 second after speaking starts

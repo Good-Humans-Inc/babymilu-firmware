@@ -477,6 +477,7 @@ TaskHandle_t animation_task_handle = nullptr;
 
 void plat_animation_task(void *arg)
 {
+    ESP_LOGI("plat_animation_task", "Animation task started!");
     auto display = Board::GetInstance().GetDisplay();
     while (1)
     {
@@ -488,8 +489,8 @@ void plat_animation_task(void *arg)
         
         // Check for NULL animation to prevent crashes
         if (current_anim == NULL) {
-            ESP_LOGW("plat_animation_task", "Animation %d is not available, skipping frame", now_animation);
-            vTaskDelay(pdMS_TO_TICKS(500));
+            ESP_LOGW("plat_animation_task", "Animation %d is NULL, skipping frame", now_animation);
+            vTaskDelay(pdMS_TO_TICKS(67)); // 15 FPS: 1000ms / 15 ≈ 67ms per frame
             continue;
         }
         
@@ -497,9 +498,11 @@ void plat_animation_task(void *arg)
         {
             pos = 0;
         }
+        // Log frame change with animation type and frame number
+        // ESP_LOGI("plat_animation_task", "Animation %d: Frame %d/%d", now_animation, pos, current_anim->len);
         // Pass frame index for overlay composition (normal2/normal3, etc.)
         display->SetEmotionImg(current_anim->imges[current_anim->animations[pos]], current_anim->animations[pos]);
-        vTaskDelay(pdMS_TO_TICKS(500));
+        vTaskDelay(pdMS_TO_TICKS(67)); // 15 FPS: 1000ms / 15 ≈ 67ms per frame
     }
 }
 
@@ -507,7 +510,9 @@ void animation_set_now_animation(int animation)
 {
     if (animation_task_handle == nullptr)
     {
-        xTaskCreatePinnedToCore(plat_animation_task, "plat_animation_task", 2048, nullptr, 4, &animation_task_handle, 0);
+        // Increased stack size from 2048 to 4096 to prevent stack overflow
+        // Display operations and LVGL calls require more stack space
+        xTaskCreatePinnedToCore(plat_animation_task, "plat_animation_task", 4096, nullptr, 4, &animation_task_handle, 0);
     }
     if (animation < 0 || animation >= ANIMATION_NUM)
     {
