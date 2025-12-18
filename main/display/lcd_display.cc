@@ -1074,8 +1074,9 @@ static lv_image_dsc_t* compose_image_with_overlay(const lv_image_dsc_t* base_img
         return nullptr;
     }
     
-    // Only compose for frame_index 1, 2, or 3 (depending on animation type)
-    if (frame_index < 1 || frame_index > 3) {
+    // Only compose for overlay frames (frame_index >= 1, depends on animation type)
+    // Normal animation supports frame_index 1-13, others support 1-3
+    if (frame_index < 1) {
         return nullptr; // No composition needed
     }
     
@@ -1097,8 +1098,12 @@ static lv_image_dsc_t* compose_image_with_overlay(const lv_image_dsc_t* base_img
         return nullptr; // No overlay for this animation type
     }
     
-    // Normal and embarrass only support frame_index 1 and 2
-    if ((is_normal_animation || is_embarrass_animation) && frame_index > 2) {
+    // Normal animation supports frame_index 1-13 (normal2-normal14)
+    // Embarrass animation supports frame_index 1-2
+    if (is_normal_animation && frame_index > 13) {
+        return nullptr; // No overlay for this frame
+    }
+    if (is_embarrass_animation && frame_index > 2) {
         return nullptr; // No overlay for this frame
     }
     
@@ -1241,14 +1246,23 @@ void LcdDisplay::SetEmotionImg(const lv_image_dsc_t *img, int frame_index)
         return;
     }
     
-    // For overlay frames (frame_index 1, 2, or 3), compose with sparse overlay pixels
+    // For overlay frames, compose with sparse overlay pixels
     // Base frame (frame_index 0) remains unchanged
+    // Normal animation: frame_index 1-13 (normal2-normal14)
+    // Other animations: frame_index 1-3
     // Overlays are always rotated 180° to match the globally rotated emotion1 base images
     const lv_image_dsc_t* img_to_display = img;
-    if (frame_index >= 1 && frame_index <= 3) {
-        lv_image_dsc_t* composed = compose_image_with_overlay(img, frame_index, true);
-        if (composed != nullptr) {
-            img_to_display = composed;
+    int current_animation = animation_get_now_animation();
+    bool is_normal_animation = (current_animation == ANIMATION_NORMAL || current_animation == ANIMATION_STATIC_NORMAL);
+    
+    if (frame_index >= 1) {
+        // For normal animation, allow up to frame_index 13
+        // For other animations, allow up to frame_index 3
+        if ((is_normal_animation && frame_index <= 13) || (!is_normal_animation && frame_index <= 3)) {
+            lv_image_dsc_t* composed = compose_image_with_overlay(img, frame_index, true);
+            if (composed != nullptr) {
+                img_to_display = composed;
+            }
         }
     }
     
