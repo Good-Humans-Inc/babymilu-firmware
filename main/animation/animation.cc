@@ -25,7 +25,7 @@
 
 // Overlay pixel constants
 static constexpr uint32_t LV_IMAGE_CF_OVERLAY_PIXELS = 0x4F50584C; // "OPXL"
-static constexpr size_t NORMAL_OVERLAY_FRAME_COUNT = 13;  // normal2-normal14 (13 overlay frames)
+static constexpr size_t NORMAL_OVERLAY_FRAME_COUNT = 14;  // normal2-normal15 (14 overlay frames)
 static constexpr size_t EMBARRASS_OVERLAY_FRAME_COUNT = 2;
 static constexpr size_t FIRE_OVERLAY_FRAME_COUNT = 3;     // Frames 2-4 (indices 1-3)
 static constexpr size_t HAPPY_OVERLAY_FRAME_COUNT = 3;    // Frames 2-4 (indices 1-3)
@@ -35,8 +35,8 @@ static constexpr size_t SHY_OVERLAY_FRAME_COUNT = 1;         // Frame 2 (index 1
 static constexpr size_t SLEEP_OVERLAY_FRAME_COUNT = 3;       // Frames 2-4 (indices 1-3)
 
 // Overlay pixel runtime storage
-static animation_overlay_pixel_t* normal_overlay_pixels_runtime[NORMAL_OVERLAY_FRAME_COUNT] = {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
-static size_t normal_overlay_pixel_counts[NORMAL_OVERLAY_FRAME_COUNT] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+static animation_overlay_pixel_t* normal_overlay_pixels_runtime[NORMAL_OVERLAY_FRAME_COUNT] = {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
+static size_t normal_overlay_pixel_counts[NORMAL_OVERLAY_FRAME_COUNT] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
 static animation_overlay_frame_t normal_overlay_frame_views[NORMAL_OVERLAY_FRAME_COUNT] = {};
 
 static animation_overlay_pixel_t* embarrass_overlay_pixels_runtime[EMBARRASS_OVERLAY_FRAME_COUNT] = {nullptr, nullptr};
@@ -85,7 +85,7 @@ static void animation_clear_normal_overlay_frames(void)
 
 static bool animation_set_normal_overlay_frame(int frame_index, animation_overlay_pixel_t* pixels, size_t count)
 {
-    if (frame_index < 1 || frame_index > 13) {  // normal2-normal14 (indices 1-13)
+    if (frame_index < 1 || frame_index > 14) {  // normal2-normal15 (indices 1-14)
         if (pixels != nullptr) {
             free(pixels);
         }
@@ -104,7 +104,7 @@ static bool animation_set_normal_overlay_frame(int frame_index, animation_overla
 
 const animation_overlay_frame_t* animation_get_normal_overlay_frame(int frame_index)
 {
-    if (frame_index < 1 || frame_index > 13) {  // normal2-normal14 (indices 1-13)
+    if (frame_index < 1 || frame_index > 14) {  // normal2-normal15 (indices 1-14)
         return nullptr;
     }
     
@@ -498,10 +498,36 @@ void plat_animation_task(void *arg)
         {
             pos = 0;
         }
+        
+        // Validate frame index before accessing
+        int frame_idx = current_anim->animations[pos];
+        if (frame_idx < 0 || frame_idx >= current_anim->len) {
+            ESP_LOGW("plat_animation_task", "Invalid frame index %d for animation %d (len=%d), resetting", frame_idx, now_animation, current_anim->len);
+            pos = 0;
+            frame_idx = 0;
+        }
+        
+        // Validate image before displaying
+        const lv_image_dsc_t* frame_img = current_anim->imges[frame_idx];
+        if (frame_img == nullptr || frame_img->data == nullptr) {
+            ESP_LOGW("plat_animation_task", "Frame %d image is null for animation %d, skipping", frame_idx, now_animation);
+            vTaskDelay(pdMS_TO_TICKS(67));
+            continue;
+        }
+        
+        // Validate image dimensions to prevent crashes
+        if (frame_img->header.w <= 0 || frame_img->header.h <= 0 || 
+            frame_img->header.w > 10000 || frame_img->header.h > 10000) {
+            ESP_LOGW("plat_animation_task", "Invalid image dimensions %dx%d for frame %d, skipping", 
+                     frame_img->header.w, frame_img->header.h, frame_idx);
+            vTaskDelay(pdMS_TO_TICKS(67));
+            continue;
+        }
+        
         // Log frame change with animation type and frame number
         // ESP_LOGI("plat_animation_task", "Animation %d: Frame %d/%d", now_animation, pos, current_anim->len);
         // Pass frame index for overlay composition (normal2/normal3, etc.)
-        display->SetEmotionImg(current_anim->imges[current_anim->animations[pos]], current_anim->animations[pos]);
+        display->SetEmotionImg(frame_img, frame_idx);
         vTaskDelay(pdMS_TO_TICKS(67)); // 15 FPS: 1000ms / 15 ≈ 67ms per frame
     }
 }
@@ -572,7 +598,7 @@ void animation_load_sd_card_animations(void)
     if (normal_loaded || embarrass_loaded || fire_loaded || happy_loaded || inspiration_loaded || question_loaded || shy_loaded || sleep_loaded) {
         ESP_LOGI("animation", "✅ SD card animations loaded successfully!");
         if (normal_loaded) {
-            ESP_LOGI("animation", "   - Normal animation now uses SD card (normal1.bin as base, normal2-normal14.bin as overlays)");
+            ESP_LOGI("animation", "   - Normal animation now uses SD card (normal1.bin as base, normal2-normal15.bin as overlays)");
             ESP_LOGI("animation", "   - Normal SD card animation has %d frames", sd_normal.len);
         }
         if (embarrass_loaded) {
@@ -842,8 +868,8 @@ bool animation_create_sd_card_animation(Animation_t* anim, const char* filenames
         return false;
     }
     
-    // Check if this is normal animation (14 frames: 1 base + 13 overlays)
-    bool is_normal_animation = (count == 14 && anim == &sd_normal);
+    // Check if this is normal animation (15 frames: 1 base + 14 overlays)
+    bool is_normal_animation = (count == 15 && anim == &sd_normal);
     
     // Allocate memory for SD card images
     anim->spiffs_imgs = (lv_image_dsc_t**)malloc(count * sizeof(lv_image_dsc_t*));
@@ -1012,6 +1038,10 @@ bool animation_create_sd_card_animation(Animation_t* anim, const char* filenames
                     return false;
                 }
                 
+                // Free the allocated image descriptor since we're reusing the base frame
+                if (anim->spiffs_imgs[i] != nullptr) {
+                    free(anim->spiffs_imgs[i]);
+                }
                 // Reuse base frame for overlay frames
                 anim->spiffs_imgs[i] = normal1_base_frame;
                 ESP_LOGI("animation", "Loaded %u sparse overlay pixels for normal%d (frame %d)", entry_count, i + 1, i);
@@ -1085,8 +1115,8 @@ bool animation_create_sd_card_animation_from_merged(Animation_t* anim, const cha
         return false;
     }
     
-    // Check if this is normal animation (14 frames: 1 base + 13 overlays)
-    bool is_normal_animation = (count == 14 && anim == &sd_normal);
+    // Check if this is normal animation (15 frames: 1 base + 14 overlays)
+    bool is_normal_animation = (count == 15 && anim == &sd_normal);
     
     char full_path[128];
     snprintf(full_path, sizeof(full_path), "/sdcard/%s", merged_filename);
@@ -1339,6 +1369,10 @@ bool animation_create_sd_card_animation_from_merged(Animation_t* anim, const cha
                 return false;
             }
             
+            // Free the allocated image descriptor since we're reusing the base frame
+            if (anim->spiffs_imgs[i] != nullptr) {
+                free(anim->spiffs_imgs[i]);
+            }
             // Reuse base frame for overlay frames
             anim->spiffs_imgs[i] = normal1_base_frame;
             ESP_LOGI("animation", "Loaded %u sparse overlay pixels for normal%d (frame %d)", entry_count, i + 1, i);
@@ -1538,8 +1572,8 @@ bool animation_load_all_from_sd_card(void)
     fseek(f, 0, SEEK_SET);
     ESP_LOGI("animation", "✅ Successfully opened mega file: %s (%ld bytes)", mega_path, file_size);
     
-    // Animation frame counts: Normal(14: 1 base + 13 overlays), Embarrass(3), Fire(4), Happy(4), Inspiration(4), Question(4), Shy(2), Sleep(4)
-    int animation_frame_counts[] = {14, 3, 4, 4, 4, 4, 2, 4};
+    // Animation frame counts: Normal(15: 1 base + 14 overlays), Embarrass(3), Fire(4), Happy(4), Inspiration(4), Question(4), Shy(2), Sleep(4)
+    int animation_frame_counts[] = {15, 3, 4, 4, 4, 4, 2, 4};
     Animation_t* animations[] = {
         &sd_normal, &sd_embarrass, &sd_fire, &sd_happy,
         &sd_inspiration, &sd_question, &sd_shy, &sd_sleep
@@ -1987,7 +2021,7 @@ bool animation_load_normal_from_sd_card(void)
     
     // First try to load from merged file
     ESP_LOGI("animation", "Attempting to load normal animation from merged file on SD card...");
-    if (animation_create_sd_card_animation_from_merged(&sd_normal, "normal_all.bin", 14)) {  // 1 base + 13 overlays
+    if (animation_create_sd_card_animation_from_merged(&sd_normal, "normal_all.bin", 15)) {  // 1 base + 14 overlays
         ESP_LOGI("animation", "✅ Successfully loaded normal animation from merged file on SD card");
         return true;
     }
@@ -1997,10 +2031,10 @@ bool animation_load_normal_from_sd_card(void)
     const char* normal_frames[] = {
         "normal1.bin", "normal2.bin", "normal3.bin", "normal4.bin", "normal5.bin", 
         "normal6.bin", "normal7.bin", "normal8.bin", "normal9.bin", "normal10.bin",
-        "normal11.bin", "normal12.bin", "normal13.bin", "normal14.bin"
+        "normal11.bin", "normal12.bin", "normal13.bin", "normal14.bin", "normal15.bin"
     };
     
-    if (animation_create_sd_card_animation(&sd_normal, normal_frames, 14)) {  // 1 base + 13 overlays
+    if (animation_create_sd_card_animation(&sd_normal, normal_frames, 15)) {  // 1 base + 14 overlays
         ESP_LOGI("animation", "✅ Successfully loaded normal animation from individual SD card files");
         return true;
     } else {
