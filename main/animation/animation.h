@@ -44,14 +44,6 @@ bool animation_load_from_sd_card(const char* filename, lv_image_dsc_t* img_dsc);
 bool animation_create_sd_card_animation(Animation_t* anim, const char* filenames[], int count);
 bool animation_create_sd_card_animation_from_merged(Animation_t* anim, const char* merged_filename, int count);
 bool animation_load_all_from_sd_card(void);
-bool animation_load_normal_from_sd_card(void);
-bool animation_load_embarrass_from_sd_card(void);
-bool animation_load_fire_from_sd_card(void);
-bool animation_load_happy_from_sd_card(void);
-bool animation_load_inspiration_from_sd_card(void);
-bool animation_load_question_from_sd_card(void);
-bool animation_load_shy_from_sd_card(void);
-bool animation_load_sleep_from_sd_card(void);
 
 // Overlay pixel structures for new animation system
 typedef struct {
