@@ -4,7 +4,7 @@ Mega Animation Merger - Create One Huge Animation File
 Merges ALL animation frames into a single mega .bin file for ultimate optimization.
 
 This script creates a single binary file containing all animations:
-- Normal (3 frames) - from normal_all.bin or individual files
+- Normal (variable frames: 1 base + overlay frames) - from normal_all.bin or individual files
 - Embarrass (3 frames)
 - Fire (4 frames) 
 - Happy (4 frames)
@@ -13,7 +13,7 @@ This script creates a single binary file containing all animations:
 - Shy (2 frames)
 - Sleep (4 frames)
 
-Total: 28 frames in one file!
+Total: 40 frames in one file!
 
 Usage:
     python create_mega_animations.py input_dir/ output_mega.bin
@@ -25,6 +25,7 @@ import os
 import glob
 import struct
 import argparse
+import re
 from pathlib import Path
 from enum import Enum
 
@@ -51,6 +52,169 @@ class ColorFormat(Enum):
     A2 = 0x0C
     A4 = 0x0D
     A8 = 0x0E
+    OVERLAY_PIXELS = 0x4F50584C  # "OPXL" - sparse overlay pixel payload
+
+LVGL_MAGIC = 0x4C56474C
+OVERLAY_ENTRY_SIZE_BYTES = 6  # uint16 x, uint16 y, uint16 color
+
+def get_default_overlay_header_path():
+    """Return default path to overlay_pixels.h relative to repo root."""
+    script_dir = Path(__file__).resolve().parent
+    return script_dir.parent / "main" / "display" / "overlay_pixels.h"
+
+def get_default_embarrass_overlay_paths():
+    """Return default paths to embarrass overlay headers relative to repo root."""
+    script_dir = Path(__file__).resolve().parent
+    frame_diff_dir = script_dir.parent / "images" / "frame difference"
+    return {
+        2: frame_diff_dir / "embarrass_overlay2.h",
+        3: frame_diff_dir / "embarrass_overlay3.h"
+    }
+
+def get_default_fire_overlay_paths():
+    """Return default paths to fire overlay headers relative to repo root."""
+    script_dir = Path(__file__).resolve().parent
+    frame_diff_dir = script_dir.parent / "images" / "frame difference"
+    return {
+        2: frame_diff_dir / "fire_overlay2.h",
+        3: frame_diff_dir / "fire_overlay3.h",
+        4: frame_diff_dir / "fire_overlay4.h"
+    }
+
+def get_default_happy_overlay_paths():
+    """Return default paths to happy overlay headers relative to repo root."""
+    script_dir = Path(__file__).resolve().parent
+    frame_diff_dir = script_dir.parent / "images" / "frame difference"
+    return {
+        2: frame_diff_dir / "happy_overlay2.h",
+        3: frame_diff_dir / "happy_overlay3.h",
+        4: frame_diff_dir / "happy_overlay4.h"
+    }
+
+def get_default_inspiration_overlay_paths():
+    """Return default paths to inspiration overlay headers relative to repo root."""
+    script_dir = Path(__file__).resolve().parent
+    frame_diff_dir = script_dir.parent / "images" / "frame difference"
+    return {
+        2: frame_diff_dir / "inspiration_overlay2.h",
+        3: frame_diff_dir / "inspiration_overlay3.h",
+        4: frame_diff_dir / "inspiration_overlay4.h"
+    }
+
+def get_default_question_overlay_paths():
+    """Return default paths to question overlay headers relative to repo root."""
+    script_dir = Path(__file__).resolve().parent
+    frame_diff_dir = script_dir.parent / "images" / "frame difference"
+    return {
+        2: frame_diff_dir / "question_overlay2.h",
+        3: frame_diff_dir / "question_overlay3.h",
+        4: frame_diff_dir / "question_overlay4.h"
+    }
+
+def get_default_shy_overlay_paths():
+    """Return default paths to shy overlay headers relative to repo root."""
+    script_dir = Path(__file__).resolve().parent
+    frame_diff_dir = script_dir.parent / "images" / "frame difference"
+    return {
+        2: frame_diff_dir / "shy_overlay2.h"
+    }
+
+def get_default_sleep_overlay_paths():
+    """Return default paths to sleep overlay headers relative to repo root."""
+    script_dir = Path(__file__).resolve().parent
+    frame_diff_dir = script_dir.parent / "images" / "frame difference"
+    return {
+        2: frame_diff_dir / "sleep_overlay2.h",
+        3: frame_diff_dir / "sleep_overlay3.h",
+        4: frame_diff_dir / "sleep_overlay4.h"
+    }
+
+def get_default_normal_overlay_paths(max_frame=99):
+    """Return default paths to normal overlay headers relative to repo root.
+    Dynamically detects overlay files up to max_frame (default 99).
+    Returns dict mapping frame number to path for existing overlay files.
+    """
+    script_dir = Path(__file__).resolve().parent
+    frame_diff_dir = script_dir.parent / "images" / "frame difference"
+    overlay_paths = {}
+    
+    # Check for overlay files from frame 2 up to max_frame
+    for frame_num in range(2, max_frame + 1):
+        overlay_path = frame_diff_dir / f"normal_overlay{frame_num}.h"
+        if overlay_path.exists():
+            overlay_paths[frame_num] = overlay_path
+    
+    return overlay_paths
+
+def load_overlay_pixels(header_path):
+    """Parse overlay pixel data from overlay_pixels.h"""
+    path = Path(header_path)
+    if not path.exists():
+        print(f"Warning: Overlay header not found at {path}")
+        return []
+    
+    overlay_pixels = []
+    pattern = re.compile(r"\{(\d+)\s*,\s*(\d+)\s*,\s*(0x[0-9A-Fa-f]+|\d+)\s*\}")
+    
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            for line in f:
+                match = pattern.search(line)
+                if not match:
+                    continue
+                x = int(match.group(1))
+                y = int(match.group(2))
+                color_str = match.group(3)
+                color = int(color_str, 16) if color_str.lower().startswith("0x") else int(color_str)
+                overlay_pixels.append((x, y, color))
+    except Exception as exc:
+        print(f"Warning: Failed to parse overlay header {path}: {exc}")
+        return []
+    
+    if overlay_pixels:
+        print(f"Loaded {len(overlay_pixels)} overlay pixels from {path}")
+    else:
+        print(f"Warning: No overlay pixels found in {path}")
+    return overlay_pixels
+
+def load_embarrass_overlays(overlay_paths):
+    """Load embarrass overlay pixels from multiple header files.
+    
+    Args:
+        overlay_paths: Dict mapping frame index (2, 3) to header file path
+        
+    Returns:
+        Dict mapping frame index to list of (x, y, color) tuples
+    """
+    overlays = {}
+    for frame_idx, path in overlay_paths.items():
+        pixels = load_overlay_pixels(path)
+        if pixels:
+            overlays[frame_idx] = pixels
+    return overlays
+
+def load_animation_overlays(overlay_paths):
+    """Load animation overlay pixels from multiple header files (for fire, happy, inspiration).
+    
+    Args:
+        overlay_paths: Dict mapping frame index (2, 3, 4) to header file path
+        
+    Returns:
+        Dict mapping frame index to list of (x, y, color) tuples
+    """
+    overlays = {}
+    for frame_idx, path in overlay_paths.items():
+        pixels = load_overlay_pixels(path)
+        if pixels:
+            overlays[frame_idx] = pixels
+    
+    # Special case for happy: if overlay4 is missing/empty, reuse overlay3
+    # This happens when happy3 and happy4 are the same image
+    if 4 not in overlays and 3 in overlays:
+        overlays[4] = overlays[3]
+        print(f"Note: Reusing overlay3 for overlay4 (frames 3 and 4 are identical)")
+    
+    return overlays
 
 class LVGLImage:
     def __init__(self):
@@ -111,12 +275,9 @@ class LVGLImage:
     
     def to_binary_frame(self):
         """Convert to binary frame data (header + pixel data)"""
-        # LVGL magic number
-        magic = 0x4C56474C  # "LVGL" in little endian
-        
         # Pack header
         header = struct.pack('<IIIIII', 
-            magic,                    # magic
+            LVGL_MAGIC,               # magic
             self.color_format.value,  # color_format
             0,                        # flags
             self.width,               # w
@@ -127,16 +288,20 @@ class LVGLImage:
         return header + self.data
 
 class AnimationSet:
-    def __init__(self, name, frame_count, merged_file=None, individual_pattern=None):
+    def __init__(self, name, frame_count, merged_file=None, individual_pattern=None,
+                 min_individual_files=None, overlay_config=None):
         self.name = name
         self.frame_count = frame_count
         self.merged_file = merged_file
         self.individual_pattern = individual_pattern
         self.frames = []
+        self.min_individual_files = min_individual_files if min_individual_files is not None else frame_count
+        self.overlay_config = overlay_config
     
     def load_from_directory(self, input_dir, target_size=(256, 256), force_format=None):
         """Load animation frames from directory"""
         print(f"\n--- Loading {self.name} Animation ({self.frame_count} frames) ---")
+        self.frames = []
         
         # Try merged file first
         if self.merged_file:
@@ -144,21 +309,54 @@ class AnimationSet:
             if os.path.exists(merged_path):
                 print(f"  Found merged file: {self.merged_file}")
                 if self._load_from_merged_file(merged_path):
-                    return True
+                    return self._finalize_load()
                 else:
                     print(f"  Failed to load merged file, trying individual files...")
         
         # Try individual files
         if self.individual_pattern:
             print(f"  Looking for individual files: {self.individual_pattern}")
-            individual_files = glob.glob(os.path.join(input_dir, self.individual_pattern))
-            individual_files.sort()
-            
-            if len(individual_files) >= self.frame_count:
-                print(f"  Found {len(individual_files)} individual files")
-                return self._load_from_individual_files(individual_files[:self.frame_count], target_size, force_format)
+            # Support both .jpg and .png extensions
+            individual_files = []
+            # Extract base pattern (e.g., "normal*" from "normal*.jpg")
+            if '.' in self.individual_pattern:
+                # Remove extension, keep the * wildcard
+                base_pattern = self.individual_pattern.rsplit('.', 1)[0]
             else:
-                print(f"  Found only {len(individual_files)} files, need {self.frame_count}")
+                base_pattern = self.individual_pattern
+            
+            # Try all image extensions
+            for ext in ['.jpg', '.png', '.jpeg', '.JPG', '.PNG', '.JPEG']:
+                pattern = base_pattern + ext
+                found = glob.glob(os.path.join(input_dir, pattern))
+                individual_files.extend(found)
+            
+            individual_files = sorted(set(individual_files))  # Remove duplicates and sort
+            if individual_files:
+                print(f"  Found {len(individual_files)} files: {[os.path.basename(f) for f in individual_files[:5]]}{'...' if len(individual_files) > 5 else ''}")
+            
+            # If overlays are configured, only load the minimum required files (usually just the base frame)
+            # Otherwise, load all frames needed
+            if self.overlay_config:
+                # Using overlays: only load minimum required files (base frame)
+                if len(individual_files) >= self.min_individual_files:
+                    print(f"  Found {len(individual_files)} files (loading {self.min_individual_files} base frame(s) for overlay generation)")
+                    if self._load_from_individual_files(individual_files[:self.min_individual_files], target_size, force_format):
+                        return self._finalize_load()
+                else:
+                    print(f"  Found only {len(individual_files)} files, need {self.min_individual_files} base frame(s)")
+            else:
+                # No overlays: load all frames as individual files
+                if len(individual_files) >= self.frame_count:
+                    print(f"  Found {len(individual_files)} individual files")
+                    if self._load_from_individual_files(individual_files[:self.frame_count], target_size, force_format):
+                        return self._finalize_load()
+                elif len(individual_files) >= self.min_individual_files:
+                    print(f"  Found {len(individual_files)} files (minimum required: {self.min_individual_files})")
+                    if self._load_from_individual_files(individual_files[:self.min_individual_files], target_size, force_format):
+                        return self._finalize_load()
+                else:
+                    print(f"  Found only {len(individual_files)} files, need {self.frame_count}")
         
         print(f"  ❌ Failed to load {self.name} animation")
         return False
@@ -201,8 +399,132 @@ class AnimationSet:
             print(f"    ❌ Error loading merged file: {e}")
             return False
     
+    def _finalize_load(self):
+        """Apply any post-processing (like overlays) and validate frame count"""
+        if not self._apply_overlay_config():
+            return False
+        
+        if len(self.frames) != self.frame_count:
+            print(f"  ❌ {self.name}: Expected {self.frame_count} frames, got {len(self.frames)}")
+            return False
+        
+        return True
+    
+    def _apply_overlay_config(self):
+        """Apply overlay configuration if provided"""
+        if not self.overlay_config:
+            return True
+        
+        overlay_type = self.overlay_config.get("type")
+        if overlay_type == "overlay_pixels":
+            return self._generate_overlay_frames_from_pixels()
+        
+        print(f"  ⚠️  Unknown overlay type '{overlay_type}' for {self.name}")
+        return False
+    
+    def _generate_overlay_frames_from_pixels(self):
+        """Use sparse overlay pixels to build additional frames sequentially"""
+        pixels = self.overlay_config.get("pixels")
+        target_frames = self.overlay_config.get("target_frames", [])
+        base_index = self.overlay_config.get("base_frame_index", 0)
+        
+        # Support both single pixels list (for normal) and dict of pixels per frame (for embarrass)
+        if isinstance(pixels, dict):
+            # Dict format: {frame_idx: [(x, y, color), ...], ...}
+            pixels_dict = pixels
+        else:
+            # List format: [(x, y, color), ...] - same pixels for all target frames
+            pixels_dict = {frame_idx: pixels for frame_idx in target_frames}
+        
+        if not pixels_dict:
+            print(f"  ⚠️  No overlay pixels provided for {self.name}")
+            return False
+        
+        if not target_frames:
+            print(f"  ⚠️  No target frames specified for {self.name} overlay")
+            return False
+        
+        if base_index >= len(self.frames):
+            print(f"  ⚠️  Base frame index {base_index} unavailable for {self.name}")
+            return False
+        
+        base_frame = self.frames[base_index]
+        if len(base_frame) < 24:
+            print(f"  ⚠️  Base frame data too small for {self.name}")
+            return False
+        
+        _, cf, _, width, height, stride = struct.unpack('<IIIIII', base_frame[:24])
+        
+        if cf != ColorFormat.RGB565.value:
+            print(f"  ⚠️  Unsupported color format {cf} for overlay in {self.name}")
+            return False
+        
+        if width == 0 or height == 0 or stride == 0:
+            print(f"  ⚠️  Invalid dimensions ({width}x{height}) for {self.name}")
+            return False
+        
+        # Apply overlays sequentially: each overlay builds on the previous frame
+        # Frame 2 = Frame 1 + overlay2, Frame 3 = Frame 2 + overlay3, etc.
+        sorted_target_frames = sorted(target_frames)
+        current_base_index = base_index
+        
+        for frame_idx in sorted_target_frames:
+            frame_pixels = pixels_dict.get(frame_idx, [])
+            
+            # Verify current base frame exists
+            if current_base_index >= len(self.frames) or self.frames[current_base_index] is None:
+                print(f"  ⚠️  Base frame {current_base_index} unavailable for frame {frame_idx} in {self.name}")
+                continue
+            
+            # If no overlay pixels, reuse the previous overlay frame (or base frame if it's the first)
+            # Previous behavior (commented out): skip frame and leave original full image
+
+            '''if not frame_pixels:
+                print(f"  ⚠️  No overlay pixels for frame {frame_idx} in {self.name}")
+                continue'''
+            if not frame_pixels:
+                print(f"  ⚠️  No overlay pixels for frame {frame_idx} in {self.name}, reusing frame {current_base_index}")
+                # Create an overlay frame with 0 pixels pointing to the previous frame (reuses it)
+                entry_count = 0
+                overlay_payload = bytearray()
+            else:
+                entry_count = 0
+                overlay_payload = bytearray()
+                
+                for x, y, color in frame_pixels:
+                    if x >= width or y >= height:
+                        continue
+                    overlay_payload.extend(struct.pack('<HHH', x, y, color & 0xFFFF))
+                    entry_count += 1
+            
+            stride_bytes = entry_count * OVERLAY_ENTRY_SIZE_BYTES
+            overlay_header = struct.pack(
+                '<IIIIII',
+                LVGL_MAGIC,
+                ColorFormat.OVERLAY_PIXELS.value,
+                current_base_index,      # flags: base frame index for sequential application
+                entry_count,             # width field repurposed for entry count
+                1,                       # height set to 1 (not used)
+                stride_bytes             # stride stores total payload bytes
+            )
+            
+            while len(self.frames) <= frame_idx:
+                self.frames.append(None)
+            
+            self.frames[frame_idx] = overlay_header + bytes(overlay_payload)
+            if entry_count > 0:
+                print(f"    ✅ Stored {entry_count} sparse overlay pixels for frame {frame_idx} (applied on frame {current_base_index})")
+            else:
+                print(f"    ✅ Created frame {frame_idx} reusing frame {current_base_index} (no overlay pixels)")
+            
+            # Next overlay builds on this frame
+            current_base_index = frame_idx
+        
+        return True
+    
     def _load_from_individual_files(self, file_paths, target_size, force_format):
         """Load frames from individual image files"""
+        initial_count = len(self.frames)
         for i, file_path in enumerate(file_paths):
             print(f"  Processing frame {i}: {os.path.basename(file_path)}")
             
@@ -222,13 +544,17 @@ class AnimationSet:
                 print(f"    ❌ Error processing {file_path}: {e}")
                 return False
         
-        return len(self.frames) == self.frame_count
+        expected_total = initial_count + len(file_paths)
+        return len(self.frames) == expected_total
     
     def get_total_size(self):
         """Get total size of all frames"""
         return sum(len(frame) for frame in self.frames)
 
-def create_mega_animations(input_dir, output_file, target_size=(256, 256), force_format=None):
+def create_mega_animations(input_dir, output_file, target_size=(256, 256), force_format=None,
+                           normal_overlays=None, embarrass_overlays=None, fire_overlays=None,
+                           happy_overlays=None, inspiration_overlays=None, question_overlays=None,
+                           shy_overlays=None, sleep_overlays=None):
     """Create mega animation file with all animations"""
     
     print("=== Creating Mega Animation File ===")
@@ -236,16 +562,195 @@ def create_mega_animations(input_dir, output_file, target_size=(256, 256), force
     print(f"Output file: {output_file}")
     print(f"Target size: {target_size[0]}x{target_size[1]}")
     
-    # Define all animation sets
+    # Configure normal animation overlay usage if overlays are provided
+    normal_overlay_config = None
+    normal_min_files = 15  # Default, will be updated based on overlays or detected frames
+    normal_frame_count = 15  # Default, will be updated dynamically
+    
+    # Always try to detect frame count from input directory first
+    normal_patterns = ["normal*.jpg", "normal*.png", "normal*.jpeg", "normal*.JPG", "normal*.PNG", "normal*.JPEG"]
+    normal_files = []
+    for pattern in normal_patterns:
+        normal_files.extend(glob.glob(os.path.join(input_dir, pattern)))
+    
+    detected_frame_count = None
+    if normal_files:
+        # Extract frame numbers from filenames
+        frame_nums = []
+        for f in normal_files:
+            base_name = os.path.basename(f).rsplit('.', 1)[0]
+            match = re.search(r'normal(\d+)$', base_name)
+            if match:
+                frame_nums.append(int(match.group(1)))
+        if frame_nums:
+            detected_frame_count = max(frame_nums)
+            print(f"Detected {detected_frame_count} normal frames from input directory")
+    
+    if normal_overlays:
+        # Convert frame numbers to frame indices (frame 2 -> index 1, frame 3 -> index 2, etc.)
+        max_overlay_frame = max(normal_overlays.keys())
+        # Use detected frame count if available, otherwise use overlay frames
+        # This ensures we include all frames even if some don't have overlays
+        if detected_frame_count:
+            normal_frame_count = detected_frame_count
+            if detected_frame_count > max_overlay_frame:
+                print(f"Using {detected_frame_count} frames (detected from directory, overlays available for frames 2-{max_overlay_frame})")
+            else:
+                print(f"Using {detected_frame_count} frames (detected from directory matches overlay frames 2-{max_overlay_frame})")
+        else:
+            normal_frame_count = max_overlay_frame
+            print(f"Using {max_overlay_frame} frames based on available overlays (no directory detection)")
+        
+        normal_overlays_indices = {idx - 1: pixels for idx, pixels in normal_overlays.items()}
+        # target_frames should include all frames from 1 to (normal_frame_count - 1)
+        # This ensures all frames are created, even if some don't have overlays
+        target_frames = list(range(1, normal_frame_count))
+        normal_overlay_config = {
+            "type": "overlay_pixels",
+            "pixels": normal_overlays_indices,  # Dict format: {1: pixels, 2: pixels, ...}
+            "base_frame_index": 0,
+            "target_frames": target_frames,  # Frame indices 1 to (normal_frame_count - 1)
+        }
+        normal_min_files = 1
+        overlay_count = len(normal_overlays_indices)
+        if overlay_count < len(target_frames):
+            print(f"Normal animation will reuse base frame with overlay pixels for frames 2-{max_overlay_frame} ({overlay_count} overlays), frames {max_overlay_frame + 1}-{normal_frame_count} will reuse previous frames")
+        else:
+            print(f"Normal animation will reuse base frame with overlay pixels for frames 2-{normal_frame_count} ({overlay_count} overlays)")
+    else:
+        # No overlays, use detected frame count or default
+        if detected_frame_count:
+            normal_frame_count = detected_frame_count
+            normal_min_files = detected_frame_count
+            print(f"Using {detected_frame_count} normal frames from input directory (no overlays)")
+        else:
+            print(f"Using default {normal_frame_count} normal frames (no detection, no overlays)")
+    
+    # Configure embarrass animation overlay usage if overlays are provided
+    embarrass_overlay_config = None
+    embarrass_min_files = 3
+    if embarrass_overlays:
+        # Convert frame numbers (2, 3) to frame indices (1, 2)
+        embarrass_overlays_indices = {idx - 1: pixels for idx, pixels in embarrass_overlays.items() if idx in [2, 3]}
+        embarrass_overlay_config = {
+            "type": "overlay_pixels",
+            "pixels": embarrass_overlays_indices,  # Dict format: {1: pixels, 2: pixels}
+            "base_frame_index": 0,
+            "target_frames": [1, 2],  # Frame indices 1 and 2 (embarrass2 and embarrass3)
+        }
+        embarrass_min_files = 1
+        print("Embarrass animation will reuse base frame with overlay pixels for frames 2 and 3")
+    
+    # Configure fire animation overlay usage if overlays are provided
+    fire_overlay_config = None
+    fire_min_files = 4
+    if fire_overlays:
+        # Convert frame indices 2,3,4 to animation frame indices 1,2,3
+        fire_overlays_indices = {idx - 1: pixels for idx, pixels in fire_overlays.items() if idx in [2, 3, 4]}
+        fire_overlay_config = {
+            "type": "overlay_pixels",
+            "pixels": fire_overlays_indices,  # Dict format: {1: pixels, 2: pixels, 3: pixels}
+            "base_frame_index": 0,
+            "target_frames": [1, 2, 3],  # Frame indices 1, 2, 3 (fire2, fire3, fire4)
+        }
+        fire_min_files = 1
+        print("Fire animation will reuse base frame with overlay pixels for frames 2, 3, and 4")
+    
+    # Configure happy animation overlay usage if overlays are provided
+    happy_overlay_config = None
+    happy_min_files = 4
+    if happy_overlays:
+        # Convert frame indices 2,3,4 to animation frame indices 1,2,3
+        happy_overlays_indices = {idx - 1: pixels for idx, pixels in happy_overlays.items() if idx in [2, 3, 4]}
+        happy_overlay_config = {
+            "type": "overlay_pixels",
+            "pixels": happy_overlays_indices,  # Dict format: {1: pixels, 2: pixels, 3: pixels}
+            "base_frame_index": 0,
+            "target_frames": [1, 2, 3],  # Frame indices 1, 2, 3 (happy2, happy3, happy4)
+        }
+        happy_min_files = 1
+        print("Happy animation will reuse base frame with overlay pixels for frames 2, 3, and 4")
+    
+    # Configure inspiration animation overlay usage if overlays are provided
+    inspiration_overlay_config = None
+    inspiration_min_files = 4
+    if inspiration_overlays:
+        # Convert frame indices 2,3,4 to animation frame indices 1,2,3
+        inspiration_overlays_indices = {idx - 1: pixels for idx, pixels in inspiration_overlays.items() if idx in [2, 3, 4]}
+        inspiration_overlay_config = {
+            "type": "overlay_pixels",
+            "pixels": inspiration_overlays_indices,  # Dict format: {1: pixels, 2: pixels, 3: pixels}
+            "base_frame_index": 0,
+            "target_frames": [1, 2, 3],  # Frame indices 1, 2, 3 (inspiration2, inspiration3, inspiration4)
+        }
+        inspiration_min_files = 1
+        print("Inspiration animation will reuse base frame with overlay pixels for frames 2, 3, and 4")
+    
+    # Configure question animation overlay usage if overlays are provided
+    question_overlay_config = None
+    question_min_files = 4
+    if question_overlays:
+        question_overlays_indices = {idx - 1: pixels for idx, pixels in question_overlays.items() if idx in [2, 3, 4]}
+        question_overlay_config = {
+            "type": "overlay_pixels",
+            "pixels": question_overlays_indices,
+            "base_frame_index": 0,
+            "target_frames": [1, 2, 3],
+        }
+        question_min_files = 1
+        print("Question animation will reuse base frame with overlay pixels for frames 2, 3, and 4")
+    
+    # Configure shy animation overlay usage if overlays are provided
+    shy_overlay_config = None
+    shy_min_files = 2
+    if shy_overlays:
+        shy_overlays_indices = {idx - 1: pixels for idx, pixels in shy_overlays.items() if idx in [2]}
+        shy_overlay_config = {
+            "type": "overlay_pixels",
+            "pixels": shy_overlays_indices,
+            "base_frame_index": 0,
+            "target_frames": [1],
+        }
+        shy_min_files = 1
+        print("Shy animation will reuse base frame with overlay pixels for frame 2")
+    
+    # Configure sleep animation overlay usage if overlays are provided
+    sleep_overlay_config = None
+    sleep_min_files = 4
+    if sleep_overlays:
+        sleep_overlays_indices = {idx - 1: pixels for idx, pixels in sleep_overlays.items() if idx in [2, 3, 4]}
+        sleep_overlay_config = {
+            "type": "overlay_pixels",
+            "pixels": sleep_overlays_indices,
+            "base_frame_index": 0,
+            "target_frames": [1, 2, 3],
+        }
+        sleep_min_files = 1
+        print("Sleep animation will reuse base frame with overlay pixels for frames 2, 3, and 4")
+    
+    # Define all animation sets (supports both .jpg and .png)
     animation_sets = [
-        AnimationSet("Normal", 3, merged_file="normal_all.bin", individual_pattern="normal*.jpg"),
-        AnimationSet("Embarrass", 3, individual_pattern="embarrass*.jpg"),
-        AnimationSet("Fire", 4, individual_pattern="fire*.jpg"),
-        AnimationSet("Happy", 4, individual_pattern="happy*.jpg"),
-        AnimationSet("Inspiration", 4, individual_pattern="inspiration*.jpg"),
-        AnimationSet("Question", 4, individual_pattern="question*.jpg"),
-        AnimationSet("Shy", 2, individual_pattern="shy*.jpg"),
-        AnimationSet("Sleep", 4, individual_pattern="sleep*.jpg"),
+        AnimationSet(
+            "Normal",
+            normal_frame_count,  # Dynamic: 1 base frame + overlay frames (or detected from input)
+            merged_file="normal_all.bin",
+            individual_pattern="normal*.jpg",  # Pattern used for glob, but we search multiple extensions
+            min_individual_files=normal_min_files,
+            overlay_config=normal_overlay_config,
+        ),
+        AnimationSet(
+            "Embarrass",
+            3,
+            individual_pattern="embarrass*.jpg",
+            min_individual_files=embarrass_min_files,
+            overlay_config=embarrass_overlay_config,
+        ),
+        AnimationSet("Fire", 4, individual_pattern="fire*.jpg", min_individual_files=fire_min_files, overlay_config=fire_overlay_config),
+        AnimationSet("Happy", 4, individual_pattern="happy*.jpg", min_individual_files=happy_min_files, overlay_config=happy_overlay_config),
+        AnimationSet("Inspiration", 4, individual_pattern="inspiration*.jpg", min_individual_files=inspiration_min_files, overlay_config=inspiration_overlay_config),
+        AnimationSet("Question", 4, individual_pattern="question*.jpg", min_individual_files=question_min_files, overlay_config=question_overlay_config),
+        AnimationSet("Shy", 2, individual_pattern="shy*.jpg", min_individual_files=shy_min_files, overlay_config=shy_overlay_config),
+        AnimationSet("Sleep", 4, individual_pattern="sleep*.jpg", min_individual_files=sleep_min_files, overlay_config=sleep_overlay_config),
     ]
     
     # Load all animations
@@ -324,6 +829,22 @@ Examples:
                        help='Target image size (default: 256 256)')
     parser.add_argument('--format', choices=['RGB565', 'RGB565A8', 'RGB888', 'ARGB8888'], 
                        help='Force color format (auto-detect if not specified)')
+    parser.add_argument('--normal-overlay2',
+                        default=None,
+                        help='Path to normal_overlay2.h (default: images/frame difference/normal_overlay2.h). '
+                             'Set to "none" to disable normal overlay frames.')
+    parser.add_argument('--normal-overlay3',
+                        default=None,
+                        help='Path to normal_overlay3.h (default: images/frame difference/normal_overlay3.h). '
+                             'Set to "none" to disable normal overlay frames.')
+    parser.add_argument('--embarrass-overlay2',
+                        default=None,
+                        help='Path to embarrass_overlay2.h (default: images/frame difference/embarrass_overlay2.h). '
+                             'Set to "none" to disable embarrass overlay frames.')
+    parser.add_argument('--embarrass-overlay3',
+                        default=None,
+                        help='Path to embarrass_overlay3.h (default: images/frame difference/embarrass_overlay3.h). '
+                             'Set to "none" to disable embarrass overlay frames.')
     
     return parser.parse_args()
 
@@ -348,12 +869,106 @@ def main():
     else:
         print("Using automatic color format detection")
     
+    # Load normal overlays if requested (dynamically detects available overlay files)
+    normal_overlays = None
+    default_normal_paths = get_default_normal_overlay_paths()
+    
+    # Check if overlay2/overlay3 are explicitly disabled via command line
+    overlay2_disabled = args.normal_overlay2 and args.normal_overlay2.lower() == "none"
+    overlay3_disabled = args.normal_overlay3 and args.normal_overlay3.lower() == "none"
+    
+    # Load all normal overlays from default paths (dynamically detects available files)
+    # Only disable if explicitly set to "none" via command line
+    if not overlay2_disabled and not overlay3_disabled and default_normal_paths:
+        normal_overlays = {}
+        # Load all available overlays from default paths
+        for frame_num, overlay_path in default_normal_paths.items():
+            # Skip if explicitly disabled via command line
+            if (frame_num == 2 and overlay2_disabled) or (frame_num == 3 and overlay3_disabled):
+                continue
+            pixels = load_overlay_pixels(overlay_path)
+            if pixels:
+                normal_overlays[frame_num] = pixels
+            else:
+                print(f"Warning: normal_overlay{frame_num}.h not found or empty, skipping frame {frame_num}")
+        
+        if not normal_overlays:
+            normal_overlays = None
+            print("Warning: No normal overlay files found, will use individual image files instead")
+        else:
+            print(f"Loaded {len(normal_overlays)} normal overlay files (frames {min(normal_overlays.keys())}-{max(normal_overlays.keys())})")
+    elif overlay2_disabled or overlay3_disabled:
+        print("Normal overlay-based frame generation partially disabled by user request")
+    else:
+        print("No normal overlay files found, will use individual image files")
+    
+    # Load embarrass overlays if requested
+    embarrass_overlays = None
+    default_embarrass_paths = get_default_embarrass_overlay_paths()
+    
+    overlay2_path = args.embarrass_overlay2 if args.embarrass_overlay2 is not None else str(default_embarrass_paths[2])
+    overlay3_path = args.embarrass_overlay3 if args.embarrass_overlay3 is not None else str(default_embarrass_paths[3])
+    
+    if overlay2_path.lower() != "none" and overlay3_path.lower() != "none":
+        embarrass_overlays = {}
+        if overlay2_path.lower() != "none":
+            pixels2 = load_overlay_pixels(overlay2_path)
+            if pixels2:
+                embarrass_overlays[2] = pixels2  # Frame number 2 (embarrass2)
+        if overlay3_path.lower() != "none":
+            pixels3 = load_overlay_pixels(overlay3_path)
+            if pixels3:
+                embarrass_overlays[3] = pixels3  # Frame number 3 (embarrass3)
+        
+        if not embarrass_overlays:
+            embarrass_overlays = None
+    else:
+        print("Embarrass overlay-based frame generation disabled by user request")
+    
+    # Load fire overlays (default paths)
+    fire_overlays = load_animation_overlays(get_default_fire_overlay_paths())
+    if not fire_overlays:
+        fire_overlays = None
+    
+    # Load happy overlays (default paths)
+    happy_overlays = load_animation_overlays(get_default_happy_overlay_paths())
+    if not happy_overlays:
+        happy_overlays = None
+    
+    # Load inspiration overlays (default paths)
+    inspiration_overlays = load_animation_overlays(get_default_inspiration_overlay_paths())
+    if not inspiration_overlays:
+        inspiration_overlays = None
+    
+    # Load question overlays (default paths)
+    question_overlays = load_animation_overlays(get_default_question_overlay_paths())
+    if not question_overlays:
+        question_overlays = None
+    
+    # Load shy overlays (default paths)
+    shy_overlays = load_animation_overlays(get_default_shy_overlay_paths())
+    if not shy_overlays:
+        shy_overlays = None
+    
+    # Load sleep overlays (default paths)
+    sleep_overlays = load_animation_overlays(get_default_sleep_overlay_paths())
+    if not sleep_overlays:
+        sleep_overlays = None
+    
     # Create mega animations
     success = create_mega_animations(
         args.input_dir, 
         args.output_file, 
         target_size=tuple(args.size),
-        force_format=force_format
+        force_format=force_format,
+        normal_overlays=normal_overlays,
+        embarrass_overlays=embarrass_overlays,
+        fire_overlays=fire_overlays,
+        happy_overlays=happy_overlays,
+        inspiration_overlays=inspiration_overlays,
+        question_overlays=question_overlays,
+        shy_overlays=shy_overlays,
+        sleep_overlays=sleep_overlays
     )
     
     if success:
