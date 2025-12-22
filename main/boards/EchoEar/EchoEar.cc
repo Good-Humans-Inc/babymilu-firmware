@@ -19,6 +19,8 @@
 #include <esp_lcd_panel_ops.h>
 #include <esp_lcd_st77916.h>
 #include "touch.h"
+#include <touch_sensor_lowlevel.h>
+#include <touch_button_sensor.h>
 
 #include "driver/temperature_sensor.h"
 
@@ -285,7 +287,8 @@ private:
     PwmBacklight* backlight_ = nullptr;
     esp_timer_handle_t touchpad_timer_;
     esp_lcd_touch_handle_t tp;   // LCD touch handle
-
+    touch_button_handle_t touch_button_handle_ = nullptr;  // Touch button sensor handle for GPIO7
+    static volatile uint32_t touch_event_count_;  // Counter for touch events
 
     void InitializeI2c() {
         i2c_master_bus_config_t i2c_bus_cfg = {
@@ -376,6 +379,166 @@ private:
             app.ToggleChatState();
             touch_last_time = touch_start_time;
         }   
+    }
+
+    static void touch_log_task(void* arg)
+    {
+        ESP_LOGI(TAG, "[TOUCH] touch_log_task started");
+        EspS3Cat* board = static_cast<EspS3Cat*>(arg);
+        if (board == nullptr) {
+            ESP_LOGE(TAG, "[TOUCH] ERROR: Invalid board pointer in touch_log_task");
+            vTaskDelete(NULL);
+            return;
+        }
+
+        uint32_t last_count = 0;
+        ESP_LOGI(TAG, "[TOUCH] touch_log_task entering main loop");
+        while (true) {
+            vTaskDelay(pdMS_TO_TICKS(1000));  // Wait 1 second
+            
+            uint32_t current_count = EspS3Cat::touch_event_count_;
+            if (current_count > last_count) {
+                ESP_LOGI(TAG, "[TOUCH] Touch sensor status: Events detected! Total events: %lu (GPIO7)", 
+                         (unsigned long)current_count);
+                last_count = current_count;
+            } else {
+                ESP_LOGI(TAG, "[TOUCH] Touch sensor status: No new events (GPIO7), total=%lu", 
+                         (unsigned long)current_count);
+            }
+        }
+    }
+
+    static void touch_button_event_task(void* arg)
+    {
+        ESP_LOGI(TAG, "[TOUCH] touch_button_event_task started");
+        EspS3Cat* board = static_cast<EspS3Cat*>(arg);
+        if (board == nullptr) {
+            ESP_LOGE(TAG, "[TOUCH] ERROR: Invalid board pointer in touch_button_event_task");
+            vTaskDelete(NULL);
+            return;
+        }
+
+        ESP_LOGI(TAG, "[TOUCH] touch_button_event_task handle=%p", (void*)board->touch_button_handle_);
+        ESP_LOGI(TAG, "[TOUCH] touch_button_event_task entering main loop");
+        while (true) {
+            if (board->touch_button_handle_ != nullptr) {
+                touch_button_sensor_handle_events(board->touch_button_handle_);
+            }
+            vTaskDelay(pdMS_TO_TICKS(10));  // Check every 10ms
+        }
+    }
+
+    void InitializeTouchButton()
+    {
+        ESP_LOGI(TAG, "[TOUCH] ===== Starting touch button initialization =====");
+        ESP_LOGI(TAG, "[TOUCH] GPIO7 -> Touch Channel 7");
+        ESP_LOGI(TAG, "[TOUCH] Threshold: %.3f", LIGHT_TOUCH_THRESHOLD);
+        
+        // Step 1: Prepare channel configuration
+        ESP_LOGI(TAG, "[TOUCH] Step 1: Preparing channel configuration");
+        uint32_t touch_channel_list[] = {TOUCH_CHANNEL_1};  // GPIO7 = Channel 7
+        ESP_LOGI(TAG, "[TOUCH] Channel list: [%lu]", (unsigned long)touch_channel_list[0]);
+        
+        touch_lowlevel_type_t *channel_type = (touch_lowlevel_type_t*)calloc(1, sizeof(touch_lowlevel_type_t));
+        if (channel_type == NULL) {
+            ESP_LOGE(TAG, "[TOUCH] ERROR: Memory allocation failed for channel_type");
+            return;
+        }
+        channel_type[0] = TOUCH_LOWLEVEL_TYPE_TOUCH;
+        ESP_LOGI(TAG, "[TOUCH] Channel type allocated and set to TOUCH");
+        
+        // Step 2: Create low-level touch sensor
+        ESP_LOGI(TAG, "[TOUCH] Step 2: Creating low-level touch sensor");
+        touch_lowlevel_config_t low_config = {
+            .channel_num = 1,
+            .channel_list = touch_channel_list,
+            .channel_type = channel_type,
+        };
+        ESP_LOGI(TAG, "[TOUCH] Low-level config: channel_num=%d", low_config.channel_num);
+        
+        esp_err_t ret = touch_sensor_lowlevel_create(&low_config);
+        ESP_LOGI(TAG, "[TOUCH] touch_sensor_lowlevel_create() returned: %d (%s)", ret, esp_err_to_name(ret));
+        free(channel_type);
+        
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "[TOUCH] ERROR: Touch sensor lowlevel create failed: %d (%s)", ret, esp_err_to_name(ret));
+            return;
+        }
+        ESP_LOGI(TAG, "[TOUCH] ✓ Low-level touch sensor created successfully");
+        
+        // Step 3: Configure touch button sensor
+        ESP_LOGI(TAG, "[TOUCH] Step 3: Configuring touch button sensor");
+        float channel_threshold[] = {LIGHT_TOUCH_THRESHOLD};
+        
+        touch_button_config_t touch_cfg = {
+            .channel_num = 1,
+            .channel_list = touch_channel_list,
+            .channel_threshold = channel_threshold,
+            .channel_gold_value = NULL,
+            .debounce_times = 1,
+            .skip_lowlevel_init = true,
+        };
+        
+        ESP_LOGI(TAG, "[TOUCH] Touch button config: channel_num=%d, threshold=%.3f, debounce=%d, skip_lowlevel_init=%d",
+                 touch_cfg.channel_num, touch_cfg.channel_threshold[0], touch_cfg.debounce_times, touch_cfg.skip_lowlevel_init);
+        
+        // Step 4: Create touch button sensor with callback
+        ESP_LOGI(TAG, "[TOUCH] Step 4: Creating touch button sensor with callback");
+        touch_event_count_ = 0;  // Initialize counter
+        ESP_LOGI(TAG, "[TOUCH] Touch event counter initialized to 0");
+        
+        ret = touch_button_sensor_create(&touch_cfg, &touch_button_handle_, 
+                                         [](touch_button_handle_t handle, uint32_t channel, touch_state_t state, void *cb_arg) {
+                                             // Lightweight callback - increment counter and log
+                                             EspS3Cat::touch_event_count_++;  // Increment on any touch event
+                                             
+                                             if (state == TOUCH_STATE_ACTIVE) {
+                                                 ESP_LOGI(TAG, "[TOUCH] Touch button pressed (channel %lu)", (unsigned long)channel);
+                                             } else {
+                                                 ESP_LOGI(TAG, "[TOUCH] Touch button released (channel %lu)", (unsigned long)channel);
+                                             }
+                                         }, this);
+        
+        ESP_LOGI(TAG, "[TOUCH] touch_button_sensor_create() returned: %d (%s)", ret, esp_err_to_name(ret));
+        
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "[TOUCH] ERROR: Create touch button sensor failed: %d (%s)", ret, esp_err_to_name(ret));
+            return;
+        }
+        ESP_LOGI(TAG, "[TOUCH] ✓ Touch button sensor created successfully, handle=%p", (void*)touch_button_handle_);
+        
+        // Create periodic logging task
+        ESP_LOGI(TAG, "[TOUCH] Creating periodic logging task");
+        BaseType_t task_ret1 = xTaskCreatePinnedToCore(touch_log_task, "touch_log_task", 2 * 1024, this, 1, NULL, 1);
+        ESP_LOGI(TAG, "[TOUCH] touch_log_task creation result: %d", task_ret1);
+        if (task_ret1 == pdPASS) {
+            ESP_LOGI(TAG, "[TOUCH] ✓ touch_log_task created successfully");
+        } else {
+            ESP_LOGE(TAG, "[TOUCH] ERROR: Failed to create touch_log_task");
+        }
+        
+        // Create task to handle touch button sensor events
+        ESP_LOGI(TAG, "[TOUCH] Creating touch button event handling task");
+        BaseType_t task_ret2 = xTaskCreatePinnedToCore(touch_button_event_task, "touch_btn_task", 4 * 1024, this, 5, NULL, 1);
+        ESP_LOGI(TAG, "[TOUCH] touch_button_event_task creation result: %d", task_ret2);
+        if (task_ret2 == pdPASS) {
+            ESP_LOGI(TAG, "[TOUCH] ✓ touch_button_event_task created successfully");
+        } else {
+            ESP_LOGE(TAG, "[TOUCH] ERROR: Failed to create touch_button_event_task");
+        }
+        
+        // Step 5: Start touch sensor
+        ESP_LOGI(TAG, "[TOUCH] Step 5: Starting touch sensor");
+        ret = touch_sensor_lowlevel_start();
+        ESP_LOGI(TAG, "[TOUCH] touch_sensor_lowlevel_start() returned: %d (%s)", ret, esp_err_to_name(ret));
+        
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "[TOUCH] ERROR: Touch sensor start failed: %d (%s)", ret, esp_err_to_name(ret));
+            return;
+        }
+        
+        ESP_LOGI(TAG, "[TOUCH] ===== Touch button initialization complete =====");
+        ESP_LOGI(TAG, "[TOUCH] Touch sensor is now active and monitoring GPIO7");
     }
 
     void InitializeCharge() {
@@ -475,6 +638,9 @@ public:
         InitializeSpi();
         Initializest77916Display();
         InitializeButtons();
+        ESP_LOGI(TAG, "[TOUCH] About to call InitializeTouchButton()");
+        InitializeTouchButton();
+        ESP_LOGI(TAG, "[TOUCH] InitializeTouchButton() returned");
         
         // Initialize SD card BEFORE animations to ensure it's available for animation loading
         ESP_LOGI(TAG, "Initializing SD card before animations...");
@@ -521,5 +687,8 @@ public:
         return backlight_;
     }
 };
+
+// Static member variable definition
+volatile uint32_t EspS3Cat::touch_event_count_ = 0;
 
 DECLARE_BOARD(EspS3Cat);
