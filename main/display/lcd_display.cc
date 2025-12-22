@@ -16,7 +16,7 @@
 #define TAG "LcdDisplay"
 
 // Color definitions for dark theme
-#define DARK_BACKGROUND_COLOR lv_color_hex(0x121212)       // Dark background
+#define DARK_BACKGROUND_COLOR lv_color_hex(0x000000)       // Complete black background
 #define DARK_TEXT_COLOR lv_color_white()                   // White text
 #define DARK_CHAT_BACKGROUND_COLOR lv_color_hex(0x1E1E1E)  // Slightly lighter than background
 #define DARK_USER_BUBBLE_COLOR lv_color_hex(0x1A6C37)      // Dark green
@@ -69,19 +69,9 @@ LcdDisplay::LcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_handle_
     width_ = width;
     height_ = height;
 
-    // Load theme from settings
-    Settings settings("display", false);
-    current_theme_name_ = settings.GetString("theme", "light");
-
-    // Update the theme
-    if (current_theme_name_ == "dark")
-    {
-        current_theme_ = DARK_THEME;
-    }
-    else if (current_theme_name_ == "light")
-    {
-        current_theme_ = LIGHT_THEME;
-    }
+    // Force dark theme always
+    current_theme_name_ = "dark";
+    current_theme_ = DARK_THEME;
 }
 
 SpiLcdDisplay::SpiLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_handle_t panel,
@@ -90,8 +80,9 @@ SpiLcdDisplay::SpiLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_h
     : LcdDisplay(panel_io, panel, fonts, width, height)
 {
 
-    // draw white
-    std::vector<uint16_t> buffer(width_, 0xFFFF);
+    // draw black background (0x000000 in RGB888 = 0x0000 in RGB565)
+    // RGB565: R=0, G=0, B=0 from RGB888(0,0,0) - complete black
+    std::vector<uint16_t> buffer(width_, 0x0000);  // Black background color in RGB565
     for (int y = 0; y < height_; y++)
     {
         esp_lcd_panel_draw_bitmap(panel_, 0, y, width_, y + 1, buffer.data());
@@ -160,8 +151,9 @@ RgbLcdDisplay::RgbLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_h
     : LcdDisplay(panel_io, panel, fonts, width, height)
 {
 
-    // draw white
-    std::vector<uint16_t> buffer(width_, 0xFFFF);
+    // draw black background (0x000000 in RGB888 = 0x0000 in RGB565)
+    // RGB565: R=0, G=0, B=0 from RGB888(0,0,0) - complete black
+    std::vector<uint16_t> buffer(width_, 0x0000);  // Black background color in RGB565
     for (int y = 0; y < height_; y++)
     {
         esp_lcd_panel_draw_bitmap(panel_, 0, y, width_, y + 1, buffer.data());
@@ -334,6 +326,7 @@ void LcdDisplay::SetupUI()
     lv_obj_set_style_text_font(screen, fonts_.text_font, 0);
     lv_obj_set_style_text_color(screen, current_theme_.text, 0);
     lv_obj_set_style_bg_color(screen, current_theme_.background, 0);
+    lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, 0); // Ensure background is fully opaque
 
     /* Container */
     container_ = lv_obj_create(screen);
@@ -343,6 +336,7 @@ void LcdDisplay::SetupUI()
     lv_obj_set_style_border_width(container_, 0, 0);
     lv_obj_set_style_pad_row(container_, 0, 0);
     lv_obj_set_style_bg_color(container_, current_theme_.background, 0);
+    lv_obj_set_style_bg_opa(container_, LV_OPA_COVER, 0); // Ensure background is fully opaque
     lv_obj_set_style_border_color(container_, current_theme_.border, 0);
 
     /* Status bar - COMMENTED OUT FOR FULL IMAGE SCALING */
@@ -360,7 +354,8 @@ void LcdDisplay::SetupUI()
     lv_obj_set_width(content_, LV_HOR_RES);
     lv_obj_set_flex_grow(content_, 1);
     lv_obj_set_style_pad_all(content_, 0, 0);  // REMOVE ALL PADDING FOR FULL SCREEN
-    lv_obj_set_style_bg_color(content_, current_theme_.chat_background, 0); // Background for chat area
+    lv_obj_set_style_bg_color(content_, current_theme_.background, 0); // Use main background for full-screen animations
+    lv_obj_set_style_bg_opa(content_, LV_OPA_COVER, 0); // Ensure background is fully opaque
     lv_obj_set_style_border_color(content_, current_theme_.border, 0);      // Border color for chat area
 
     // Enable scrolling for chat content
@@ -458,6 +453,7 @@ void LcdDisplay::SetupUI()
     lv_obj_set_style_text_font(screen, fonts_.text_font, 0);
     lv_obj_set_style_text_color(screen, current_theme_.text, 0);
     lv_obj_set_style_bg_color(screen, current_theme_.background, 0);
+    lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, 0); // Ensure background is fully opaque
 
     /* Container */
     container_ = lv_obj_create(screen);
@@ -467,6 +463,7 @@ void LcdDisplay::SetupUI()
     lv_obj_set_style_border_width(container_, 0, 0);
     lv_obj_set_style_pad_row(container_, 0, 0);
     lv_obj_set_style_bg_color(container_, current_theme_.background, 0);
+    lv_obj_set_style_bg_opa(container_, LV_OPA_COVER, 0); // Ensure background is fully opaque
     lv_obj_set_style_border_color(container_, current_theme_.border, 0);
 
     /* Status bar - COMMENTED OUT FOR FULL IMAGE SCALING */
@@ -485,7 +482,8 @@ void LcdDisplay::SetupUI()
     lv_obj_set_width(content_, LV_HOR_RES);
     lv_obj_set_flex_grow(content_, 1);
     lv_obj_set_style_pad_all(content_, 0, 0);  // Remove padding to maximize space
-    lv_obj_set_style_bg_color(content_, current_theme_.chat_background, 0);
+    lv_obj_set_style_bg_color(content_, current_theme_.background, 0); // Use main background for full-screen animations
+    lv_obj_set_style_bg_opa(content_, LV_OPA_COVER, 0); // Ensure background is fully opaque
     lv_obj_set_style_border_color(content_, current_theme_.border, 0); // Border color for content
 
     lv_obj_set_flex_flow(content_, LV_FLEX_FLOW_COLUMN);                                                     // 垂直布局（从上到下）
@@ -871,6 +869,14 @@ void LcdDisplay::SetEmotionImg(const lv_image_dsc_t *img, int frame_index)
         lv_obj_set_style_pad_all(emotion_label_, 0, 0);
         lv_obj_set_style_margin_all(emotion_label_, 0, 0);
         lv_obj_set_style_border_width(emotion_label_, 0, 0);
+        // Set background to black and fully opaque to prevent any brightness differences
+        lv_obj_set_style_bg_color(emotion_label_, current_theme_.background, 0);
+        lv_obj_set_style_bg_opa(emotion_label_, LV_OPA_COVER, 0); // Fully opaque black background
+        lv_obj_set_style_img_opa(emotion_label_, LV_OPA_COVER, 0); // Ensure image is fully opaque
+        // Remove any default styling that might create white pixels
+        lv_obj_set_style_radius(emotion_label_, 0, 0);
+        lv_obj_set_style_outline_width(emotion_label_, 0, 0);
+        lv_obj_set_style_shadow_width(emotion_label_, 0, 0);
     }
     
     if (emotion_label_ == nullptr) {
@@ -918,7 +924,7 @@ void LcdDisplay::SetEmotionImg(const lv_image_dsc_t *img, int frame_index)
     
     lv_img_set_src(emotion_label_, img_to_display);
     
-    // Scale animation to fit display better - 128x128 -> 412x412 FULL SCREEN SCALING
+    // Scale animation to fit display - 360x360 -> 360x360 (full screen)
     if (img != nullptr) {
         // Safety checks to prevent division by zero
         lv_coord_t img_width = img->header.w;
@@ -936,11 +942,10 @@ void LcdDisplay::SetEmotionImg(const lv_image_dsc_t *img, int frame_index)
             return;
         }
         
-        // For 128x128 image to become 408x408 SPD2010 ALIGNED: scale = 408/128 = 3.1875
-        // In LVGL scale units: 3.1875 * 256 = 816
-        // 408 is perfectly divisible by 4 (SPD2010 requirement): 408 ÷ 4 = 102
-        lv_coord_t target_width = 408;   // 4-pixel aligned for SPD2010 driver
-        lv_coord_t target_height = 408;  // 4-pixel aligned for SPD2010 driver
+        // For 360x360 image to display at 360x360 (full screen): scale = 360/360 = 1.0
+        // In LVGL scale units: 1.0 * 256 = 256 (100% scale)
+        lv_coord_t target_width = 360;
+        lv_coord_t target_height = 360;
         
         // Additional safety check for target dimensions
         if (target_width <= 0 || target_height <= 0) {
@@ -987,21 +992,19 @@ void LcdDisplay::SetEmotionImg(const lv_image_dsc_t *img, int frame_index)
         lv_coord_t scale = (scale_w < scale_h) ? scale_w : scale_h;
         
         // Debug logging - COMMENTED OUT
-        // ESP_LOGI(TAG, "SPD2010 ALIGNED TEST 408x408: %dx%d -> %dx%d, scale_w=%d, scale_h=%d, final_scale=%d", 
+        // ESP_LOGI(TAG, "SCALE 360x360: %dx%d -> %dx%d, scale_w=%d, scale_h=%d, final_scale=%d", 
         //          img_width, img_height, target_width, target_height, scale_w, scale_h, scale);
         // ESP_LOGI(TAG, "SCREEN SIZE: %dx%d, SCALED IMAGE: %dx%d, MARGIN: %dx%d pixels", 
         //          LV_HOR_RES, LV_VER_RES, target_width, target_height, 
         //          LV_HOR_RES - target_width, LV_VER_RES - target_height);
-        // ESP_LOGI(TAG, "SPD2010 ALIGNMENT: target_width%%4=%d, target_height%%4=%d", 
-        //          target_width % 4, target_height % 4);
         
-        // Ensure scale is within safe bounds for full screen
-        if (scale > 1024) scale = 1024;  // Max 400% scale for full screen
+        // Ensure scale is within safe bounds
+        if (scale > 1024) scale = 1024;  // Max 400% scale
         if (scale < 64) scale = 64;       // Min 25% scale
         if (scale <= 0) scale = 256;      // Fallback to 100% if calculation failed
         
-        // ESP_LOGI(TAG, "FINAL SPD2010 ALIGNED SCALE 408x408: %d (%.2fx) - Image has %d pixel margin on each side", 
-        //          scale, (float)scale / 256.0f, (LV_HOR_RES - target_width) / 2);
+        // ESP_LOGI(TAG, "FINAL SCALE 360x360: %d (%.2fx) - Full screen display", 
+        //          scale, (float)scale / 256.0f);
         
         // Use older LVGL API methods for img objects with additional safety
         if (scale > 0 && scale <= 1024) {  // Ensure scale is within valid LVGL range
@@ -1011,6 +1014,19 @@ void LcdDisplay::SetEmotionImg(const lv_image_dsc_t *img, int frame_index)
             ESP_LOGW(TAG, "Scale value out of range, using default: %d", scale);
             lv_img_set_zoom(emotion_label_, 256);  // Default 100% scale
         }
+        
+        // Ensure image object background is fully opaque black to prevent any brightness differences
+        lv_obj_set_style_bg_color(emotion_label_, current_theme_.background, 0);
+        lv_obj_set_style_bg_opa(emotion_label_, LV_OPA_COVER, 0); // Fully opaque black background
+        lv_obj_set_style_img_opa(emotion_label_, LV_OPA_COVER, 0); // Fully opaque image
+        
+        // Set explicit size to match scaled dimensions to prevent white borders
+        lv_obj_set_size(emotion_label_, target_width, target_height);
+        
+        // Remove any default styling that might create white pixels
+        lv_obj_set_style_radius(emotion_label_, 0, 0);
+        lv_obj_set_style_outline_width(emotion_label_, 0, 0);
+        lv_obj_set_style_shadow_width(emotion_label_, 0, 0);
     }
 }
 
@@ -1048,20 +1064,9 @@ void LcdDisplay::SetTheme(const std::string &theme_name)
 {
     DisplayLockGuard lock(this);
 
-    if (theme_name == "dark" || theme_name == "DARK")
-    {
-        current_theme_ = DARK_THEME;
-    }
-    else if (theme_name == "light" || theme_name == "LIGHT")
-    {
-        current_theme_ = LIGHT_THEME;
-    }
-    else
-    {
-        // Invalid theme name, return false
-        ESP_LOGE(TAG, "Invalid theme name: %s", theme_name.c_str());
-        return;
-    }
+    // Force dark theme always - ignore theme_name parameter
+    current_theme_ = DARK_THEME;
+    current_theme_name_ = "dark";
 
     // Get the active screen
     lv_obj_t *screen = lv_screen_active();
@@ -1111,7 +1116,7 @@ void LcdDisplay::SetTheme(const std::string &theme_name)
     // Update content area colors
     if (content_ != nullptr)
     {
-        lv_obj_set_style_bg_color(content_, current_theme_.chat_background, 0);
+        lv_obj_set_style_bg_color(content_, current_theme_.background, 0); // Use main background for full-screen animations
         lv_obj_set_style_border_color(content_, current_theme_.border, 0);
 
         // If we have the chat message style, update all message bubbles

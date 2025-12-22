@@ -72,7 +72,7 @@ LcdDisplay::LcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_handle_
 
     // Load theme from settings
     Settings settings("display", false);
-    current_theme_name_ = settings.GetString("theme", "light");
+    current_theme_name_ = settings.GetString("theme", "dark");
 
     // Update the theme
     if (current_theme_name_ == "dark")
@@ -1236,7 +1236,7 @@ void LcdDisplay::SetEmotionImg(const lv_image_dsc_t *img, int frame_index)
     
     lv_img_set_src(emotion_label_, img_to_display);
     
-    // Scale animation to fit display better - 128x128 -> 412x412 FULL SCREEN SCALING
+    // Scale animation to fit display better - 360x360 -> 300x300
     // COMMENTED OUT: Keep original image size (no scaling)
     /*
     if (img != nullptr) {
@@ -1256,11 +1256,10 @@ void LcdDisplay::SetEmotionImg(const lv_image_dsc_t *img, int frame_index)
             return;
         }
         
-        // For 128x128 image to become 408x408 SPD2010 ALIGNED: scale = 408/128 = 3.1875
-        // In LVGL scale units: 3.1875 * 256 = 816
-        // 408 is perfectly divisible by 4 (SPD2010 requirement): 408 ÷ 4 = 102
-        lv_coord_t target_width = 408;   // 4-pixel aligned for SPD2010 driver
-        lv_coord_t target_height = 408;  // 4-pixel aligned for SPD2010 driver
+        // For 360x360 image to become 300x300: scale = 300/360 = 0.8333
+        // In LVGL scale units: 0.8333 * 256 = 213
+        lv_coord_t target_width = 300;
+        lv_coord_t target_height = 300;
         
         // Additional safety check for target dimensions
         if (target_width <= 0 || target_height <= 0) {
@@ -1307,20 +1306,18 @@ void LcdDisplay::SetEmotionImg(const lv_image_dsc_t *img, int frame_index)
         lv_coord_t scale = (scale_w < scale_h) ? scale_w : scale_h;
         
         // Debug logging - COMMENTED OUT
-        // ESP_LOGI(TAG, "SPD2010 ALIGNED TEST 408x408: %dx%d -> %dx%d, scale_w=%d, scale_h=%d, final_scale=%d", 
+        // ESP_LOGI(TAG, "SCALE 300x300: %dx%d -> %dx%d, scale_w=%d, scale_h=%d, final_scale=%d", 
         //          img_width, img_height, target_width, target_height, scale_w, scale_h, scale);
         // ESP_LOGI(TAG, "SCREEN SIZE: %dx%d, SCALED IMAGE: %dx%d, MARGIN: %dx%d pixels", 
         //          LV_HOR_RES, LV_VER_RES, target_width, target_height, 
         //          LV_HOR_RES - target_width, LV_VER_RES - target_height);
-        // ESP_LOGI(TAG, "SPD2010 ALIGNMENT: target_width%%4=%d, target_height%%4=%d", 
-        //          target_width % 4, target_height % 4);
         
-        // Ensure scale is within safe bounds for full screen
-        if (scale > 1024) scale = 1024;  // Max 400% scale for full screen
+        // Ensure scale is within safe bounds
+        if (scale > 1024) scale = 1024;  // Max 400% scale
         if (scale < 64) scale = 64;       // Min 25% scale
         if (scale <= 0) scale = 256;      // Fallback to 100% if calculation failed
         
-        // ESP_LOGI(TAG, "FINAL SPD2010 ALIGNED SCALE 408x408: %d (%.2fx) - Image has %d pixel margin on each side", 
+        // ESP_LOGI(TAG, "FINAL SCALE 300x300: %d (%.2fx) - Image has %d pixel margin on each side", 
         //          scale, (float)scale / 256.0f, (LV_HOR_RES - target_width) / 2);
         
         // Use older LVGL API methods for img objects with additional safety
