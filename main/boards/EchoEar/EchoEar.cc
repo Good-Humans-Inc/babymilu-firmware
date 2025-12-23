@@ -638,9 +638,9 @@ public:
         InitializeSpi();
         Initializest77916Display();
         InitializeButtons();
-        ESP_LOGI(TAG, "[TOUCH] About to call InitializeTouchButton()");
-        InitializeTouchButton();
-        ESP_LOGI(TAG, "[TOUCH] InitializeTouchButton() returned");
+        // ESP_LOGI(TAG, "[TOUCH] About to call InitializeTouchButton()");
+        // InitializeTouchButton();
+        // ESP_LOGI(TAG, "[TOUCH] InitializeTouchButton() returned");
         
         // Initialize SD card BEFORE animations to ensure it's available for animation loading
         ESP_LOGI(TAG, "Initializing SD card before animations...");
