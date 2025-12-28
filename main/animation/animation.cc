@@ -528,7 +528,13 @@ void plat_animation_task(void *arg)
         // ESP_LOGI("plat_animation_task", "Animation %d: Frame %d/%d", now_animation, pos, current_anim->len);
         // Pass frame index for overlay composition (normal2/normal3, etc.)
         display->SetEmotionImg(frame_img, frame_idx);
-        vTaskDelay(pdMS_TO_TICKS(334)); // 6 FPS
+        
+        // Use frame-specific delay if available, otherwise default to 334ms
+        int delay_ms = 334; // Default delay
+        if (current_anim->frame_delays != nullptr && frame_idx >= 0 && frame_idx < current_anim->len) {
+            delay_ms = current_anim->frame_delays[frame_idx];
+        }
+        vTaskDelay(pdMS_TO_TICKS(delay_ms));
     }
 }
 
@@ -607,6 +613,11 @@ void animation_cleanup_sd_card_animation(Animation_t* anim)
     if (anim && anim->animations) {
         free(anim->animations);
         anim->animations = NULL;
+    }
+    
+    if (anim && anim->frame_delays) {
+        free(anim->frame_delays);
+        anim->frame_delays = NULL;
     }
     
     // Reset animation structure
@@ -1208,6 +1219,38 @@ bool animation_load_all_from_sd_card(void)
                 anim->animations[i] = i;
             }
             
+            // Allocate and initialize frame delays only for normal animation
+            // Other animations will use the default 334ms from plat_animation_task
+            bool is_normal_animation = (anim_idx == 0);  // Normal animation is first (index 0)
+            
+            if (is_normal_animation) {
+                // Only normal animation gets explicit frame_delays
+                anim->frame_delays = (int*)malloc(frame_count * sizeof(int));
+                if (anim->frame_delays == NULL) {
+                    ESP_LOGE("animation", "Failed to allocate memory for animation %d frame delays", anim_idx);
+                    success = false;
+                    break;
+                }
+                
+                // Initialize frame delays for normal animation
+                // normal1 (frame 0): 668ms, normal2/normal3: 200ms
+                for (int i = 0; i < frame_count; i++) {
+                    if (i == 0) {
+                        // normal1: 668ms
+                        anim->frame_delays[i] = 668;
+                    } else if (i == 1 || i == 2) {
+                        // normal2 and normal3: 200ms
+                        anim->frame_delays[i] = 200;
+                    } else {
+                        // Any additional frames (shouldn't happen for normal): 334ms
+                        anim->frame_delays[i] = 334;
+                    }
+                }
+            } else {
+                // Other animations: don't allocate frame_delays, will use default 334ms from plat_animation_task
+                anim->frame_delays = nullptr;
+            }
+            
             ESP_LOGI("animation", "✅ Successfully loaded animation %d from SD card with %d frames", anim_idx, frame_count);
         }
     }
@@ -1245,6 +1288,10 @@ bool animation_load_all_from_sd_card(void)
                 if (animations[i]->animations != nullptr) {
                     free(animations[i]->animations);
                     animations[i]->animations = nullptr;
+                }
+                if (animations[i]->frame_delays != nullptr) {
+                    free(animations[i]->frame_delays);
+                    animations[i]->frame_delays = nullptr;
                 }
             }
         }

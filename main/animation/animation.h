@@ -5,6 +5,7 @@
 typedef struct _Animation_t{
     const lv_image_dsc_t **imges;
     int *animations;
+    int *frame_delays;  // Per-frame display duration in milliseconds
     int len;
     bool use_spiffs;
     lv_image_dsc_t **spiffs_imgs;  // For SD card-loaded images
