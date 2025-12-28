@@ -498,7 +498,7 @@ void plat_animation_task(void *arg)
         // CRITICAL FIX: Check for NULL animation to prevent crashes
         if (current_anim == NULL) {
             ESP_LOGW("plat_animation_task", "Animation %d is NULL, skipping frame", now_animation);
-            vTaskDelay(pdMS_TO_TICKS(67)); // 15 FPS: 1000ms / 15 ≈ 67ms per frame
+            vTaskDelay(pdMS_TO_TICKS(334)); // 6 FPS
             continue;
         }
         
@@ -510,7 +510,7 @@ void plat_animation_task(void *arg)
         ESP_LOGI("plat_animation_task", "Animation %d: Frame %d/%d", now_animation, pos, current_anim->len);
         // Pass frame index for canvas-based composition (normal2/normal3 overlay)
         display->SetEmotionImg(current_anim->imges[current_anim->animations[pos]], current_anim->animations[pos]);
-        vTaskDelay(pdMS_TO_TICKS(67)); // 15 FPS: 1000ms / 15 ≈ 67ms per frame
+        vTaskDelay(pdMS_TO_TICKS(334)); // 6 FPS
     }
 }
 

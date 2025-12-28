@@ -490,7 +490,7 @@ void plat_animation_task(void *arg)
         // Check for NULL animation to prevent crashes
         if (current_anim == NULL) {
             ESP_LOGW("plat_animation_task", "Animation %d is NULL, skipping frame", now_animation);
-            vTaskDelay(pdMS_TO_TICKS(67)); // 15 FPS: 1000ms / 15 ≈ 67ms per frame
+            vTaskDelay(pdMS_TO_TICKS(334)); // 15 FPS: 1000ms / 15 ≈ 67ms per frame
             continue;
         }
         
@@ -511,7 +511,7 @@ void plat_animation_task(void *arg)
         const lv_image_dsc_t* frame_img = current_anim->imges[frame_idx];
         if (frame_img == nullptr || frame_img->data == nullptr) {
             ESP_LOGW("plat_animation_task", "Frame %d image is null for animation %d, skipping", frame_idx, now_animation);
-            vTaskDelay(pdMS_TO_TICKS(67));
+            vTaskDelay(pdMS_TO_TICKS(334));
             continue;
         }
         
@@ -520,7 +520,7 @@ void plat_animation_task(void *arg)
             frame_img->header.w > 10000 || frame_img->header.h > 10000) {
             ESP_LOGW("plat_animation_task", "Invalid image dimensions %dx%d for frame %d, skipping", 
                      frame_img->header.w, frame_img->header.h, frame_idx);
-            vTaskDelay(pdMS_TO_TICKS(67));
+            vTaskDelay(pdMS_TO_TICKS(334));
             continue;
         }
         
@@ -528,7 +528,7 @@ void plat_animation_task(void *arg)
         // ESP_LOGI("plat_animation_task", "Animation %d: Frame %d/%d", now_animation, pos, current_anim->len);
         // Pass frame index for overlay composition (normal2/normal3, etc.)
         display->SetEmotionImg(frame_img, frame_idx);
-        vTaskDelay(pdMS_TO_TICKS(67)); // 15 FPS: 1000ms / 15 ≈ 67ms per frame
+        vTaskDelay(pdMS_TO_TICKS(334)); // 6 FPS
     }
 }
 

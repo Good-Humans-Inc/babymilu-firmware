@@ -47,7 +47,7 @@ def trim_all_pngs():
     project_root = os.path.dirname(script_dir)
     
     # Path to the folder
-    folder_path = os.path.join(project_root, "centralized animation head")
+    folder_path = os.path.join(project_root, "centralized_animation")
     
     # Check if the folder exists
     if not os.path.exists(folder_path):
@@ -68,10 +68,10 @@ def trim_all_pngs():
     
     # Crop coordinates: (left, top, right, bottom)
     # From (332, 340) to (692, 700)
-    left = 332
-    top = 340
-    right = 692
-    bottom = 700
+    left = 300
+    top = 300
+    right = 712
+    bottom = 712
     
     success_count = 0
     for png_file in sorted(png_files):
