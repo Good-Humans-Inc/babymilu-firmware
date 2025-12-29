@@ -104,6 +104,11 @@ bool Ota::CheckVersion() {
     data = http->ReadAll();
     http->Close();
 
+    ESP_LOGI(TAG, "=== OTA Server Response ===");
+    ESP_LOGI(TAG, "Response length: %d bytes", data.length());
+    ESP_LOGI(TAG, "Full response: %s", data.c_str());
+    ESP_LOGI(TAG, "===========================");
+
     // Response: { "firmware": { "version": "1.0.0", "url": "http://" } }
     // Parse the JSON response and check if the version is newer
     // If it is, set has_new_version_ to true and store the new version and URL
@@ -162,19 +167,25 @@ bool Ota::CheckVersion() {
     has_websocket_config_ = false;
     cJSON *websocket = cJSON_GetObjectItem(root, "websocket");
     if (cJSON_IsObject(websocket)) {
+        ESP_LOGI(TAG, "=== WebSocket Config from OTA ===");
         Settings settings("websocket", true);
         cJSON *item = NULL;
         cJSON_ArrayForEach(item, websocket) {
             if (cJSON_IsString(item)) {
+                ESP_LOGI(TAG, "WebSocket config: %s = %s", item->string, item->valuestring);
                 if (settings.GetString(item->string) != item->valuestring) {
                     settings.SetString(item->string, item->valuestring);
+                    ESP_LOGI(TAG, "Updated WebSocket setting: %s", item->string);
                 }
             } else if (cJSON_IsNumber(item)) {
+                ESP_LOGI(TAG, "WebSocket config: %s = %d", item->string, item->valueint);
                 if (settings.GetInt(item->string) != item->valueint) {
                     settings.SetInt(item->string, item->valueint);
+                    ESP_LOGI(TAG, "Updated WebSocket setting: %s", item->string);
                 }
             }
         }
+        ESP_LOGI(TAG, "===================================");
         has_websocket_config_ = true;
     } else {
         ESP_LOGI(TAG, "No websocket section found!");

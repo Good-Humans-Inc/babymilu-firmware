@@ -98,6 +98,12 @@ bool WebsocketProtocol::OpenAudioChannel() {
         version_ = version;
     }
 
+    ESP_LOGI(TAG, "=== WebSocket Connection Info ===");
+    ESP_LOGI(TAG, "WebSocket URL: %s", url.empty() ? "(empty)" : url.c_str());
+    ESP_LOGI(TAG, "Protocol Version: %d", version_);
+    ESP_LOGI(TAG, "Token present: %s", token.empty() ? "No" : "Yes");
+    ESP_LOGI(TAG, "================================");
+
     error_occurred_ = false;
 
     websocket_ = Board::GetInstance().CreateWebSocket();
@@ -151,10 +157,15 @@ bool WebsocketProtocol::OpenAudioChannel() {
             }
         } else {
             // Parse JSON data
+            ESP_LOGI(TAG, "=== WebSocket Server Response ===");
+            ESP_LOGI(TAG, "Received JSON data (length: %d): %.*s", len, len, data);
+            ESP_LOGI(TAG, "===================================");
+            
             auto root = cJSON_Parse(data);
             auto type = cJSON_GetObjectItem(root, "type");
             if (cJSON_IsString(type)) {
                 if (strcmp(type->valuestring, "hello") == 0) {
+                    ESP_LOGI(TAG, "Received server hello message");
                     ParseServerHello(root);
                 } else {
                     if (on_incoming_json_ != nullptr) {
@@ -185,6 +196,9 @@ bool WebsocketProtocol::OpenAudioChannel() {
 
     // Send hello message to describe the client
     auto message = GetHelloMessage();
+    ESP_LOGI(TAG, "=== WebSocket Client Hello Message ===");
+    ESP_LOGI(TAG, "Sending hello: %s", message.c_str());
+    ESP_LOGI(TAG, "======================================");
     if (!SendText(message)) {
         return false;
     }

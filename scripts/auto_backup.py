@@ -139,10 +139,10 @@ def generate_overlays(emotions, overlay_dir, diff_threshold=0, target_size=None,
         sorted_frame_nums = sorted(frames.keys())
         
         # Generate overlays: frame1→frame2, frame1→frame3, ..., frame1→frameN
-        # Supports variable number of frames: 1 base frame + N overlay frames
+        # All frames are compared to the base frame (frame 1)
         frame_num_from = sorted_frame_nums[0]  # Always use frame 1 as the base
         for i in range(1, len(sorted_frame_nums)):
-            frame_num_to = sorted_frame_nums[i]
+            frame_num_to = sorted_frame_nums[i]  # Current frame
             
             frame_from = frames[frame_num_from]
             frame_to = frames[frame_num_to]

@@ -24,7 +24,8 @@ def trim_image(image_path, left=332, top=340, right=692, bottom=700):
         
         # Verify image size is 1024x1024
         if original_size != (1024, 1024):
-            print(f"  Warning: Image size is {original_size}, expected (1024, 1024)")
+            print(f"  ⚠ Skipped {os.path.basename(image_path)}: Image size is {original_size}, expected (1024, 1024)")
+            return False
         
         # Crop the image
         cropped_img = img.crop((left, top, right, bottom))

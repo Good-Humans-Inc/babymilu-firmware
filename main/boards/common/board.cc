@@ -140,18 +140,22 @@ std::string Board::GetJson() {
 
     json += "\"partition_table\": [";
     esp_partition_iterator_t it = esp_partition_find(ESP_PARTITION_TYPE_ANY, ESP_PARTITION_SUBTYPE_ANY, NULL);
+    bool first_partition = true;
     while (it) {
         const esp_partition_t *partition = esp_partition_get(it);
+        if (!first_partition) {
+            json += ",";
+        }
         json += "{";
         json += "\"label\":\"" + std::string(partition->label) + "\",";
         json += "\"type\":" + std::to_string(partition->type) + ",";
         json += "\"subtype\":" + std::to_string(partition->subtype) + ",";
         json += "\"address\":" + std::to_string(partition->address) + ",";
         json += "\"size\":" + std::to_string(partition->size);
-        json += "},";
+        json += "}";
+        first_partition = false;
         it = esp_partition_next(it);
     }
-    json.pop_back(); // Remove the last comma
     json += "],";
 
     json += "\"ota\":{";
