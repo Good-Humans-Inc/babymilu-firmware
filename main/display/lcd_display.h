@@ -37,6 +37,7 @@ protected:
 
     DisplayFonts fonts_;
     ThemeColors current_theme_;
+    bool display_rotated_180_ = false;  // Track 180° rotation state
 
     void SetupUI();
     virtual bool Lock(int timeout_ms = 0) override;
@@ -57,6 +58,9 @@ public:
     virtual void SetEmotionImg(const lv_image_dsc_t *img) override;
     // Add theme switching function
     virtual void SetTheme(const std::string& theme_name) override;
+    
+    // Set display rotation to 180° (upside down)
+    void SetDisplayRotation180(bool upside_down);
     
     // Public method to force create a message in content_ (works even when CONFIG_USE_WECHAT_MESSAGE_STYLE is disabled)
     void CreateSystemMessage(const char* message);

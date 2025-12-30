@@ -1504,3 +1504,20 @@ void LcdDisplay::SetTheme(const std::string &theme_name)
     // No errors occurred. Save theme to settings
     Display::SetTheme(theme_name);
 }
+
+void LcdDisplay::SetDisplayRotation180(bool upside_down)
+{
+    DisplayLockGuard lock(this);
+    if (display_ == nullptr) {
+        ESP_LOGE(TAG, "Display is null, cannot set rotation");
+        return;
+    }
+    
+    // Track rotation state for overlay coordinate transformation
+    display_rotated_180_ = upside_down;
+    
+    // Use LVGL display rotation API - most efficient for 180° rotation
+    lv_display_rotation_t rotation = upside_down ? LV_DISPLAY_ROTATION_180 : LV_DISPLAY_ROTATION_0;
+    lv_display_set_rotation(display_, rotation);
+    ESP_LOGI(TAG, "Display rotation set to %s", upside_down ? "180° (upside down)" : "0° (normal)");
+}

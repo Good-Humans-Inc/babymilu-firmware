@@ -1,8 +1,6 @@
 #include "esp_mqtt.h"
 #include <esp_crt_bundle.h>
 #include <esp_log.h>
-#include <esp_tls.h>
-#include <cstring>
 
 static const char *TAG = "esp_mqtt";
 
@@ -26,19 +24,16 @@ bool EspMqtt::Connect(const std::string broker_address, int broker_port, const s
     esp_mqtt_client_config_t mqtt_config = {};
     mqtt_config.broker.address.hostname = broker_address.c_str();
     mqtt_config.broker.address.port = broker_port;
-    // Always use TCP transport for plain MQTT connections
-    // Port 1883 is standard for plain TCP MQTT
-    // Port 8883 is standard for TLS, but we should only use TLS when endpoint uses mqtts:// scheme
-    // Since we're only receiving broker_address (not full endpoint), default to TCP
-    // TLS should only be enabled when endpoint explicitly uses mqtts:// scheme
-    mqtt_config.broker.address.transport = MQTT_TRANSPORT_OVER_TCP;
+    if (broker_port == 8883) {
+        mqtt_config.broker.address.transport = MQTT_TRANSPORT_OVER_SSL;
+        mqtt_config.broker.verification.crt_bundle_attach = esp_crt_bundle_attach;
+    } else {
+        mqtt_config.broker.address.transport = MQTT_TRANSPORT_OVER_TCP;
+    }
     mqtt_config.credentials.client_id = client_id.c_str();
     mqtt_config.credentials.username = username.c_str();
     mqtt_config.credentials.authentication.password = password.c_str();
     mqtt_config.session.keepalive = keep_alive_seconds_;
-    // Disable esp-mqtt auto-reconnect - we handle reconnection ourselves with backoff
-    // Set to 0 to disable automatic reconnection
-    mqtt_config.network.reconnect_timeout_ms = 0;
 
     mqtt_client_handle_ = esp_mqtt_client_init(&mqtt_config);
     esp_mqtt_client_register_event(mqtt_client_handle_, MQTT_EVENT_ANY, [](void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data) {
@@ -82,50 +77,10 @@ void EspMqtt::MqttEventCallback(esp_event_base_t base, int32_t event_id, void *e
         break;
     case MQTT_EVENT_SUBSCRIBED:
         break;
-    case MQTT_EVENT_ERROR: {
+    case MQTT_EVENT_ERROR:
         xEventGroupSetBits(event_group_handle_, MQTT_ERROR_EVENT);
-        esp_err_t error_code = event->error_handle->esp_tls_last_esp_err;
-        const char* error_name = esp_err_to_name(error_code);
-        ESP_LOGI(TAG, "MQTT error occurred: %s (0x%x)", error_name, error_code);
-        
-        // Treat connection-related errors as disconnection to trigger reconnection
-        // Check for errors that indicate connection is closed or failed
-        // Common errors: TCP closed, connection failed, transport errors
-        bool is_connection_error = false;
-        
-        // Check for specific ESP-TLS error codes that indicate connection closure
-        // ESP_ERR_ESP_TLS_TCP_CLOSED_FIN (0x8008) - TCP connection closed by server
-        if (error_code == ESP_ERR_ESP_TLS_TCP_CLOSED_FIN) {
-            // TCP connection closed by server (e.g., during server restart)
-            is_connection_error = true;
-        } else if (error_code < 0) {
-            // Check error string for connection-related keywords (fallback for other errors)
-            if (error_name && (strstr(error_name, "CLOSED") != nullptr || 
-                               strstr(error_name, "CONNECTION") != nullptr ||
-                               strstr(error_name, "TCP") != nullptr ||
-                               strstr(error_name, "EOF") != nullptr ||
-                               strstr(error_name, "FAILED") != nullptr ||
-                               strstr(error_name, "FIN") != nullptr)) {
-                is_connection_error = true;
-            }
-        }
-        
-        if (is_connection_error) {
-            ESP_LOGI(TAG, "MQTT connection error detected (code=0x%x, name=%s), triggering disconnect callback for reconnection", error_code, error_name);
-            connected_ = false;
-            // Also set disconnected event to ensure proper state
-            xEventGroupSetBits(event_group_handle_, MQTT_DISCONNECTED_EVENT);
-            // Trigger disconnect callback to allow reconnection logic to handle it
-            if (on_disconnected_callback_) {
-                on_disconnected_callback_();
-            } else {
-                ESP_LOGW(TAG, "No disconnect callback registered, cannot trigger automatic reconnection");
-            }
-        } else {
-            ESP_LOGW(TAG, "MQTT error is not a connection error, not triggering reconnection (code=0x%x, name=%s)", error_code, error_name);
-        }
+        ESP_LOGI(TAG, "MQTT error occurred: %s", esp_err_to_name(event->error_handle->esp_tls_last_esp_err));
         break;
-    }
     default:
         ESP_LOGI(TAG, "Unhandled event id %ld", event_id);
         break;
