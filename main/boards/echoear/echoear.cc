@@ -259,12 +259,33 @@ public:
         int x = -1;
         int y = -1;
     };
+    
+    enum GestureType {
+        GESTURE_NONE = 0x00,
+        GESTURE_SWIPE_UP = 0x01,
+        GESTURE_SWIPE_DOWN = 0x02,
+        GESTURE_SWIPE_LEFT = 0x03,
+        GESTURE_SWIPE_RIGHT = 0x04,
+        GESTURE_SINGLE_TAP = 0x05,
+        GESTURE_DOUBLE_TAP = 0x0B,
+        GESTURE_LONG_PRESS = 0x0C,
+    };
+    
     Cst816s(i2c_master_bus_handle_t i2c_bus, uint8_t addr) : I2cDevice(i2c_bus, addr) {
         read_buffer_ = new uint8_t[6];
+        gesture_buffer_ = new uint8_t[1];
+        
+        // Enable gesture detection mode
+        // Register 0xFA: Gesture enable (0x01 = enable gestures)
+        WriteReg(0xFA, 0x01);
+        
+        // Register 0xED: Gesture ID register (read-only, but we can verify it's working)
+        // Gestures will be reported in register 0x01
     }
 
     ~Cst816s() {
         delete[] read_buffer_;
+        delete[] gesture_buffer_;
     }
 
     void UpdateTouchPoint() {
@@ -274,12 +295,19 @@ public:
         tp_.y = ((read_buffer_[3] & 0x0F) << 8) | read_buffer_[4];
     }
 
+    GestureType ReadGesture() {
+        // Read gesture register (0x01)
+        ReadRegs(0x01, gesture_buffer_, 1);
+        return static_cast<GestureType>(gesture_buffer_[0]);
+    }
+
     const TouchPoint_t& GetTouchPoint() {
         return tp_;
     }
 
 private:
     uint8_t* read_buffer_ = nullptr;
+    uint8_t* gesture_buffer_ = nullptr;
     TouchPoint_t tp_;
 };
 class EchoEar : public WifiBoard {
@@ -395,39 +423,103 @@ private:
         }
 
         uint32_t dummy;
-        static int64_t touch_last_time = 0;
+        static bool last_touch_state = false;
+        static Cst816s::GestureType last_gesture = Cst816s::GESTURE_NONE;
 
         while (true) {
             // Wait for touch events from ISR
             if (xQueueReceive(board->touch_event_queue_, &dummy, portMAX_DELAY) == pdTRUE) {
-                int64_t touch_start_time = esp_timer_get_time() / 1000;
-                
-                // Debounce: only process if 300ms have passed since last event
-                if (touch_start_time - touch_last_time >= 300) {
-                    // Now we're in task context, safe to call GetInstance()
-                    auto& app = Application::GetInstance();
-                    DeviceState current_state = app.GetDeviceState();
+                // Read touch coordinates and gestures from CST816S
+                if (board->cst816s_ != nullptr) {
+                    board->cst816s_->UpdateTouchPoint();
+                    auto touch_point = board->cst816s_->GetTouchPoint();
                     
-                    // Completely ignore touch events when in WiFi config mode to prevent reboot loops
-                    if (current_state == kDeviceStateWifiConfiguring) {
-                        // Skip all touch handling in WiFi config mode
-                        touch_last_time = touch_start_time;
-                        continue;
+                    // Read gesture register
+                    Cst816s::GestureType gesture = board->cst816s_->ReadGesture();
+                    
+                    // Process gestures (swipe up/down for volume control)
+                    if (gesture != Cst816s::GESTURE_NONE && gesture != last_gesture) {
+                        auto codec = board->GetAudioCodec();
+                        if (codec != nullptr) {
+                            int current_volume = codec->output_volume();
+                            int new_volume = current_volume;
+                            
+                            switch (gesture) {
+                                case Cst816s::GESTURE_SWIPE_UP:
+                                    new_volume = current_volume + 5;  // Increase by 5
+                                    if (new_volume > 100) new_volume = 100;
+                                    codec->SetOutputVolume(new_volume);
+                                    ESP_LOGI(TAG, "[TOUCH] Swipe UP detected - Volume: %d -> %d", current_volume, new_volume);
+                                    
+                                    // Show volume notification on display
+                                    if (board->display_ != nullptr) {
+                                        board->display_->ShowNotification("Volume: " + std::to_string(new_volume));
+                                    }
+                                    break;
+                                    
+                                case Cst816s::GESTURE_SWIPE_DOWN:
+                                    new_volume = current_volume - 5;  // Decrease by 5
+                                    if (new_volume < 0) new_volume = 0;
+                                    codec->SetOutputVolume(new_volume);
+                                    ESP_LOGI(TAG, "[TOUCH] Swipe DOWN detected - Volume: %d -> %d", current_volume, new_volume);
+                                    
+                                    // Show volume notification on display
+                                    if (board->display_ != nullptr) {
+                                        board->display_->ShowNotification("Volume: " + std::to_string(new_volume));
+                                    }
+                                    break;
+                                    
+                                case Cst816s::GESTURE_SWIPE_LEFT:
+                                    ESP_LOGI(TAG, "[TOUCH] Swipe LEFT detected");
+                                    break;
+                                    
+                                case Cst816s::GESTURE_SWIPE_RIGHT:
+                                    ESP_LOGI(TAG, "[TOUCH] Swipe RIGHT detected");
+                                    break;
+                                    
+                                case Cst816s::GESTURE_SINGLE_TAP:
+                                    ESP_LOGI(TAG, "[TOUCH] Single tap detected");
+                                    break;
+                                    
+                                case Cst816s::GESTURE_DOUBLE_TAP:
+                                    ESP_LOGI(TAG, "[TOUCH] Double tap detected");
+                                    break;
+                                    
+                                case Cst816s::GESTURE_LONG_PRESS:
+                                    ESP_LOGI(TAG, "[TOUCH] Long press detected");
+                                    break;
+                                    
+                                default:
+                                    break;
+                            }
+                        }
+                        last_gesture = gesture;
+                    } else if (gesture == Cst816s::GESTURE_NONE) {
+                        last_gesture = Cst816s::GESTURE_NONE;
                     }
                     
-                    // Only reset WiFi if we're starting and not connected
-                    // This prevents infinite reboot loops when WiFi is not configured
-                    auto& board_instance = (EchoEar&)Board::GetInstance();
-                    if (current_state == kDeviceStateStarting && 
-                        !WifiStation::GetInstance().IsConnected()) {
-                        board_instance.ResetWifiConfiguration();
-                        touch_last_time = touch_start_time;
-                        // Don't call ToggleChatState after ResetWifiConfiguration as it will reboot
-                        continue;
+                    // Process touch coordinates
+                    if (touch_point.num > 0 && touch_point.x >= 0 && touch_point.y >= 0) {
+                        // Touch is active - clamp coordinates to display bounds
+                        int x = (touch_point.x < DISPLAY_WIDTH) ? touch_point.x : (DISPLAY_WIDTH - 1);
+                        int y = (touch_point.y < DISPLAY_HEIGHT) ? touch_point.y : (DISPLAY_HEIGHT - 1);
+                        
+                        if (!last_touch_state) {
+                            ESP_LOGI(TAG, "[TOUCH] Touch pressed at (%d, %d)", x, y);
+                        }
+                        last_touch_state = true;
+                        
+                        // TODO: Feed touch coordinates to LVGL here
+                        // For now, we're just logging the coordinates
+                        // Proper LVGL integration would require creating a custom esp_lcd_touch driver
+                        // or using a different approach to feed data to LVGL
+                    } else {
+                        // Touch released
+                        if (last_touch_state) {
+                            ESP_LOGI(TAG, "[TOUCH] Touch released");
+                        }
+                        last_touch_state = false;
                     }
-                    
-                    app.ToggleChatState();
-                    touch_last_time = touch_start_time;
                 }
             }
         }
@@ -637,6 +729,9 @@ private:
         gpio_intr_enable(TP_PIN_NUM_INT);
         // Pass queue handle to ISR callback (will be used as arg parameter)
         gpio_isr_handler_add(TP_PIN_NUM_INT, EchoEar::lvgl_port_touch_isr_cb, touch_event_queue_);
+        
+        ESP_LOGI(TAG, "CST816S touch screen initialized - touch coordinates will be logged");
+        ESP_LOGI(TAG, "Note: LVGL integration requires a custom touch driver wrapper (TODO)");
     }
 
     void InitializeSpi() {
@@ -784,9 +879,6 @@ public:
         WifiBoard::StartNetwork();
     }
 };
-
-// Static member variable definition
-// volatile uint32_t EchoEar::touch_event_count_ = 0;
 
 DECLARE_BOARD(EchoEar);
 
