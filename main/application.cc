@@ -884,6 +884,15 @@ void Application::Start()
                     ESP_LOGI(TAG, "TTS stop (primary): state=%d, listening_mode=%d", device_state_, (int)listening_mode_);
                     background_task_->WaitForCompletion();
                     if (device_state_ == kDeviceStateSpeaking) {
+                        // Check if user aborted speaking - don't auto-resume listening
+                        if (aborted_) {
+                            ESP_LOGI(TAG, "TTS stopped after user abort - going to idle without resuming listening");
+                            aborted_ = false;  // Reset flag
+                            state_before_tts_ = kDeviceStateUnknown;  // Reset
+                            SetDeviceState(kDeviceStateIdle);
+                            return;  // Early return, don't continue with auto-resume logic
+                        }
+                        
                         // Check if remote wakeup scenario (WebSocket still open)
                         auto* active_protocol = GetActiveProtocol();
                         bool is_remote_wakeup = (websocket_protocol_ != nullptr && 
@@ -1075,6 +1084,8 @@ void Application::Start()
         }); });
     audio_processor_->OnVadStateChange([this](bool speaking)
                                        {
+        ESP_LOGD(TAG, "VAD state changed: %s", speaking ? "SPEECH" : "SILENCE");
+        voice_detected_ = speaking;
         if (device_state_ == kDeviceStateListening) {
             Schedule([this, speaking]() {
                 if (speaking) {
@@ -1085,6 +1096,9 @@ void Application::Start()
                 auto led = Board::GetInstance().GetLed();
                 led->OnStateChanged();
             });
+        } else if (device_state_ == kDeviceStateSpeaking) {
+            // Set event bit for VAD interrupt handling during speaking state
+            xEventGroupSetBits(event_group_, MAIN_EVENT_VAD_CHANGE);
         } });
 
     wake_word_->Initialize(codec);
@@ -1223,7 +1237,7 @@ void Application::MainEventLoop()
 
     while (true)
     {
-        auto bits = xEventGroupWaitBits(event_group_, SCHEDULE_EVENT | SEND_AUDIO_EVENT, pdTRUE, pdFALSE, portMAX_DELAY);
+        auto bits = xEventGroupWaitBits(event_group_, SCHEDULE_EVENT | SEND_AUDIO_EVENT | MAIN_EVENT_VAD_CHANGE, pdTRUE, pdFALSE, portMAX_DELAY);
 
         if (bits & SEND_AUDIO_EVENT)
         {
@@ -1248,6 +1262,66 @@ void Application::MainEventLoop()
             for (auto &task : tasks)
             {
                 task();
+            }
+        }
+
+        if (bits & MAIN_EVENT_VAD_CHANGE)
+        {
+            // Handle VAD interrupt during speaking state with debounce mechanism
+            if (device_state_ == kDeviceStateSpeaking && 
+                aec_mode_ == kAecOnDeviceSide && 
+                voice_detected_)
+            {
+                int64_t now_us = esp_timer_get_time();
+                
+                // Grace period: ignore interruptions for first 1 second after speaking starts
+                int64_t time_since_speaking_start = now_us - speaking_start_time_us_;
+                const int64_t GRACE_PERIOD_US = 1000000; // 1 second
+                
+                if (time_since_speaking_start >= GRACE_PERIOD_US)
+                {
+                    // Debounce: require VAD to be active for at least 400ms before interrupting
+                    const int64_t DEBOUNCE_DURATION_US = 400000; // 400ms
+                    
+                    if (!vad_debounce_active_)
+                    {
+                        // VAD just became active, start debounce timer
+                        vad_detected_time_us_ = now_us;
+                        vad_debounce_active_ = true;
+                        ESP_LOGD(TAG, "VAD detected, starting debounce timer");
+                    }
+                    else
+                    {
+                        // VAD still active, check if debounce period has elapsed
+                        int64_t vad_duration = now_us - vad_detected_time_us_;
+                        if (vad_duration >= DEBOUNCE_DURATION_US)
+                        {
+                            ESP_LOGI(TAG, "VAD detected real voice during playback (confirmed for %lld ms), interrupting",
+                                vad_duration / 1000);
+                            vad_debounce_active_ = false; // Reset debounce state
+                            Schedule([this]() {
+                                AbortSpeaking(kAbortReasonNone);
+                                // Switch to listening mode to capture the user's voice
+                                SetListeningMode(aec_mode_ == kAecOff ? kListeningModeAutoStop : kListeningModeRealtime);
+                            });
+                        }
+                        else
+                        {
+                            ESP_LOGD(TAG, "VAD still in debounce period (%lld ms / %lld ms)",
+                                vad_duration / 1000, DEBOUNCE_DURATION_US / 1000);
+                        }
+                    }
+                }
+                else
+                {
+                    ESP_LOGD(TAG, "VAD detected during grace period, ignoring (elapsed: %lld ms)",
+                        time_since_speaking_start / 1000);
+                }
+            }
+            else
+            {
+                // VAD not detected or AEC not enabled, reset debounce state
+                vad_debounce_active_ = false;
             }
         }
     }
@@ -1573,6 +1647,10 @@ void Application::SetDeviceState(DeviceState state)
             ESP_LOGI(TAG, "TTS started - brightness set to 100");
         }
 
+        // Record when speaking started for grace period
+        speaking_start_time_us_ = esp_timer_get_time();
+        vad_debounce_active_ = false; // Reset debounce state when entering speaking state
+
         if (listening_mode_ != kListeningModeRealtime)
         {
             audio_processor_->Stop();
@@ -1832,6 +1910,15 @@ void Application::OpenWebSocketConnection() {
                         ESP_LOGI(TAG, "TTS stop (WebSocket): state=%d, listening_mode=%d", device_state_, (int)listening_mode_);
                         background_task_->WaitForCompletion();
                         if (device_state_ == kDeviceStateSpeaking) {
+                            // Check if user aborted speaking - don't auto-resume listening
+                            if (aborted_) {
+                                ESP_LOGI(TAG, "TTS stopped after user abort (WebSocket) - going to idle without resuming listening");
+                                aborted_ = false;  // Reset flag
+                                state_before_tts_ = kDeviceStateUnknown;  // Reset
+                                SetDeviceState(kDeviceStateIdle);
+                                return;  // Early return, don't continue with auto-resume logic
+                            }
+                            
                             // Check if remote wakeup scenario (WebSocket still open)
                             auto* active_protocol = GetActiveProtocol();
                             bool is_remote_wakeup = (websocket_protocol_ != nullptr && 
