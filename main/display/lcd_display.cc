@@ -1210,10 +1210,10 @@ void LcdDisplay::SetEmotionImg(const lv_image_dsc_t *img)
     
     lv_img_set_src(emotion_label_, img);
     
-    // Set animation scale to 300% (3x) and apply 66 degree clockwise rotation
+    // Set animation scale to 100% (no scaling) - images are now 360x360, same as display
     if (img != nullptr) {
-        // Set scale to 300% (768 in LVGL units, where 256 = 100%)
-        lv_coord_t scale = 717;  // 300% = 3x = 768/256
+        // Set scale to 100% (256 in LVGL units, where 256 = 100%)
+        lv_coord_t scale = 256;  // 100% = 1x (no scaling needed for 360x360 images)
         
         // Apply 66 degree clockwise rotation
         // LVGL uses tenths of degrees, so 66 degrees = 660

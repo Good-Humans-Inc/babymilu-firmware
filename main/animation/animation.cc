@@ -21,6 +21,53 @@
 #include <sys/stat.h>
 #include <errno.h>
 
+// Overlay pixel format magic number (0x4F50584C = "OPXL" in ASCII)
+#define OVERLAY_PIXELS_FORMAT 0x4F50584C
+#define OVERLAY_ENTRY_SIZE_BYTES 6  // uint16 x, uint16 y, uint16 color
+
+/**
+ * Apply overlay pixels to a base frame and create a new RGB565 frame
+ * @param base_frame The base frame (RGB565 format)
+ * @param overlay_data Pointer to overlay pixel data (array of {x, y, color})
+ * @param overlay_count Number of overlay pixels
+ * @param width Frame width
+ * @param height Frame height
+ * @param output_data Output buffer (must be pre-allocated, size = width * height * 2)
+ * @return true on success, false on failure
+ */
+static bool apply_overlay_to_frame(const uint8_t* base_frame, const uint8_t* overlay_data, 
+                                    uint32_t overlay_count, uint32_t width, uint32_t height,
+                                    uint8_t* output_data) {
+    if (!base_frame || !overlay_data || !output_data) {
+        ESP_LOGE("animation", "Invalid parameters for overlay application");
+        return false;
+    }
+    
+    // Copy base frame to output
+    size_t frame_size = width * height * 2;  // RGB565 = 2 bytes per pixel
+    memcpy(output_data, base_frame, frame_size);
+    
+    // Apply overlay pixels
+    for (uint32_t i = 0; i < overlay_count; i++) {
+        const uint8_t* entry = overlay_data + (i * OVERLAY_ENTRY_SIZE_BYTES);
+        uint16_t x = entry[0] | (entry[1] << 8);
+        uint16_t y = entry[2] | (entry[3] << 8);
+        uint16_t color = entry[4] | (entry[5] << 8);
+        
+        // Bounds check
+        if (x >= width || y >= height) {
+            ESP_LOGW("animation", "Overlay pixel out of bounds: (%u, %u) for %ux%u frame", x, y, width, height);
+            continue;
+        }
+        
+        // Apply pixel (RGB565 is little-endian: low byte first)
+        size_t pixel_offset = (y * width + x) * 2;
+        output_data[pixel_offset] = color & 0xFF;
+        output_data[pixel_offset + 1] = (color >> 8) & 0xFF;
+    }
+    
+    return true;
+}
 
 // Global SD card-based animations
 static Animation_t sd_normal = {0};
@@ -924,29 +971,156 @@ bool animation_load_all_from_sd_card(void)
                 break;
             }
             
+            // Check if this is an overlay frame FIRST (before dimension validation)
+            // Overlay frames use width/height fields differently
+            uint32_t color_format = header_data[1];
+            uint32_t flags = header_data[2];
+            bool is_overlay = (color_format == OVERLAY_PIXELS_FORMAT);
+            
             // Calculate data size from image dimensions
             uint32_t width = header_data[3];
             uint32_t height = header_data[4];
             uint32_t stride = header_data[5];
-            size_t data_size = height * stride;
             
-            ESP_LOGI("animation", "Frame %d header: width=%u, height=%u, stride=%u, data_size=%u", 
-                     current_frame, width, height, stride, (unsigned int)data_size);
-            
-            // Validate frame dimensions
-            if (width == 0 || height == 0) {
-                ESP_LOGE("animation", "Invalid frame dimensions for frame %d: width=%u, height=%u (must be > 0)", 
-                         current_frame, width, height);
-                ESP_LOGE("animation", "This may indicate file corruption or misalignment. File position: %ld", ftell(f));
-                success = false;
-                break;
+            // For overlay frames, width=entry_count, height=1, stride=payload_bytes
+            // For regular frames, calculate data_size normally
+            size_t data_size;
+            if (is_overlay) {
+                data_size = stride;  // stride stores total payload bytes for overlays
+                ESP_LOGI("animation", "Frame %d header: overlay_count=%u, payload_size=%u", 
+                         current_frame, width, stride);
+            } else {
+                data_size = height * stride;
+                ESP_LOGI("animation", "Frame %d header: width=%u, height=%u, stride=%u, data_size=%u", 
+                         current_frame, width, height, stride, (unsigned int)data_size);
+                
+                // Validate frame dimensions (only for regular frames)
+                if (width == 0 || height == 0) {
+                    ESP_LOGE("animation", "Invalid frame dimensions for frame %d: width=%u, height=%u (must be > 0)", 
+                             current_frame, width, height);
+                    ESP_LOGE("animation", "This may indicate file corruption or misalignment. File position: %ld", ftell(f));
+                    success = false;
+                    break;
+                }
             }
             
             // Set up the LVGL image descriptor
             lv_image_dsc_t* img_dsc = all_sd_card_imgs[current_frame];
             img_dsc->header.magic = LV_IMAGE_HEADER_MAGIC;
-            img_dsc->header.cf = (lv_color_format_t)header_data[1];
-            img_dsc->header.flags = (uint32_t)header_data[2];
+            
+            // For overlay frames, width stores entry count, stride stores payload bytes
+            if (is_overlay) {
+                uint32_t overlay_count = width;  // width field repurposed for entry count
+                uint32_t overlay_payload_size = stride;  // stride stores total payload bytes
+                
+                ESP_LOGI("animation", "Frame %d is overlay frame: %u overlay pixels, base frame index=%u", 
+                         current_frame, overlay_count, flags);
+                
+                // Get base frame index from flags
+                uint32_t base_frame_idx = flags;
+                if (base_frame_idx >= current_frame) {
+                    ESP_LOGE("animation", "Invalid base frame index %u for overlay frame %d", base_frame_idx, current_frame);
+                    success = false;
+                    break;
+                }
+                
+                // Get base frame (must be RGB565)
+                lv_image_dsc_t* base_img = all_sd_card_imgs[base_frame_idx];
+                if (!base_img || !base_img->data) {
+                    ESP_LOGE("animation", "Base frame %u not available for overlay frame %d", base_frame_idx, current_frame);
+                    success = false;
+                    break;
+                }
+                
+                if (base_img->header.cf != LV_COLOR_FORMAT_RGB565) {
+                    ESP_LOGE("animation", "Base frame %u must be RGB565 format, got %d", base_frame_idx, base_img->header.cf);
+                    success = false;
+                    break;
+                }
+                
+                // Get base frame dimensions
+                uint32_t frame_width = base_img->header.w;
+                uint32_t frame_height = base_img->header.h;
+                size_t frame_size = frame_width * frame_height * 2;  // RGB565 = 2 bytes per pixel
+                
+                // Read overlay pixel data (if any)
+                if (overlay_payload_size > 0 && overlay_count > 0) {
+                    uint8_t* overlay_data = (uint8_t*)malloc(overlay_payload_size);
+                    if (!overlay_data) {
+                        ESP_LOGE("animation", "Failed to allocate memory for overlay data (%u bytes)", overlay_payload_size);
+                        success = false;
+                        break;
+                    }
+                    
+                    size_t overlay_read = fread(overlay_data, 1, overlay_payload_size, f);
+                    if (overlay_read != overlay_payload_size) {
+                        ESP_LOGE("animation", "Failed to read overlay data: read %zu of %u bytes", overlay_read, overlay_payload_size);
+                        free(overlay_data);
+                        success = false;
+                        break;
+                    }
+                    
+                    // Allocate output buffer for RGB565 frame
+                    uint8_t* output_data = (uint8_t*)malloc(frame_size);
+                    if (!output_data) {
+                        ESP_LOGE("animation", "Failed to allocate memory for overlay output (%zu bytes)", frame_size);
+                        free(overlay_data);
+                        success = false;
+                        break;
+                    }
+                    
+                    // Apply overlay to base frame
+                    if (!apply_overlay_to_frame(base_img->data, overlay_data, overlay_count, 
+                                                frame_width, frame_height, output_data)) {
+                        ESP_LOGE("animation", "Failed to apply overlay to base frame");
+                        free(overlay_data);
+                        free(output_data);
+                        success = false;
+                        break;
+                    }
+                    
+                    // Set up image descriptor for the composited frame
+                    img_dsc->header.cf = LV_COLOR_FORMAT_RGB565;
+                    img_dsc->header.flags = 0;
+                    img_dsc->header.w = frame_width;
+                    img_dsc->header.h = frame_height;
+                    img_dsc->header.stride = frame_width * 2;  // RGB565 = 2 bytes per pixel
+                    img_dsc->data_size = frame_size;
+                    img_dsc->data = output_data;
+                    
+                    free(overlay_data);
+                    ESP_LOGI("animation", "✅ Applied overlay to frame %d (base=%u, %u pixels)", 
+                             current_frame, base_frame_idx, overlay_count);
+                } else {
+                    // Empty overlay (overlay_count=0 or payload_size=0) - reuse base frame
+                    ESP_LOGI("animation", "Empty overlay for frame %d (count=%u, payload=%u), reusing base frame %u", 
+                             current_frame, overlay_count, overlay_payload_size, base_frame_idx);
+                    img_dsc->header.cf = base_img->header.cf;
+                    img_dsc->header.flags = 0;
+                    img_dsc->header.w = base_img->header.w;
+                    img_dsc->header.h = base_img->header.h;
+                    img_dsc->header.stride = base_img->header.stride;
+                    img_dsc->data_size = base_img->data_size;
+                    
+                    // Copy base frame data
+                    img_dsc->data = (const uint8_t*)malloc(base_img->data_size);
+                    if (!img_dsc->data) {
+                        ESP_LOGE("animation", "Failed to allocate memory for copied base frame");
+                        success = false;
+                        break;
+                    }
+                    memcpy((void*)img_dsc->data, base_img->data, base_img->data_size);
+                }
+                
+                // Assign to animation
+                anim->spiffs_imgs[frame_idx] = img_dsc;
+                current_frame++;
+                continue;
+            }
+            
+            // Regular frame (not overlay)
+            img_dsc->header.cf = (lv_color_format_t)color_format;
+            img_dsc->header.flags = flags;
             img_dsc->header.w = width;
             img_dsc->header.h = height;
             img_dsc->header.stride = stride;
