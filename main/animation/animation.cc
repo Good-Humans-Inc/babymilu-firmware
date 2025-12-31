@@ -22,7 +22,6 @@
 #include <errno.h>
 
 
-
 // Global SD card-based animations
 static Animation_t sd_normal = {0};
 static Animation_t sd_embarrass = {0};
@@ -608,6 +607,28 @@ bool animation_create_sd_card_animation_from_merged(Animation_t* anim, const cha
         uint32_t stride = header_data[5];
         size_t data_size = height * stride;
         
+        // Validate frame dimensions
+        if (width == 0 || height == 0) {
+            ESP_LOGE("animation", "Invalid frame dimensions for frame %d: width=%u, height=%u (must be > 0)", 
+                     i, width, height);
+            ESP_LOGE("animation", "This may indicate file corruption or misalignment. File position: %ld", ftell(f));
+            // Clean up
+            for (int j = 0; j <= i; j++) {
+                if (anim->spiffs_imgs[j] && anim->spiffs_imgs[j]->data) {
+                    free((void*)anim->spiffs_imgs[j]->data);
+                }
+            }
+            for (int j = 0; j < count; j++) {
+                if (anim->spiffs_imgs[j]) {
+                    free(anim->spiffs_imgs[j]);
+                }
+            }
+            free(anim->spiffs_imgs);
+            anim->spiffs_imgs = NULL;
+            fclose(f);
+            return false;
+        }
+        
         // Set up the LVGL image descriptor
         anim->spiffs_imgs[i]->header.magic = LV_IMAGE_HEADER_MAGIC;
         anim->spiffs_imgs[i]->header.cf = (lv_color_format_t)header_data[1];  // color_format
@@ -616,6 +637,13 @@ bool animation_create_sd_card_animation_from_merged(Animation_t* anim, const cha
         anim->spiffs_imgs[i]->header.h = height;                              // height
         anim->spiffs_imgs[i]->header.stride = stride;                         // stride
         anim->spiffs_imgs[i]->data_size = data_size;
+        
+        // Handle zero-sized frames (shouldn't happen with valid dimensions, but be safe)
+        if (data_size == 0) {
+            ESP_LOGW("animation", "Frame %d has zero data size, skipping allocation and reading", i);
+            anim->spiffs_imgs[i]->data = NULL;
+            continue;
+        }
         
         // Allocate memory for pixel data
         anim->spiffs_imgs[i]->data = (const uint8_t*)malloc(data_size);
@@ -905,6 +933,15 @@ bool animation_load_all_from_sd_card(void)
             ESP_LOGI("animation", "Frame %d header: width=%u, height=%u, stride=%u, data_size=%u", 
                      current_frame, width, height, stride, (unsigned int)data_size);
             
+            // Validate frame dimensions
+            if (width == 0 || height == 0) {
+                ESP_LOGE("animation", "Invalid frame dimensions for frame %d: width=%u, height=%u (must be > 0)", 
+                         current_frame, width, height);
+                ESP_LOGE("animation", "This may indicate file corruption or misalignment. File position: %ld", ftell(f));
+                success = false;
+                break;
+            }
+            
             // Set up the LVGL image descriptor
             lv_image_dsc_t* img_dsc = all_sd_card_imgs[current_frame];
             img_dsc->header.magic = LV_IMAGE_HEADER_MAGIC;
@@ -914,6 +951,16 @@ bool animation_load_all_from_sd_card(void)
             img_dsc->header.h = height;
             img_dsc->header.stride = stride;
             img_dsc->data_size = data_size;
+            
+            // Handle zero-sized frames (shouldn't happen with valid dimensions, but be safe)
+            if (data_size == 0) {
+                ESP_LOGW("animation", "Frame %d has zero data size, skipping allocation and reading", current_frame);
+                img_dsc->data = NULL;
+                // Still assign to animation, but frame won't be usable
+                anim->spiffs_imgs[frame_idx] = img_dsc;
+                current_frame++;
+                continue;
+            }
             
             // Check file position before reading pixel data
             long pos_before_data = ftell(f);
