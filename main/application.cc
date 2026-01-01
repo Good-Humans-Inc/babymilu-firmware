@@ -17,6 +17,7 @@
 #include "ssid_manager.h"
 #include "wifi_station.h"
 #include "display/lcd_display.h"
+#include "error_log_uploader.h"
 
 #if CONFIG_USE_AUDIO_PROCESSOR
 #include "afe_audio_processor.h"
@@ -761,6 +762,11 @@ void Application::Start()
 
     // Check for new firmware version or get the MQTT broker address
     CheckNewVersion();
+
+    // Upload error log if available
+    ESP_LOGI(TAG, "Attempting to upload error log...");
+    ErrorLogUploader::UploadErrorLog();
+    ESP_LOGI(TAG, "Error log upload attempt completed");
 
     // Seed MQTT config on first boot if unset (allows setting broker at build time)
     {
