@@ -20,8 +20,8 @@
 #include <esp_lcd_panel_ops.h>
 #include <esp_lcd_st77916.h>
 #include "touch.h"
-// #include <touch_sensor_lowlevel.h>
-// #include <touch_button_sensor.h>
+#include <touch_sensor_lowlevel.h>
+#include <touch_button_sensor.h>
 
 #include "driver/temperature_sensor.h"
 #include <freertos/FreeRTOS.h>
@@ -329,8 +329,8 @@ private:
     PwmBacklight* backlight_ = nullptr;
     esp_timer_handle_t touchpad_timer_;
     esp_lcd_touch_handle_t tp;   // LCD touch handle
-    // touch_button_handle_t touch_button_handle_ = nullptr;  // Touch button sensor handle for GPIO7
-    // static volatile uint32_t touch_event_count_;  // Counter for touch events
+    touch_button_handle_t touch_button_handle_ = nullptr;  // Touch button sensor handle for GPIO7
+    static volatile uint32_t touch_event_count_;  // Counter for touch events
     QueueHandle_t touch_event_queue_;  // Queue for touch interrupt events
     TaskHandle_t touch_event_task_handle_;  // Task handle for processing touch events
 
@@ -559,7 +559,6 @@ private:
         }
     }
 
-    /*
     static void touch_log_task(void* arg)
     {
         ESP_LOGI(TAG, "[TOUCH] touch_log_task started");
@@ -719,7 +718,6 @@ private:
         ESP_LOGI(TAG, "[TOUCH] ===== Touch button initialization complete =====");
         ESP_LOGI(TAG, "[TOUCH] Touch sensor is now active and monitoring GPIO7");
     }
-    */
 
     void InitializeBmi270() {
         ESP_LOGI(TAG, "[BMI270] ===== Starting BMI270 initialization =====");
@@ -990,9 +988,9 @@ public:
         InitializeSpi();
         Initializest77916Display();
         InitializeButtons();
-        // ESP_LOGI(TAG, "[TOUCH] About to call InitializeTouchButton()");
-        // InitializeTouchButton();
-        // ESP_LOGI(TAG, "[TOUCH] InitializeTouchButton() returned");
+        ESP_LOGI(TAG, "[TOUCH] About to call InitializeTouchButton()");
+        InitializeTouchButton();
+        ESP_LOGI(TAG, "[TOUCH] InitializeTouchButton() returned");
         
         // Initialize SD card BEFORE animations to ensure it's available for animation loading
         ESP_LOGI(TAG, "Initializing SD card before animations...");
@@ -1057,6 +1055,9 @@ public:
         WifiBoard::StartNetwork();
     }
 };
+
+// Static member definition
+volatile uint32_t EchoEar::touch_event_count_ = 0;
 
 DECLARE_BOARD(EchoEar);
 

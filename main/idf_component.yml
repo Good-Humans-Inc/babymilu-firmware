@@ -40,6 +40,10 @@ dependencies:
     rules:
     - if: target in [esp32s3, esp32c5]
 
+  # Touch Sensor (GPIO7 capacitive touch)
+  espressif/touch_button_sensor: "*"
+  espressif/touch_sensor_lowlevel: "*"
+
   # SenseCAP Watcher Board
   wvirgil123/esp_jpeg_simd:
     version: 1.0.0
