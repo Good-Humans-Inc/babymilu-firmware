@@ -65,6 +65,10 @@
 // Touch threshold definitions
 #define LIGHT_TOUCH_THRESHOLD  (0.05)  // 0.0 - 1.0 range (lower = more sensitive)
 
+// BMI270 configuration
+#define BMI270_I2C_ADDR 0x68
+#define BMI270_INT_PIN GPIO_NUM_21  // Optional, not used in basic implementation
+
 #define DISPLAY_BACKLIGHT_PIN           QSPI_PIN_NUM_LCD_BL
 #define DISPLAY_BACKLIGHT_OUTPUT_INVERT false
 

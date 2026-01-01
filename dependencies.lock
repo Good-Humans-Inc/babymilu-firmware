@@ -85,6 +85,24 @@ dependencies:
       registry_url: https://components.espressif.com/
       type: service
     version: 0.2.1
+  espressif/bmi270_sensor:
+    component_hash: fac23a5ecd2effdac0fb0705988d853745b8ffb99a384f87a307b3b25d15d432
+    dependencies:
+    - name: espressif/cmake_utilities
+      registry_url: https://components.espressif.com
+      require: private
+      version: 0.*
+    - name: espressif/i2c_bus
+      registry_url: https://components.espressif.com
+      require: public
+      version: '*'
+    - name: idf
+      require: private
+      version: '>=5.3'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 0.1.1
   espressif/button:
     component_hash: 4ed25fcf354b48aa5e5680b9e7549e38d7738f9b613c94a2e39119c100db9c95
     dependencies:
@@ -388,6 +406,20 @@ dependencies:
       registry_url: https://components.espressif.com/
       type: service
     version: 1.4.0
+  espressif/i2c_bus:
+    component_hash: 4e990dc11734316186b489b362c61d41f23f79d58bc169795cec215e528cba14
+    dependencies:
+    - name: espressif/cmake_utilities
+      registry_url: https://components.espressif.com
+      require: private
+      version: '*'
+    - name: idf
+      require: private
+      version: '>=4.0'
+    source:
+      registry_url: https://components.espressif.com
+      type: service
+    version: 1.5.0
   espressif/knob:
     component_hash: 23bb6b0f62d4a2bbfe8b65e182397541339b8e48d54cef15909f5d4f5bd43d29
     dependencies:
@@ -514,6 +546,7 @@ direct_dependencies:
 - 78/esp_lcd_nv3023
 - 78/xiaozhi-fonts
 - espressif/adc_mic
+- espressif/bmi270_sensor
 - espressif/button
 - espressif/cJSON
 - espressif/esp-sr
@@ -542,6 +575,6 @@ direct_dependencies:
 - waveshare/esp_lcd_touch_cst9217
 - wvirgil123/esp_jpeg_simd
 - wvirgil123/sscma_client
-manifest_hash: 7f5946554492e7b0687a4f29b643774447820b815f2a333e97319bf8deddeb79
+manifest_hash: 8c4450719b2532fa78a129ea94d636cb053777ed9c57728e664deae81dbe1bc5
 target: esp32s3
 version: 2.0.0

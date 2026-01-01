@@ -34,6 +34,12 @@ dependencies:
   espressif/esp_mmap_assets: '>=1.2'
   txp666/otto-emoji-gif-component: ~1.0.2
 
+  # BMI270 Gesture Sensor
+  espressif/bmi270_sensor:
+    version: ^0.1.0
+    rules:
+    - if: target in [esp32s3, esp32c5]
+
   # SenseCAP Watcher Board
   wvirgil123/esp_jpeg_simd:
     version: 1.0.0

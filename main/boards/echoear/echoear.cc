@@ -15,7 +15,6 @@
 #include <esp_log.h>
 
 #include <driver/i2c_master.h>
-#include <driver/i2c.h>
 #include "i2c_device.h"
 #include <esp_lcd_panel_io.h>
 #include <esp_lcd_panel_ops.h>
@@ -28,6 +27,10 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 #include <freertos/task.h>
+
+// BMI270 includes
+#include "bmi270_api.h"
+#include "i2c_bus.h"
 
 #define TAG "EchoEar"
 
@@ -312,7 +315,13 @@ private:
 };
 class EchoEar : public WifiBoard {
 private:
-    i2c_master_bus_handle_t i2c_bus_;
+    // I2C bus handles
+    i2c_bus_handle_t shared_i2c_bus_handle_ = nullptr;  // For BMI270 (i2c_bus wrapper)
+    i2c_master_bus_handle_t i2c_bus_;                   // For other I2C devices (traditional API)
+    
+    // BMI270 sensor handle
+    bmi270_handle_t bmi270_handle_ = nullptr;
+    
     Cst816s* cst816s_;
     Charge* charge_;
     Button boot_button_;
@@ -326,24 +335,49 @@ private:
     TaskHandle_t touch_event_task_handle_;  // Task handle for processing touch events
 
     void InitializeI2c() {
-        i2c_master_bus_config_t i2c_bus_cfg = {
-            .i2c_port = I2C_NUM_0,
+        ESP_LOGI(TAG, "[BMI270] Initializing I2C bus for BMI270 compatibility");
+        
+        // Create shared I2C bus using i2c_bus wrapper (REQUIRED for BMI270)
+        // All I2C devices (BMI270, and others) share the same physical bus
+        i2c_config_t i2c_bus_cfg = {
+            .mode = I2C_MODE_MASTER,
             .sda_io_num = AUDIO_CODEC_I2C_SDA_PIN,
             .scl_io_num = AUDIO_CODEC_I2C_SCL_PIN,
-            .clk_source = I2C_CLK_SRC_DEFAULT,
-            .glitch_ignore_cnt = 7,
-            .intr_priority = 0,
-            .trans_queue_depth = 0,
-            .flags = {
-                .enable_internal_pullup = 1,
+            .sda_pullup_en = true,
+            .scl_pullup_en = true,
+            .master = {
+                .clk_speed = 400000,  // 400kHz
             },
+            .clk_flags = 0,
         };
-        ESP_ERROR_CHECK(i2c_new_master_bus(&i2c_bus_cfg, &i2c_bus_));
+        
+        shared_i2c_bus_handle_ = i2c_bus_create(I2C_NUM_0, &i2c_bus_cfg);
+        if (!shared_i2c_bus_handle_) {
+            ESP_LOGE(TAG, "[BMI270] Failed to create shared I2C bus");
+            ESP_ERROR_CHECK(ESP_FAIL);
+        }
+        ESP_LOGI(TAG, "[BMI270] Shared I2C bus created successfully");
+
+        // Get the internal master bus handle for use with existing I2cDevice classes
+        // This is required if you have other I2C devices using the traditional API
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 3, 0) && !CONFIG_I2C_BUS_BACKWARD_CONFIG
+        i2c_bus_ = i2c_bus_get_internal_bus_handle(shared_i2c_bus_handle_);
+#else
+        ESP_LOGE(TAG, "[BMI270] ESP-IDF version does not support i2c_bus_get_internal_bus_handle()");
+        ESP_ERROR_CHECK(ESP_FAIL);
+#endif
+        
+        if (!i2c_bus_) {
+            ESP_LOGE(TAG, "[BMI270] Failed to obtain master bus handle");
+            ESP_ERROR_CHECK(ESP_FAIL);
+        }
+        ESP_LOGI(TAG, "[BMI270] Internal master bus handle obtained successfully");
 
         temperature_sensor_config_t temp_sensor_config = TEMPERATURE_SENSOR_CONFIG_DEFAULT(10, 50);
         ESP_ERROR_CHECK(temperature_sensor_install(&temp_sensor_config, &temp_sensor));
         ESP_ERROR_CHECK(temperature_sensor_enable(temp_sensor));
         
+        ESP_LOGI(TAG, "[BMI270] I2C bus initialization complete");
     }
 
     static void touchpad_timer_callback(void* arg) {
@@ -687,6 +721,149 @@ private:
     }
     */
 
+    void InitializeBmi270() {
+        ESP_LOGI(TAG, "[BMI270] ===== Starting BMI270 initialization =====");
+        
+        // Validate I2C bus handle
+        if (!shared_i2c_bus_handle_) {
+            ESP_LOGE(TAG, "[BMI270] Shared I2C bus not initialized");
+            return;
+        }
+
+        // Create BMI270 sensor using the shared I2C bus wrapper
+        // bmi270_config_file is provided by the bmi270_api.h header
+        ESP_LOGI(TAG, "[BMI270] Creating BMI270 sensor...");
+        esp_err_t ret = bmi270_sensor_create(
+            shared_i2c_bus_handle_, 
+            &bmi270_handle_, 
+            bmi270_config_file,
+            BMI2_GYRO_CROSS_SENS_ENABLE | BMI2_CRT_RTOSK_ENABLE
+        );
+        
+        if (ret != ESP_OK || !bmi270_handle_) {
+            ESP_LOGE(TAG, "[BMI270] BMI270 create failed: %s", esp_err_to_name(ret));
+            return;
+        }
+        ESP_LOGI(TAG, "[BMI270] ✓ BMI270 sensor created successfully");
+
+        // Enable accelerometer and gyroscope
+        ESP_LOGI(TAG, "[BMI270] Enabling accelerometer and gyroscope...");
+        const uint8_t sens_list[] = {BMI2_ACCEL, BMI2_GYRO};
+        int8_t rslt = bmi270_sensor_enable(sens_list, 2, bmi270_handle_);
+        if (rslt != BMI2_OK) {
+            ESP_LOGE(TAG, "[BMI270] Failed to enable BMI270 sensors: %d", rslt);
+            return;
+        }
+        ESP_LOGI(TAG, "[BMI270] ✓ BMI270 sensors enabled");
+
+        // Configure accelerometer
+        ESP_LOGI(TAG, "[BMI270] Configuring accelerometer...");
+        struct bmi2_sens_config accel_config = {.type = BMI2_ACCEL};
+        rslt = bmi270_get_sensor_config(&accel_config, 1, bmi270_handle_);
+        if (rslt == BMI2_OK) {
+            accel_config.cfg.acc.odr = BMI2_ACC_ODR_100HZ;           // 100Hz output data rate
+            accel_config.cfg.acc.bwp = BMI2_ACC_NORMAL_AVG4;         // Normal mode, average 4 samples
+            accel_config.cfg.acc.filter_perf = BMI2_PERF_OPT_MODE;   // Performance optimized mode
+            accel_config.cfg.acc.range = BMI2_ACC_RANGE_4G;          // ±4G range
+            rslt = bmi270_set_sensor_config(&accel_config, 1, bmi270_handle_);
+            if (rslt != BMI2_OK) {
+                ESP_LOGW(TAG, "[BMI270] Failed to configure accelerometer: %d", rslt);
+            } else {
+                ESP_LOGI(TAG, "[BMI270] ✓ Accelerometer configured: ODR=100Hz, Range=±4G");
+            }
+        } else {
+            ESP_LOGW(TAG, "[BMI270] Failed to get accelerometer config: %d", rslt);
+        }
+
+        // Configure gyroscope
+        ESP_LOGI(TAG, "[BMI270] Configuring gyroscope...");
+        struct bmi2_sens_config gyro_config = {.type = BMI2_GYRO};
+        rslt = bmi270_get_sensor_config(&gyro_config, 1, bmi270_handle_);
+        if (rslt == BMI2_OK) {
+            gyro_config.cfg.gyr.odr = BMI2_GYR_ODR_100HZ;            // 100Hz output data rate
+            gyro_config.cfg.gyr.bwp = BMI2_GYR_NORMAL_MODE;          // Normal bandwidth mode
+            gyro_config.cfg.gyr.filter_perf = BMI2_PERF_OPT_MODE;    // Performance optimized mode
+            gyro_config.cfg.gyr.range = BMI2_GYR_RANGE_2000;         // ±2000°/s range
+            rslt = bmi270_set_sensor_config(&gyro_config, 1, bmi270_handle_);
+            if (rslt != BMI2_OK) {
+                ESP_LOGW(TAG, "[BMI270] Failed to configure gyroscope: %d", rslt);
+            } else {
+                ESP_LOGI(TAG, "[BMI270] ✓ Gyroscope configured: ODR=100Hz, Range=±2000°/s");
+            }
+        } else {
+            ESP_LOGW(TAG, "[BMI270] Failed to get gyroscope config: %d", rslt);
+        }
+
+        // Create task to read BMI270 data
+        ESP_LOGI(TAG, "[BMI270] Creating BMI270 reading task...");
+        BaseType_t task_ret = xTaskCreatePinnedToCore(
+            Bmi270ReadTask,      // Task function
+            "bmi270_task",       // Task name
+            4 * 1024,            // Stack size (4KB)
+            this,                // Task parameter (pass board instance)
+            5,                   // Task priority
+            NULL,                // Task handle (not stored)
+            1                    // Core ID (core 1)
+        );
+        
+        if (task_ret != pdPASS) {
+            ESP_LOGE(TAG, "[BMI270] Failed to create BMI270 reading task");
+            return;
+        }
+        ESP_LOGI(TAG, "[BMI270] ✓ BMI270 reading task created successfully");
+        ESP_LOGI(TAG, "[BMI270] ===== BMI270 initialization complete =====");
+    }
+
+    static void Bmi270ReadTask(void* arg) {
+        EchoEar* board = static_cast<EchoEar*>(arg);
+        if (!board || !board->bmi270_handle_) {
+            ESP_LOGE(TAG, "[BMI270] Invalid BMI270 handle in read task");
+            vTaskDelete(NULL);
+            return;
+        }
+
+        ESP_LOGI(TAG, "[BMI270] Reading task started");
+        struct bmi2_sens_data sensor_data = {0};
+        uint32_t read_count = 0;
+        uint32_t error_count = 0;
+
+        while (true) {
+            // Read sensor data
+            int8_t rslt = bmi2_get_sensor_data(&sensor_data, board->bmi270_handle_);
+            if (rslt == BMI2_OK) {
+                read_count++;
+                
+                // Access accelerometer data
+                int16_t accel_x = sensor_data.acc.x;
+                int16_t accel_y = sensor_data.acc.y;
+                int16_t accel_z = sensor_data.acc.z;
+                
+                // Access gyroscope data
+                int16_t gyro_x = sensor_data.gyr.x;
+                int16_t gyro_y = sensor_data.gyr.y;
+                int16_t gyro_z = sensor_data.gyr.z;
+                
+                // Log sensor data every 10 readings (every 10 seconds)
+                if (read_count % 10 == 0) {
+                    ESP_LOGI(TAG, "[BMI270] Reading #%lu - Accel: X=%d, Y=%d, Z=%d | Gyro: X=%d, Y=%d, Z=%d",
+                             (unsigned long)read_count, accel_x, accel_y, accel_z,
+                             gyro_x, gyro_y, gyro_z);
+                } else {
+                    // Log at DEBUG level for other readings
+                    ESP_LOGD(TAG, "[BMI270] Accel: X=%d, Y=%d, Z=%d | Gyro: X=%d, Y=%d, Z=%d",
+                             accel_x, accel_y, accel_z, gyro_x, gyro_y, gyro_z);
+                }
+            } else {
+                error_count++;
+                ESP_LOGW(TAG, "[BMI270] Failed to read BMI270 data: %d (error count: %lu)", 
+                         rslt, (unsigned long)error_count);
+            }
+            
+            // Wait 1 second before next reading
+            vTaskDelay(pdMS_TO_TICKS(1000));
+        }
+    }
+
     void InitializeCharge() {
         charge_ = new Charge(i2c_bus_, 0x55);
         xTaskCreatePinnedToCore(Charge::TaskFunction, "batterydecTask", 3 * 1024, charge_, 6, NULL, 0);
@@ -806,6 +983,7 @@ private:
 public:
     EchoEar() : boot_button_(BOOT_BUTTON_GPIO) {
         InitializeI2c();
+        InitializeBmi270();  // Initialize BMI270 after I2C bus is ready
         InitializeCharge();
         InitializeCst816sTouchPad();
         
