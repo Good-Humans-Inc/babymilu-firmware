@@ -274,6 +274,8 @@ choice BOARD_TYPE
     config BOARD_TYPE_ECHOEAR
         bool "EchoEar"
         depends on IDF_TARGET_ESP32S3
+        select LV_USE_GIF
+        select LV_GIF_CACHE_DECODE_DATA
 endchoice
 
 choice ESP_S3_LCD_EV_Board_Version_TYPE

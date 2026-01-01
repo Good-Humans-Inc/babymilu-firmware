@@ -8,6 +8,11 @@ typedef struct _Animation_t{
     int len;
     bool use_spiffs;
     lv_image_dsc_t **spiffs_imgs;  // For SD card-loaded images
+    // GIF support
+    bool use_gif;                   // True if this animation uses GIF
+    char* gif_path;                 // Path to GIF file (for file-based loading)
+    uint8_t* gif_data;              // GIF data in memory (if loaded into RAM)
+    size_t gif_data_size;           // Size of GIF data
 }Animation_t;
 
 
@@ -54,3 +59,8 @@ bool animation_load_inspiration_from_sd_card(void);
 bool animation_load_question_from_sd_card(void);
 bool animation_load_shy_from_sd_card(void);
 bool animation_load_sleep_from_sd_card(void);
+
+// GIF loading functions
+bool animation_load_gifs_from_test_bin(void);
+bool animation_extract_gif_from_test_bin(const char* gif_name, uint8_t** data, size_t* size);
+bool animation_load_gif_animation(Animation_t* anim, const char* gif_name, uint8_t* gif_data, size_t gif_size);

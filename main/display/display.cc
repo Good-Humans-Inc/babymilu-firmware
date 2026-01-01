@@ -268,3 +268,10 @@ void Display::SetTheme(const std::string& theme_name) {
 }
 
 void Display::SetEmotionImg(const lv_image_dsc_t *img){};
+
+void Display::SetEmotionGif(const uint8_t* gif_data, size_t gif_size) {
+    // Default implementation does nothing
+    // Subclasses (like LcdDisplay) will override this
+    (void)gif_data;
+    (void)gif_size;
+}

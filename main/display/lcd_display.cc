@@ -12,6 +12,14 @@
 #include "settings.h"
 #include "animation.h"
 #include "board.h"
+#include <stdio.h>
+#include <unistd.h>
+
+// Include LVGL GIF support
+// The header is conditionally compiled based on LV_USE_GIF (set by Kconfig)
+#if LV_USE_GIF
+#include <libs/gif/lv_gif.h>
+#endif
 
 #define TAG "LcdDisplay"
 
@@ -1188,6 +1196,11 @@ void LcdDisplay::SetEmotionImg(const lv_image_dsc_t *img)
 {
     DisplayLockGuard lock(this);
     
+    // Hide GIF widget if it exists
+    if (emotion_gif_ != nullptr) {
+        lv_obj_add_flag(emotion_gif_, LV_OBJ_FLAG_HIDDEN);
+    }
+    
     // Create emotion_label_ in content area if it doesn't exist (status bar disabled)
     if (emotion_label_ == nullptr && content_ != nullptr) {
         emotion_label_ = lv_img_create(content_);
@@ -1201,6 +1214,9 @@ void LcdDisplay::SetEmotionImg(const lv_image_dsc_t *img)
     if (emotion_label_ == nullptr) {
         return; // Still can't create, skip emotion image setting
     }
+    
+    // Show image widget
+    lv_obj_clear_flag(emotion_label_, LV_OBJ_FLAG_HIDDEN);
     
     // Additional safety check for image data validity
     if (img != nullptr && img->data == nullptr) {
@@ -1229,6 +1245,64 @@ void LcdDisplay::SetEmotionImg(const lv_image_dsc_t *img)
         // Enable anti-aliasing for better quality
         lv_img_set_antialias(emotion_label_, true);
     }
+}
+
+void LcdDisplay::SetEmotionGif(const uint8_t* gif_data, size_t gif_size)
+{
+#if LV_USE_GIF
+    DisplayLockGuard lock(this);
+    
+    if (!gif_data || gif_size == 0) {
+        ESP_LOGE(TAG, "Invalid GIF data");
+        return;
+    }
+    
+    // Hide image widget if it exists
+    if (emotion_label_ != nullptr) {
+        lv_obj_add_flag(emotion_label_, LV_OBJ_FLAG_HIDDEN);
+    }
+    
+    // Create GIF widget if it doesn't exist
+    if (emotion_gif_ == nullptr && content_ != nullptr) {
+        emotion_gif_ = lv_gif_create(content_);
+        lv_obj_align(emotion_gif_, LV_ALIGN_CENTER, 0, 0);
+        lv_obj_set_style_pad_all(emotion_gif_, 0, 0);
+        lv_obj_set_style_margin_all(emotion_gif_, 0, 0);
+        lv_obj_set_style_border_width(emotion_gif_, 0, 0);
+        lv_obj_set_style_bg_opa(emotion_gif_, LV_OPA_TRANSP, 0);
+    }
+    
+    if (emotion_gif_ == nullptr) {
+        ESP_LOGE(TAG, "Failed to create GIF widget");
+        return;
+    }
+    
+    // Show GIF widget
+    lv_obj_clear_flag(emotion_gif_, LV_OBJ_FLAG_HIDDEN);
+    
+    // Create an lv_img_dsc_t structure for the GIF data
+    // LVGL GIF expects lv_img_dsc_t* with GIF data in the data field
+    // Note: The data pointer must remain valid for the lifetime of the GIF widget
+    lv_img_dsc_t gif_img_dsc;
+    gif_img_dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
+    gif_img_dsc.header.cf = LV_COLOR_FORMAT_L8; // GIF uses its own format internally
+    gif_img_dsc.header.flags = 0;
+    gif_img_dsc.header.w = 0; // GIF has its own dimensions
+    gif_img_dsc.header.h = 0;
+    gif_img_dsc.header.stride = 0;
+    gif_img_dsc.data_size = gif_size;
+    gif_img_dsc.data = gif_data; // Point to our GIF data (must remain valid)
+    
+    // Set GIF source from image descriptor
+    // LVGL will use the data pointer, so gif_data must remain valid
+    lv_gif_set_src(emotion_gif_, &gif_img_dsc);
+    
+    ESP_LOGD(TAG, "Set GIF animation (%d bytes)", gif_size);
+#else
+    ESP_LOGW(TAG, "GIF support not enabled (LV_USE_GIF is not set)");
+    (void)gif_data;
+    (void)gif_size;
+#endif
 }
 
 void LcdDisplay::SetIcon(const char *icon)

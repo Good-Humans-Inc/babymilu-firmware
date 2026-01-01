@@ -30,6 +30,7 @@ public:
     virtual std::string GetTheme() { return current_theme_name_; }
     virtual void UpdateStatusBar(bool update_all = false);
     virtual void SetEmotionImg(const lv_image_dsc_t *img);
+    virtual void SetEmotionGif(const uint8_t* gif_data, size_t gif_size);
     inline int width() const { return width_; }
     inline int height() const { return height_; }
 
