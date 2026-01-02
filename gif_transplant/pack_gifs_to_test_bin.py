@@ -25,8 +25,8 @@ Expected GIF files in folder:
     - talk.gif
     
     System GIFs (3):
-    - no-wifi.gif (loaded but not used yet)
-    - low-battery.gif (loaded but not used yet)
+    - wifi.gif (loaded but not used yet)
+    - battery.gif (loaded but not used yet)
     - silence.gif (displayed when volume is 0)
     
 Note: question.gif has been removed from the main animations.
@@ -54,9 +54,9 @@ ANIMATION_NAMES = [
 
 # Additional system GIFs (loaded but not used as main animations yet)
 SYSTEM_GIFS = [
-    "no-wifi",     # System status GIF (for future use)
-    "low-battery", # System status GIF (for future use)
-    "silence",     # System status GIF (displayed when volume is 0)
+    "wifi",     # System status GIF (for future use)
+    "battery",  # System status GIF (for future use)
+    "silence",  # System status GIF (displayed when volume is 0)
 ]
 
 # Core GIF filenames (all 10 are main animations)

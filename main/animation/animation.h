@@ -47,6 +47,7 @@ Animation_t* animation_get_laugh_animation(void);
 Animation_t* animation_get_sad_animation(void);
 Animation_t* animation_get_talk_animation(void);
 Animation_t* animation_get_silence_animation(void);
+Animation_t* animation_get_battery_animation(void);
 void animation_load_sd_card_animations(void);
 void animation_show_current_sources(void);
 

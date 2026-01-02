@@ -81,8 +81,8 @@ static Animation_t sd_laugh = {0};
 static Animation_t sd_sad = {0};
 static Animation_t sd_talk = {0};
 static Animation_t sd_silence = {0};
-static Animation_t sd_no_wifi = {0};
-static Animation_t sd_low_battery = {0};
+static Animation_t sd_wifi = {0};
+static Animation_t sd_battery = {0};
 
 // Initialize GIF fields
 #define INIT_ANIM(anim) do { \
@@ -94,6 +94,26 @@ static Animation_t sd_low_battery = {0};
 
 // Function to get the appropriate animation (SD card only)
 Animation_t* get_animation(int index) {
+    // Check battery level for normal animations - if battery < 20%, show battery animation
+    if (index == ANIMATION_STATIC_NORMAL || index == ANIMATION_NORMAL) {
+        int battery_level = 100;
+        bool charging = false, discharging = false;
+        auto& board = Board::GetInstance();
+        if (board.GetBatteryLevel(battery_level, charging, discharging)) {
+            if (battery_level < 20) {
+                // Battery is below 20%, show battery animation instead of normal
+                Animation_t* battery_anim = animation_get_battery_animation();
+                if (battery_anim != NULL && 
+                    (battery_anim->use_gif || battery_anim->use_spiffs)) {
+                    ESP_LOGI("animation", "Battery level %d%% < 20%%, showing battery animation instead of normal", battery_level);
+                    return battery_anim;
+                } else {
+                    ESP_LOGW("animation", "Battery level %d%% < 20%%, but battery animation not available, using normal", battery_level);
+                }
+            }
+        }
+    }
+    
     switch(index) {
         case 0: // ANIMATION_STATIC_NORMAL
             return animation_get_normal_animation();
@@ -263,8 +283,8 @@ void animation_load_sd_card_animations(void)
     INIT_ANIM(sd_sad);
     INIT_ANIM(sd_talk);
     INIT_ANIM(sd_silence);
-    INIT_ANIM(sd_no_wifi);
-    INIT_ANIM(sd_low_battery);
+    INIT_ANIM(sd_wifi);
+    INIT_ANIM(sd_battery);
     
     // First, try to load GIFs from test.bin
     ESP_LOGI("animation", "Trying to load GIF animations from test.bin...");
@@ -543,6 +563,19 @@ Animation_t* animation_get_silence_animation(void)
         return &sd_silence;
     }
     ESP_LOGW("animation", "No silence animation available from SD card");
+    return NULL;
+}
+
+// Function to get the appropriate battery animation (SD card only)
+Animation_t* animation_get_battery_animation(void)
+{
+    if (sd_battery.use_gif && sd_battery.gif_data && sd_battery.gif_data_size > 0) {
+        return &sd_battery;
+    }
+    if (sd_battery.use_spiffs && sd_battery.imges && sd_battery.len > 0) {
+        return &sd_battery;
+    }
+    ESP_LOGW("animation", "No battery animation available from SD card");
     return NULL;
 }
 
@@ -1882,14 +1915,14 @@ bool animation_load_gifs_from_test_bin(void)
         "sad.gif",         // ANIMATION_SAD
         "talk.gif",        // ANIMATION_TALK
         "silence.gif",     // ANIMATION_SILENCE
-        "no-wifi.gif",     // System GIF (for future use)
-        "low-battery.gif", // System GIF (for future use)
+        "wifi.gif",        // System GIF (for future use)
+        "battery.gif",     // System GIF (for future use)
     };
     
     Animation_t* animations[] = {
         &sd_normal, &sd_embarrass, &sd_fire, &sd_inspiration,
         &sd_shy, &sd_sleep, &sd_happy, &sd_laugh, &sd_sad, &sd_talk,
-        &sd_silence, &sd_no_wifi, &sd_low_battery
+        &sd_silence, &sd_wifi, &sd_battery
     };
     
     int loaded_count = 0;
