@@ -108,22 +108,20 @@ void Display::UpdateStatusBar(bool update_all) {
 
     {
         DisplayLockGuard lock(this);
-        if (mute_label_ == nullptr) {
-            return;
-        }
-
-        // 如果静音状态改变，则更新图标
-        if (codec->output_volume() == 0 && !muted_) {
-            muted_ = true;
-            lv_label_set_text(mute_label_, FONT_AWESOME_VOLUME_MUTE);
-        } else if (codec->output_volume() > 0 && muted_) {
-            muted_ = false;
-            lv_label_set_text(mute_label_, "");
+        if (mute_label_ != nullptr) {
+            // 如果静音状态改变，则更新图标
+            if (codec->output_volume() == 0 && !muted_) {
+                muted_ = true;
+                lv_label_set_text(mute_label_, FONT_AWESOME_VOLUME_MUTE);
+            } else if (codec->output_volume() > 0 && muted_) {
+                muted_ = false;
+                lv_label_set_text(mute_label_, "");
+            }
         }
     }
 
     esp_pm_lock_acquire(pm_lock_);
-    // 更新电池图标
+    // 更新电池图标 (always check battery level for logging, even if UI is disabled)
     int battery_level;
     bool charging, discharging;
     const char* icon = nullptr;

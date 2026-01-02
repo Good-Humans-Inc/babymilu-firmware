@@ -12,14 +12,24 @@ Example:
     python pack_gifs_to_test_bin.py animations/ test.bin
 
 Expected GIF files in folder:
+    Main animations (10):
     - normal.gif
-    - happy.gif
     - embarrass.gif
     - fire.gif
     - inspiration.gif
-    - question.gif
     - shy.gif
     - sleep.gif
+    - happy.gif
+    - laugh.gif
+    - sad.gif
+    - talk.gif
+    
+    System GIFs (3):
+    - no-wifi.gif (loaded but not used yet)
+    - low-battery.gif (loaded but not used yet)
+    - silence.gif (displayed when volume is 0)
+    
+Note: question.gif has been removed from the main animations.
 """
 
 import struct
@@ -27,20 +37,36 @@ import os
 import sys
 from pathlib import Path
 
-# Animation names in order (matching AnimationType_e enum)
+# Animation names in order - all 10 main animations to load from SD card
+# Question has been removed, these are the main animations
 ANIMATION_NAMES = [
     "normal",      # ANIMATION_STATIC_NORMAL / ANIMATION_NORMAL
     "embarrass",   # ANIMATION_EMBARRESSED
     "fire",        # ANIMATION_FIRE
     "inspiration", # ANIMATION_INSPIRATION
-    "question",    # ANIMATION_QUESTION
     "shy",         # ANIMATION_SHY
     "sleep",       # ANIMATION_SLEEP
     "happy",       # ANIMATION_HAPPY
+    "laugh",       # Additional animation
+    "sad",         # Additional animation
+    "talk",        # Additional animation
 ]
 
-# Expected GIF filenames
-EXPECTED_GIFS = [f"{name}.gif" for name in ANIMATION_NAMES]
+# Additional system GIFs (loaded but not used as main animations yet)
+SYSTEM_GIFS = [
+    "no-wifi",     # System status GIF (for future use)
+    "low-battery", # System status GIF (for future use)
+    "silence",     # System status GIF (displayed when volume is 0)
+]
+
+# Core GIF filenames (all 10 are main animations)
+CORE_GIFS = [f"{name}.gif" for name in ANIMATION_NAMES]
+
+# System GIF filenames
+SYSTEM_GIF_FILES = [f"{name}.gif" for name in SYSTEM_GIFS]
+
+# All supported GIF filenames (core + system)
+ALL_GIFS = CORE_GIFS + SYSTEM_GIF_FILES
 
 def compute_checksum(data):
     """Calculate checksum as sum of all bytes, masked to 32 bits."""
@@ -116,32 +142,49 @@ def create_test_bin(gif_folder, output_path):
         print(f"Error: GIF folder not found: {gif_folder}")
         return False
     
-    # Find all GIF files
+    # Find all GIF files (main animations + system GIFs)
     found_gifs = {}
-    for gif_name in EXPECTED_GIFS:
+    missing_gifs = []
+    
+    # Check for all main animations
+    for gif_name in CORE_GIFS:
         gif_path = gif_folder / gif_name
         if gif_path.exists():
             found_gifs[gif_name] = str(gif_path)
         else:
-            print(f"Warning: Expected GIF not found: {gif_name}")
+            missing_gifs.append(gif_name)
+    
+    # Check for system GIFs
+    for gif_name in SYSTEM_GIF_FILES:
+        gif_path = gif_folder / gif_name
+        if gif_path.exists():
+            found_gifs[gif_name] = str(gif_path)
+            print(f"Info: Found system GIF: {gif_name}")
+        else:
+            print(f"Warning: System GIF not found: {gif_name}")
     
     if not found_gifs:
         print("Error: No GIF files found in folder!")
-        print(f"Expected files: {', '.join(EXPECTED_GIFS)}")
+        print(f"Expected main files: {', '.join(CORE_GIFS)}")
+        print(f"Expected system files: {', '.join(SYSTEM_GIF_FILES)}")
         return False
+    
+    if missing_gifs:
+        print(f"Warning: Missing main GIF files: {', '.join(missing_gifs)}")
+        print("These animations will not be available.")
     
     print(f"Found {len(found_gifs)} GIF file(s) to pack:")
     for name in found_gifs.keys():
         size = os.path.getsize(found_gifs[name])
         print(f"  - {name}: {size:,} bytes")
     
-    # Pack files in order
+    # Pack files in order (main animations first, then system GIFs)
     file_table = bytearray()
     data_section = bytearray()
     current_offset = 0
     file_info_list = []
     
-    # Pack in the order of ANIMATION_NAMES
+    # Pack all main animations in the order of ANIMATION_NAMES
     for anim_name in ANIMATION_NAMES:
         gif_name = f"{anim_name}.gif"
         if gif_name in found_gifs:
@@ -156,6 +199,25 @@ def create_test_bin(gif_folder, output_path):
                 current_offset += len(data_entry)
                 
                 print(f"✓ Packed {gif_name} ({file_size:,} bytes)")
+            except Exception as e:
+                print(f"Error packing {gif_name}: {e}")
+                return False
+    
+    # Pack system GIFs after main animations
+    for system_name in SYSTEM_GIFS:
+        gif_name = f"{system_name}.gif"
+        if gif_name in found_gifs:
+            try:
+                table_entry, data_entry, file_size = pack_gif_file(
+                    gif_name, found_gifs[gif_name], current_offset
+                )
+                
+                file_table.extend(table_entry)
+                data_section.extend(data_entry)
+                file_info_list.append((gif_name, file_size, current_offset))
+                current_offset += len(data_entry)
+                
+                print(f"✓ Packed system GIF {gif_name} ({file_size:,} bytes)")
             except Exception as e:
                 print(f"Error packing {gif_name}: {e}")
                 return False
@@ -216,8 +278,12 @@ def main():
         print("  gif_folder      Path to folder containing GIF files")
         print("  output_test.bin Path where test.bin will be written")
         print()
-        print("Expected GIF files:")
-        for name in EXPECTED_GIFS:
+        print("Main GIF files (10 animations):")
+        for name in CORE_GIFS:
+            print(f"  - {name}")
+        print()
+        print("System GIF files (3 system status):")
+        for name in SYSTEM_GIF_FILES:
             print(f"  - {name}")
         print()
         print("Example:")

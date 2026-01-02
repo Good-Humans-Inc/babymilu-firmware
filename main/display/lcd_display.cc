@@ -12,6 +12,7 @@
 #include "settings.h"
 #include "animation.h"
 #include "board.h"
+#include "audio_codec.h"
 #include <stdio.h>
 #include <unistd.h>
 
@@ -1131,25 +1132,34 @@ void LcdDisplay::SetEmotion(const char *emotion)
     static const std::vector<Emotion> emotions = {
         {ANIMATION_STATIC_NORMAL, "neutral"},
         {ANIMATION_HAPPY, "happy"},
-        {ANIMATION_HAPPY, "laughing"},
+        {ANIMATION_LAUGH, "laughing"},
         {ANIMATION_HAPPY, "funny"},
-        {ANIMATION_SHY, "sad"},
+        {ANIMATION_SAD, "sad"},
         {ANIMATION_FIRE, "angry"},
-        {ANIMATION_EMBARRESSED, "crying"},
-        {ANIMATION_INSPIRATION, "loving"},
-        {ANIMATION_SHY, "embarrassed"},
+        //{ANIMATION_EMBARRESSED, "crying"},
+        {ANIMATION_HAPPY, "loving"},
+        {ANIMATION_EMBARRESSED, "embarrassed"},
         {ANIMATION_INSPIRATION, "surprised"},
-        {ANIMATION_INSPIRATION, "shocked"},
-        {ANIMATION_QUESTION, "thinking"},
+        {ANIMATION_TALK, "shocked"},
+        {ANIMATION_NORMAL, "thinking"},
         {ANIMATION_NORMAL, "winking"},
         {ANIMATION_INSPIRATION, "cool"},
-        {ANIMATION_HAPPY, "relaxed"},
-        {ANIMATION_HAPPY, "delicious"},
+        {ANIMATION_TALK, "relaxed"},
+        {ANIMATION_SHY, "delicious"},
         {ANIMATION_INSPIRATION, "kissy"},
-        {ANIMATION_HAPPY, "confident"},
+        {ANIMATION_TALK, "confident"},
         {ANIMATION_SLEEP, "sleepy"},
-        {ANIMATION_HAPPY, "silly"},
-        {ANIMATION_QUESTION, "confused"}};
+        {ANIMATION_SHY, "silly"},
+        {ANIMATION_TALK, "confused"}};
+
+    // Check volume first - if volume is 0, lock to silence animation
+    auto& board = Board::GetInstance();
+    auto codec = board.GetAudioCodec();
+    if (codec && codec->output_volume() == 0) {
+        ESP_LOGI(TAG, "***** Volume is 0, locking animation to silence (ignoring emotion: %s) *****", emotion ? emotion : "<null>");
+        animation_check_volume_and_lock(0);
+        return; // Don't process emotion when volume is 0
+    }
 
     // 查找匹配的表情
     ESP_LOGI(TAG, "***** SetEmotion request: %s *****", emotion ? emotion : "<null>");
@@ -1168,7 +1178,7 @@ void LcdDisplay::SetEmotion(const char *emotion)
     
     // Even if the label can't be created yet, proceed to update the animation
 
-    // 如果找到匹配的表情就显示对应图标，否则显示默认的neutral表情
+    // 如果找到匹配的表情就显示对应图标，否则显示默认的talk表情
     if (it != emotions.end())
     {
         ESP_LOGI(TAG, "***** Emotion matched: %s -> animation %d *****", emotion, (int)it->animation_num);
@@ -1176,8 +1186,8 @@ void LcdDisplay::SetEmotion(const char *emotion)
     }
     else
     {
-        ESP_LOGW(TAG, "***** Emotion unknown: %s -> default animation %d *****", emotion, (int)ANIMATION_NORMAL);
-        animation_set_now_animation(ANIMATION_NORMAL);
+        ESP_LOGW(TAG, "***** Emotion unknown: %s -> default animation %d (ANIMATION_TALK) *****", emotion, (int)ANIMATION_TALK);
+        animation_set_now_animation(ANIMATION_TALK);
     }
 
 #if !CONFIG_USE_WECHAT_MESSAGE_STYLE

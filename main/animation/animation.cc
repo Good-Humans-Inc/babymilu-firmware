@@ -75,9 +75,14 @@ static Animation_t sd_embarrass = {0};
 static Animation_t sd_fire = {0};
 static Animation_t sd_happy = {0};
 static Animation_t sd_inspiration = {0};
-static Animation_t sd_question = {0};
 static Animation_t sd_shy = {0};
 static Animation_t sd_sleep = {0};
+static Animation_t sd_laugh = {0};
+static Animation_t sd_sad = {0};
+static Animation_t sd_talk = {0};
+static Animation_t sd_silence = {0};
+static Animation_t sd_no_wifi = {0};
+static Animation_t sd_low_battery = {0};
 
 // Initialize GIF fields
 #define INIT_ANIM(anim) do { \
@@ -100,14 +105,20 @@ Animation_t* get_animation(int index) {
             return animation_get_inspiration_animation();
         case 4: // ANIMATION_NORMAL
             return animation_get_normal_animation();
-        case 5: // ANIMATION_QUESTION
-            return animation_get_question_animation();
-        case 6: // ANIMATION_SHY
+        case 5: // ANIMATION_SHY
             return animation_get_shy_animation();
-        case 7: // ANIMATION_SLEEP
+        case 6: // ANIMATION_SLEEP
             return animation_get_sleep_animation();
-        case 8: // ANIMATION_HAPPY
+        case 7: // ANIMATION_HAPPY
             return animation_get_happy_animation();
+        case 8: // ANIMATION_LAUGH
+            return animation_get_laugh_animation();
+        case 9: // ANIMATION_SAD
+            return animation_get_sad_animation();
+        case 10: // ANIMATION_TALK
+            return animation_get_talk_animation();
+        case 11: // ANIMATION_SILENCE
+            return animation_get_silence_animation();
         default:
             return animation_get_normal_animation();
     }
@@ -120,14 +131,17 @@ Animation_t *animations[] = {
     NULL,  // ANIMATION_FIRE
     NULL,  // ANIMATION_INSPIRATION
     NULL,  // ANIMATION_NORMAL
-    NULL,  // ANIMATION_QUESTION
     NULL,  // ANIMATION_SHY
     NULL,  // ANIMATION_SLEEP
-    NULL}; // ANIMATION_HAPPY
+    NULL,  // ANIMATION_HAPPY
+    NULL,  // ANIMATION_LAUGH
+    NULL,  // ANIMATION_SAD
+    NULL}; // ANIMATION_TALK
 
 static int now_animation = 0;
 int pos = 0;
 TaskHandle_t animation_task_handle = nullptr;
+static bool animation_locked_by_silence = false;  // Lock animation when volume is 0
 
 
 void plat_animation_task(void *arg)
@@ -182,6 +196,12 @@ void plat_animation_task(void *arg)
 
 void animation_set_now_animation(int animation)
 {
+    // If animation is locked by silence, only allow silence animation
+    if (animation_locked_by_silence && animation != ANIMATION_SILENCE) {
+        ESP_LOGI("animation_set_now_animation", "Animation locked by silence, ignoring request for animation %d", animation);
+        return;
+    }
+    
     if (animation_task_handle == nullptr)
     {
         // Increased stack size to 4096 bytes to handle GIF operations
@@ -196,6 +216,22 @@ void animation_set_now_animation(int animation)
     ESP_LOGI("animation_set_now_animation", "Set now animation: %d", animation);
     now_animation = animation;
     pos = 0;
+}
+
+// Function to check volume and lock/unlock silence animation
+void animation_check_volume_and_lock(int volume)
+{
+    if (volume == 0 && !animation_locked_by_silence) {
+        // Volume is 0, lock animation to silence
+        animation_locked_by_silence = true;
+        ESP_LOGI("animation", "Volume is 0, locking animation to silence");
+        animation_set_now_animation(ANIMATION_SILENCE);
+    } else if (volume > 0 && animation_locked_by_silence) {
+        // Volume is restored, unlock animation
+        animation_locked_by_silence = false;
+        ESP_LOGI("animation", "Volume restored to %d, unlocking animation", volume);
+        // Animation will be set by next SetEmotion call
+    }
 }
 
 // Animation initialization function
@@ -221,9 +257,14 @@ void animation_load_sd_card_animations(void)
     INIT_ANIM(sd_fire);
     INIT_ANIM(sd_happy);
     INIT_ANIM(sd_inspiration);
-    INIT_ANIM(sd_question);
     INIT_ANIM(sd_shy);
     INIT_ANIM(sd_sleep);
+    INIT_ANIM(sd_laugh);
+    INIT_ANIM(sd_sad);
+    INIT_ANIM(sd_talk);
+    INIT_ANIM(sd_silence);
+    INIT_ANIM(sd_no_wifi);
+    INIT_ANIM(sd_low_battery);
     
     // First, try to load GIFs from test.bin
     ESP_LOGI("animation", "Trying to load GIF animations from test.bin...");
@@ -253,11 +294,13 @@ void animation_load_sd_card_animations(void)
     bool fire_loaded = animation_load_fire_from_sd_card();
     bool happy_loaded = animation_load_happy_from_sd_card();
     bool inspiration_loaded = animation_load_inspiration_from_sd_card();
-    bool question_loaded = animation_load_question_from_sd_card();
     bool shy_loaded = animation_load_shy_from_sd_card();
     bool sleep_loaded = animation_load_sleep_from_sd_card();
+    bool laugh_loaded = animation_load_laugh_from_sd_card();
+    bool sad_loaded = animation_load_sad_from_sd_card();
+    bool talk_loaded = animation_load_talk_from_sd_card();
     
-    if (normal_loaded || embarrass_loaded || fire_loaded || happy_loaded || inspiration_loaded || question_loaded || shy_loaded || sleep_loaded) {
+    if (normal_loaded || embarrass_loaded || fire_loaded || happy_loaded || inspiration_loaded || shy_loaded || sleep_loaded || laugh_loaded || sad_loaded || talk_loaded) {
         ESP_LOGI("animation", "✅ SD card animations loaded successfully!");
         if (normal_loaded) {
             ESP_LOGI("animation", "   - Normal animation now uses SD card (normal1.bin, normal2.bin, normal3.bin)");
@@ -279,10 +322,6 @@ void animation_load_sd_card_animations(void)
             ESP_LOGI("animation", "   - Inspiration animation now uses SD card (inspiration1.bin, inspiration2.bin, inspiration3.bin, inspiration4.bin)");
             ESP_LOGI("animation", "   - Inspiration SD card animation has %d frames", sd_inspiration.len);
         }
-        if (question_loaded) {
-            ESP_LOGI("animation", "   - Question animation now uses SD card (question1.bin, question2.bin, question3.bin, question4.bin)");
-            ESP_LOGI("animation", "   - Question SD card animation has %d frames", sd_question.len);
-        }
         if (shy_loaded) {
             ESP_LOGI("animation", "   - Shy animation now uses SD card (shy1.bin, shy2.bin)");
             ESP_LOGI("animation", "   - Shy SD card animation has %d frames", sd_shy.len);
@@ -290,6 +329,18 @@ void animation_load_sd_card_animations(void)
         if (sleep_loaded) {
             ESP_LOGI("animation", "   - Sleep animation now uses SD card (sleep1.bin, sleep2.bin, sleep3.bin, sleep4.bin)");
             ESP_LOGI("animation", "   - Sleep SD card animation has %d frames", sd_sleep.len);
+        }
+        if (laugh_loaded) {
+            ESP_LOGI("animation", "   - Laugh animation now uses SD card");
+            ESP_LOGI("animation", "   - Laugh SD card animation has %d frames", sd_laugh.len);
+        }
+        if (sad_loaded) {
+            ESP_LOGI("animation", "   - Sad animation now uses SD card");
+            ESP_LOGI("animation", "   - Sad SD card animation has %d frames", sd_sad.len);
+        }
+        if (talk_loaded) {
+            ESP_LOGI("animation", "   - Talk animation now uses SD card");
+            ESP_LOGI("animation", "   - Talk SD card animation has %d frames", sd_talk.len);
         }
     } else {
         ESP_LOGW("animation", "⚠️  SD card animations not found");
@@ -417,19 +468,6 @@ Animation_t* animation_get_inspiration_animation(void)
     return NULL;
 }
 
-// Function to get the appropriate question animation (SD card only)
-Animation_t* animation_get_question_animation(void)
-{
-    if (sd_question.use_gif && sd_question.gif_data && sd_question.gif_data_size > 0) {
-        return &sd_question;
-    }
-    if (sd_question.use_spiffs && sd_question.imges && sd_question.len > 0) {
-        return &sd_question;
-    }
-    ESP_LOGW("animation", "No question animation available from SD card");
-    return NULL;
-}
-
 // Function to get the appropriate shy animation (SD card only)
 Animation_t* animation_get_shy_animation(void)
 {
@@ -456,6 +494,58 @@ Animation_t* animation_get_sleep_animation(void)
     return NULL;
 }
 
+// Function to get the appropriate laugh animation (SD card only)
+Animation_t* animation_get_laugh_animation(void)
+{
+    if (sd_laugh.use_gif && sd_laugh.gif_data && sd_laugh.gif_data_size > 0) {
+        return &sd_laugh;
+    }
+    if (sd_laugh.use_spiffs && sd_laugh.imges && sd_laugh.len > 0) {
+        return &sd_laugh;
+    }
+    ESP_LOGW("animation", "No laugh animation available from SD card");
+    return NULL;
+}
+
+// Function to get the appropriate sad animation (SD card only)
+Animation_t* animation_get_sad_animation(void)
+{
+    if (sd_sad.use_gif && sd_sad.gif_data && sd_sad.gif_data_size > 0) {
+        return &sd_sad;
+    }
+    if (sd_sad.use_spiffs && sd_sad.imges && sd_sad.len > 0) {
+        return &sd_sad;
+    }
+    ESP_LOGW("animation", "No sad animation available from SD card");
+    return NULL;
+}
+
+// Function to get the appropriate talk animation (SD card only)
+Animation_t* animation_get_talk_animation(void)
+{
+    if (sd_talk.use_gif && sd_talk.gif_data && sd_talk.gif_data_size > 0) {
+        return &sd_talk;
+    }
+    if (sd_talk.use_spiffs && sd_talk.imges && sd_talk.len > 0) {
+        return &sd_talk;
+    }
+    ESP_LOGW("animation", "No talk animation available from SD card");
+    return NULL;
+}
+
+// Function to get the appropriate silence animation (SD card only)
+Animation_t* animation_get_silence_animation(void)
+{
+    if (sd_silence.use_gif && sd_silence.gif_data && sd_silence.gif_data_size > 0) {
+        return &sd_silence;
+    }
+    if (sd_silence.use_spiffs && sd_silence.imges && sd_silence.len > 0) {
+        return &sd_silence;
+    }
+    ESP_LOGW("animation", "No silence animation available from SD card");
+    return NULL;
+}
+
 void animation_show_current_sources(void)
 {
     ESP_LOGI("animation", "=== Current Animation Sources ===");
@@ -464,7 +554,7 @@ void animation_show_current_sources(void)
         Animation_t* anim = get_animation(i);
         const char* anim_names[] = {
             "STATIC_NORMAL", "EMBARRESSED", "FIRE", "INSPIRATION", "NORMAL",
-            "QUESTION", "SHY", "SLEEP", "HAPPY"
+            "SHY", "SLEEP", "HAPPY", "LAUGH", "SAD", "TALK", "SILENCE"
         };
         
         if (anim && anim->use_spiffs) {
@@ -963,15 +1053,16 @@ bool animation_load_all_from_sd_card(void)
     fseek(f, 0, SEEK_SET);
     ESP_LOGI("animation", "✅ Successfully opened mega file: %s (%ld bytes)", mega_path, file_size);
     
-    // Animation frame counts: Normal(3), Embarrass(3), Fire(4), Happy(4), Inspiration(4), Question(4), Shy(2), Sleep(4)
-    int animation_frame_counts[] = {3, 3, 4, 4, 4, 4, 2, 4};
+    // Animation frame counts: Normal(3), Embarrass(3), Fire(4), Happy(4), Inspiration(4), Shy(2), Sleep(4)
+    // Note: Laugh, Sad, Talk are GIF-only (no frame counts)
+    int animation_frame_counts[] = {3, 3, 4, 4, 2, 4};
     Animation_t* animations[] = {
-        &sd_normal, &sd_embarrass, &sd_fire, &sd_happy,
-        &sd_inspiration, &sd_question, &sd_shy, &sd_sleep
+        &sd_normal, &sd_embarrass, &sd_fire, &sd_inspiration,
+        &sd_shy, &sd_sleep
     };
     
     int total_frames = 0;
-    for (int i = 0; i < 8; i++) {
+    for (int i = 0; i < 6; i++) {
         total_frames += animation_frame_counts[i];
     }
     
@@ -1479,28 +1570,6 @@ bool animation_load_inspiration_from_sd_card(void)
     }
 }
 
-bool animation_load_question_from_sd_card(void)
-{
-    if (!SdCard::IsMounted()) {
-        ESP_LOGE("animation", "SD card not mounted");
-        return false;
-    }
-    
-    // Clean up existing SD card question animation if any
-    animation_cleanup_sd_card_animation(&sd_question);
-    
-    // Load question animation from SD card
-    const char* question_frames[] = {"question1.bin", "question2.bin", "question3.bin", "question4.bin"};
-    
-    if (animation_create_sd_card_animation(&sd_question, question_frames, 4)) {
-        ESP_LOGI("animation", "✅ Successfully loaded question animation from SD card");
-        return true;
-    } else {
-        ESP_LOGE("animation", "❌ Failed to load question animation from SD card");
-        return false;
-    }
-}
-
 bool animation_load_shy_from_sd_card(void)
 {
     if (!SdCard::IsMounted()) {
@@ -1543,6 +1612,54 @@ bool animation_load_sleep_from_sd_card(void)
         ESP_LOGE("animation", "❌ Failed to load sleep animation from SD card");
         return false;
     }
+}
+
+bool animation_load_laugh_from_sd_card(void)
+{
+    if (!SdCard::IsMounted()) {
+        ESP_LOGE("animation", "SD card not mounted");
+        return false;
+    }
+    
+    // Clean up existing SD card laugh animation if any
+    animation_cleanup_sd_card_animation(&sd_laugh);
+    
+    // Load laugh animation from SD card (GIF format, no frame files needed)
+    // This will be loaded from test.bin as laugh.gif
+    ESP_LOGI("animation", "Laugh animation will be loaded from test.bin as laugh.gif");
+    return false; // Return false to indicate frame-based loading not available
+}
+
+bool animation_load_sad_from_sd_card(void)
+{
+    if (!SdCard::IsMounted()) {
+        ESP_LOGE("animation", "SD card not mounted");
+        return false;
+    }
+    
+    // Clean up existing SD card sad animation if any
+    animation_cleanup_sd_card_animation(&sd_sad);
+    
+    // Load sad animation from SD card (GIF format, no frame files needed)
+    // This will be loaded from test.bin as sad.gif
+    ESP_LOGI("animation", "Sad animation will be loaded from test.bin as sad.gif");
+    return false; // Return false to indicate frame-based loading not available
+}
+
+bool animation_load_talk_from_sd_card(void)
+{
+    if (!SdCard::IsMounted()) {
+        ESP_LOGE("animation", "SD card not mounted");
+        return false;
+    }
+    
+    // Clean up existing SD card talk animation if any
+    animation_cleanup_sd_card_animation(&sd_talk);
+    
+    // Load talk animation from SD card (GIF format, no frame files needed)
+    // This will be loaded from test.bin as talk.gif
+    ESP_LOGI("animation", "Talk animation will be loaded from test.bin as talk.gif");
+    return false; // Return false to indicate frame-based loading not available
 }
 
 // ============================================================================
@@ -1752,27 +1869,33 @@ bool animation_load_gifs_from_test_bin(void)
     
     ESP_LOGI("animation", "Loading GIF animations from test.bin...");
     
-    // Animation names in order (matching AnimationType_e)
+    // Animation names in order (matching AnimationType_e and the 10 main GIFs + 3 system GIFs)
     const char* gif_names[] = {
         "normal.gif",      // ANIMATION_STATIC_NORMAL / ANIMATION_NORMAL
         "embarrass.gif",   // ANIMATION_EMBARRESSED
         "fire.gif",        // ANIMATION_FIRE
         "inspiration.gif", // ANIMATION_INSPIRATION
-        "question.gif",    // ANIMATION_QUESTION
         "shy.gif",         // ANIMATION_SHY
         "sleep.gif",       // ANIMATION_SLEEP
         "happy.gif",       // ANIMATION_HAPPY
+        "laugh.gif",       // ANIMATION_LAUGH
+        "sad.gif",         // ANIMATION_SAD
+        "talk.gif",        // ANIMATION_TALK
+        "silence.gif",     // ANIMATION_SILENCE
+        "no-wifi.gif",     // System GIF (for future use)
+        "low-battery.gif", // System GIF (for future use)
     };
     
     Animation_t* animations[] = {
-        &sd_normal, &sd_embarrass, &sd_fire, &sd_happy,
-        &sd_inspiration, &sd_question, &sd_shy, &sd_sleep
+        &sd_normal, &sd_embarrass, &sd_fire, &sd_inspiration,
+        &sd_shy, &sd_sleep, &sd_happy, &sd_laugh, &sd_sad, &sd_talk,
+        &sd_silence, &sd_no_wifi, &sd_low_battery
     };
     
     int loaded_count = 0;
     
-    // Load each GIF
-    for (int i = 0; i < 8; i++) {
+    // Load each GIF (10 main animations + 3 system GIFs)
+    for (int i = 0; i < 13; i++) {
         uint8_t* gif_data = NULL;
         size_t gif_size = 0;
         

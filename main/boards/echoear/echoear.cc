@@ -241,7 +241,27 @@ public:
         // Read voltage and current values (currently unused but available for future use)
         (void)((uint16_t)(read_buffer_[1] << 8 | read_buffer_[0]));  // voltage
         (void)((int16_t)(read_buffer_[3] << 8 | read_buffer_[2]));  // current
-    } 
+    }
+    
+    // Get battery voltage in millivolts
+    uint16_t GetVoltage() {
+        ReadRegs(0x08, read_buffer_, 2);
+        uint16_t voltage_raw = (read_buffer_[1] << 8) | read_buffer_[0];
+        // Voltage register format: typically in units of 0.1mV or similar
+        // Assuming raw value needs scaling - adjust based on actual chip specifications
+        // For now, assuming it's already in mV or needs minimal conversion
+        return voltage_raw;
+    }
+    
+    // Get battery current in milliamps (positive = charging, negative = discharging)
+    int16_t GetCurrent() {
+        ReadRegs(0x0c, read_buffer_ + 2, 2);
+        int16_t current_raw = (int16_t)((read_buffer_[3] << 8) | read_buffer_[2]);
+        // Current register format: typically in units of 0.1mA or similar
+        // Adjust scaling based on actual chip specifications
+        return current_raw;
+    }
+    
     static void TaskFunction(void *pvParameters) {
         Charge* charge = static_cast<Charge*>(pvParameters);
         while (true) {
@@ -1035,6 +1055,48 @@ public:
 
     virtual Backlight* GetBacklight() override {
         return backlight_;
+    }
+
+    virtual bool GetBatteryLevel(int &level, bool& charging, bool& discharging) override {
+        if (charge_ == nullptr) {
+            return false;
+        }
+        
+        // Read voltage and current from charge IC
+        uint16_t voltage_mv = charge_->GetVoltage();
+        int16_t current_ma = charge_->GetCurrent();
+        
+        // Determine charging/discharging status based on current
+        // Positive current typically means charging, negative means discharging
+        charging = (current_ma > 50);  // Threshold: > 50mA considered charging
+        discharging = (current_ma < -50);  // Threshold: < -50mA considered discharging
+        
+        // Convert voltage to battery level percentage
+        // Typical Li-ion battery: 3.0V (0%) to 4.2V (100%)
+        // Voltage register might be in different units - adjust based on actual chip
+        // Assuming voltage is in millivolts, typical range: 3000mV (0%) to 4200mV (100%)
+        const uint16_t MIN_VOLTAGE_MV = 3000;  // 3.0V = 0%
+        const uint16_t MAX_VOLTAGE_MV = 4200;  // 4.2V = 100%
+        
+        // Clamp voltage to valid range
+        if (voltage_mv < MIN_VOLTAGE_MV) {
+            voltage_mv = MIN_VOLTAGE_MV;
+        } else if (voltage_mv > MAX_VOLTAGE_MV) {
+            voltage_mv = MAX_VOLTAGE_MV;
+        }
+        
+        // Calculate percentage using linear interpolation
+        level = ((voltage_mv - MIN_VOLTAGE_MV) * 100) / (MAX_VOLTAGE_MV - MIN_VOLTAGE_MV);
+        
+        // Ensure level is in valid range
+        if (level < 0) level = 0;
+        if (level > 100) level = 100;
+        
+        // Log battery status
+        ESP_LOGI(TAG, "[BATTERY] Voltage: %d mV, Current: %d mA, Level: %d%%, Charging: %s, Discharging: %s",
+                 voltage_mv, current_ma, level, charging ? "yes" : "no", discharging ? "yes" : "no");
+        
+        return true;
     }
 
     virtual void StartNetwork() override {

@@ -1,6 +1,7 @@
 #include "audio_codec.h"
 #include "board.h"
 #include "settings.h"
+#include "animation.h"
 
 #include <esp_log.h>
 #include <cstring>
@@ -48,6 +49,9 @@ void AudioCodec::SetOutputVolume(int volume) {
     
     Settings settings("audio", true);
     settings.SetInt("output_volume", output_volume_);
+    
+    // Check volume and lock/unlock silence animation
+    animation_check_volume_and_lock(volume);
 }
 
 void AudioCodec::EnableInput(bool enable) {
