@@ -20,6 +20,7 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include <errno.h>
+#include <wifi_station.h>
 
 // Overlay pixel format magic number (0x4F50584C = "OPXL" in ASCII)
 #define OVERLAY_PIXELS_FORMAT 0x4F50584C
@@ -94,8 +95,23 @@ static Animation_t sd_battery = {0};
 
 // Function to get the appropriate animation (SD card only)
 Animation_t* get_animation(int index) {
-    // Check battery level for normal animations - if battery < 20%, show battery animation
+    // Check WiFi and battery status for normal animations
     if (index == ANIMATION_STATIC_NORMAL || index == ANIMATION_NORMAL) {
+        // First check WiFi connection - if disconnected, show wifi animation
+        auto& wifi_station = WifiStation::GetInstance();
+        if (!wifi_station.IsConnected()) {
+            // WiFi is disconnected, show wifi animation instead of normal
+            Animation_t* wifi_anim = animation_get_wifi_animation();
+            if (wifi_anim != NULL && 
+                (wifi_anim->use_gif || wifi_anim->use_spiffs)) {
+                ESP_LOGI("animation", "WiFi disconnected, showing wifi animation instead of normal");
+                return wifi_anim;
+            } else {
+                ESP_LOGW("animation", "WiFi disconnected, but wifi animation not available, using normal");
+            }
+        }
+        
+        // Then check battery level - if battery < 20%, show battery animation
         int battery_level = 100;
         bool charging = false, discharging = false;
         auto& board = Board::GetInstance();
@@ -576,6 +592,19 @@ Animation_t* animation_get_battery_animation(void)
         return &sd_battery;
     }
     ESP_LOGW("animation", "No battery animation available from SD card");
+    return NULL;
+}
+
+// Function to get the appropriate wifi animation (SD card only)
+Animation_t* animation_get_wifi_animation(void)
+{
+    if (sd_wifi.use_gif && sd_wifi.gif_data && sd_wifi.gif_data_size > 0) {
+        return &sd_wifi;
+    }
+    if (sd_wifi.use_spiffs && sd_wifi.imges && sd_wifi.len > 0) {
+        return &sd_wifi;
+    }
+    ESP_LOGW("animation", "No wifi animation available from SD card");
     return NULL;
 }
 

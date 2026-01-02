@@ -500,8 +500,8 @@ private:
                             
                             switch (gesture) {
                                 case Cst816s::GESTURE_SWIPE_UP:
-                                    new_volume = current_volume + 5;  // Increase by 5
-                                    if (new_volume > 100) new_volume = 100;
+                                    new_volume = current_volume - 5;  // Decrease by 5
+                                    if (new_volume < 0) new_volume = 0;
                                     codec->SetOutputVolume(new_volume);
                                     ESP_LOGI(TAG, "[TOUCH] Swipe UP detected - Volume: %d -> %d", current_volume, new_volume);
                                     
@@ -512,8 +512,8 @@ private:
                                     break;
                                     
                                 case Cst816s::GESTURE_SWIPE_DOWN:
-                                    new_volume = current_volume - 5;  // Decrease by 5
-                                    if (new_volume < 0) new_volume = 0;
+                                    new_volume = current_volume + 5;  // Increase by 5
+                                    if (new_volume > 100) new_volume = 100;
                                     codec->SetOutputVolume(new_volume);
                                     ESP_LOGI(TAG, "[TOUCH] Swipe DOWN detected - Volume: %d -> %d", current_volume, new_volume);
                                     
