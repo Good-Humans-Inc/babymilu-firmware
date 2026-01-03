@@ -180,10 +180,24 @@ TaskHandle_t animation_task_handle = nullptr;
 static bool animation_locked_by_silence = false;  // Lock animation when volume is 0
 
 
+// Helper function to get animation name string
+static const char* get_animation_name(int animation_index) {
+    const char* anim_names[] = {
+        "STATIC_NORMAL", "EMBARRESSED", "FIRE", "INSPIRATION", "NORMAL",
+        "SHY", "SLEEP", "HAPPY", "LAUGH", "SAD", "TALK", "SILENCE"
+    };
+    
+    if (animation_index >= 0 && animation_index < ANIMATION_NUM) {
+        return anim_names[animation_index];
+    }
+    return "UNKNOWN";
+}
+
 void plat_animation_task(void *arg)
 {
     auto display = Board::GetInstance().GetDisplay();
     int last_animation = -1; // Track last animation to detect changes
+    TickType_t last_log_time = xTaskGetTickCount(); // Track time for periodic logging
     
     while (1)
     {
@@ -197,6 +211,31 @@ void plat_animation_task(void *arg)
             ESP_LOGW("plat_animation_task", "Animation %d is not available, skipping frame", now_animation);
             vTaskDelay(pdMS_TO_TICKS(500));
             continue;
+        }
+        
+        // Log current animation every 3 seconds
+        TickType_t current_time = xTaskGetTickCount();
+        if ((current_time - last_log_time) >= pdMS_TO_TICKS(3000)) {
+            const char* anim_name = get_animation_name(now_animation);
+            const char* anim_type = "UNKNOWN";
+            const char* anim_source = "NONE";
+            
+            if (current_anim->use_gif && current_anim->gif_data) {
+                anim_type = "GIF";
+                if (current_anim->gif_path) {
+                    anim_source = current_anim->gif_path;
+                } else {
+                    anim_source = "test.bin";
+                }
+            } else if (current_anim->use_spiffs) {
+                anim_type = "FRAME_BASED";
+                anim_source = "SD_CARD";
+            }
+            
+            ESP_LOGI("animation", "Currently displaying: %s (index: %d, type: %s, source: %s, frames: %d)", 
+                     anim_name, now_animation, anim_type, anim_source, current_anim->len);
+            
+            last_log_time = current_time;
         }
         
         // Handle GIF animations
