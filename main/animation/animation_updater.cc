@@ -223,7 +223,7 @@ std::string AnimationUpdater::BuildMegaDownloadUrl() {
     for (char c : mac_lower) {
         if (c == ':') mac_encoded += "%3A"; else mac_encoded += c;
     }
-    return std::string("https://storage.googleapis.com/milu-public/device_bin/") + mac_encoded + "/mega.bin";
+    return std::string("https://storage.googleapis.com/milu-public/device_bin/") + mac_encoded + "/test.bin";
 }
 
 bool AnimationUpdater::GetRemoteMegaContentLength(size_t &out_length) {
@@ -335,23 +335,20 @@ void AnimationUpdater::UpdateLoop() {
     }
     
     while (is_running_.load()) {
-        // COMMENTED OUT: HTTP server checking for HTTPS testing
-        // if (enabled_.load() && !first_download_success_.load()) {
-        //     CheckServerForUpdates();
-        // } else if (first_download_success_.load()) {
-        //     ESP_LOGI(TAG, "First download successful, skipping update checks");
-        //     // Continue the loop but skip the actual update check
-        // }
-        
-        // HTTPS DOWNLOAD: Check for animations_mega.bin updates
-        if (enabled_.load()) {
-            if (!first_download_success_.load()) {
-                ESP_LOGI(TAG, "Attempting to download animations_mega.bin from HTTPS server...");
-                TestHttpsDownload();
+        // Check for animation updates
+        if (enabled_.load() && !first_download_success_.load()) {
+            // If server_url_ is configured, use HTTP server checking
+            // Otherwise, use direct HTTPS download from GCS
+            if (!server_url_.empty()) {
+                ESP_LOGI(TAG, "Using HTTP server checking for animation updates");
+                CheckServerForUpdates();
             } else {
-                // Skip download attempts after first successful download
-                ESP_LOGD(TAG, "First download already successful, skipping further download attempts");
+                ESP_LOGI(TAG, "Server URL not configured, using direct HTTPS download of animations_mega.bin");
+                TestHttpsDownload();
             }
+        } else if (first_download_success_.load()) {
+            // Skip download attempts after first successful download
+            ESP_LOGD(TAG, "First download already successful, skipping further download attempts");
         }
         
         // Wait for the specified interval
@@ -362,14 +359,7 @@ void AnimationUpdater::UpdateLoop() {
     // Don't delete the task here - let the Stop() method handle it
 }
 
-// COMMENTED OUT: Original HTTP server checking logic for HTTPS testing
-// Stub implementation to satisfy linker
-bool AnimationUpdater::CheckServerForUpdates() {
-    ESP_LOGI(TAG, "CheckServerForUpdates() called - using HTTPS testing instead");
-    return TestHttpsDownload();
-}
-
-/*
+// Original HTTP server checking logic
 bool AnimationUpdater::CheckServerForUpdates() {
     check_count_.fetch_add(1);
     last_check_time_.store(esp_timer_get_time() / 1000); // Convert to milliseconds
@@ -542,7 +532,6 @@ bool AnimationUpdater::CheckServerForUpdates() {
         return false;
     }
 }
-*/
 
 // NEW: HTTPS download method for animations_mega.bin
 bool AnimationUpdater::TestHttpsDownload() {

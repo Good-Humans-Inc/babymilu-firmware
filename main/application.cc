@@ -756,9 +756,8 @@ void Application::Start()
     }
 
     // Initialize and start the animation updater
-    // COMMENTED OUT: Disable animation updater to prevent automatic downloads
-    // AnimationUpdater::GetInstance().Initialize();
-    // AnimationUpdater::GetInstance().Start();
+    AnimationUpdater::GetInstance().Initialize();
+    AnimationUpdater::GetInstance().Start();
 
     // Check for new firmware version or get the MQTT broker address
     CheckNewVersion();
