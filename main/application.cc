@@ -1223,6 +1223,7 @@ void Application::OnClockTimer()
     }
 }
 
+
 // Add a async task to MainLoop
 void Application::Schedule(std::function<void()> callback)
 {
@@ -1574,7 +1575,9 @@ void Application::SetDeviceState(DeviceState state)
         break;
     case kDeviceStateListening:
         display->SetStatus(Lang::Strings::LISTENING);
-        display->SetEmotion("neutral");
+        // Use "surprised" emotion which maps to ANIMATION_INSPIRATION (inspiration.gif)
+        display->SetEmotion("surprised");
+        ESP_LOGI(TAG, "Listening state: showing inspiration animation");
         // Update the IoT states before sending the start listening command
 #if CONFIG_IOT_PROTOCOL_XIAOZHI
         UpdateIotStates();
