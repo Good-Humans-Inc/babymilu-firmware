@@ -755,9 +755,9 @@ void Application::Start()
         ESP_LOGI(TAG, "ML307 board detected, skipping WiFi message display");
     }
 
-    // Initialize and start the animation updater
-    AnimationUpdater::GetInstance().Initialize();
-    AnimationUpdater::GetInstance().Start();
+    // Initialize and start the animation updater - DISABLED
+    // AnimationUpdater::GetInstance().Initialize();
+    // AnimationUpdater::GetInstance().Start();
 
     // Check for new firmware version or get the MQTT broker address
     CheckNewVersion();

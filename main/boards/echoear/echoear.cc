@@ -595,14 +595,14 @@ private:
             vTaskDelay(pdMS_TO_TICKS(1000));  // Wait 1 second
             
             uint32_t current_count = EchoEar::touch_event_count_;
-            if (current_count > last_count) {
+            /*if (current_count > last_count) {
                 ESP_LOGI(TAG, "[TOUCH] Touch sensor status: Events detected! Total events: %lu (GPIO7)", 
                          (unsigned long)current_count);
                 last_count = current_count;
             } else {
                 ESP_LOGI(TAG, "[TOUCH] Touch sensor status: No new events (GPIO7), total=%lu", 
                          (unsigned long)current_count);
-            }
+            }*/
         }
     }
 
@@ -862,7 +862,7 @@ private:
                 int16_t gyro_z = sensor_data.gyr.z;
                 
                 // Log sensor data every 10 readings (every 10 seconds)
-                if (read_count % 10 == 0) {
+                /*if (read_count % 10 == 0) {
                     ESP_LOGI(TAG, "[BMI270] Reading #%lu - Accel: X=%d, Y=%d, Z=%d | Gyro: X=%d, Y=%d, Z=%d",
                              (unsigned long)read_count, accel_x, accel_y, accel_z,
                              gyro_x, gyro_y, gyro_z);
@@ -870,7 +870,7 @@ private:
                     // Log at DEBUG level for other readings
                     ESP_LOGD(TAG, "[BMI270] Accel: X=%d, Y=%d, Z=%d | Gyro: X=%d, Y=%d, Z=%d",
                              accel_x, accel_y, accel_z, gyro_x, gyro_y, gyro_z);
-                }
+                }*/
             } else {
                 error_count++;
                 ESP_LOGW(TAG, "[BMI270] Failed to read BMI270 data: %d (error count: %lu)", 

@@ -232,8 +232,8 @@ void plat_animation_task(void *arg)
                 anim_source = "SD_CARD";
             }
             
-            ESP_LOGI("animation", "Currently displaying: %s (index: %d, type: %s, source: %s, frames: %d)", 
-                     anim_name, now_animation, anim_type, anim_source, current_anim->len);
+            /*ESP_LOGI("animation", "Currently displaying: %s (index: %d, type: %s, source: %s, frames: %d)", 
+                     anim_name, now_animation, anim_type, anim_source, current_anim->len);*/
             
             last_log_time = current_time;
         }
@@ -304,8 +304,9 @@ void animation_check_volume_and_lock(int volume)
     } else if (volume > 0 && animation_locked_by_silence) {
         // Volume is restored, unlock animation
         animation_locked_by_silence = false;
-        ESP_LOGI("animation", "Volume restored to %d, unlocking animation", volume);
-        // Animation will be set by next SetEmotion call
+        ESP_LOGI("animation", "Volume restored to %d, unlocking animation and restoring to normal", volume);
+        // Immediately restore to static-normal animation
+        animation_set_now_animation(ANIMATION_STATIC_NORMAL);
     }
 }
 

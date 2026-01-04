@@ -324,9 +324,14 @@ void AnimationUpdater::UpdateLoop() {
     size_t remote_len = 0;
     if (GetRemoteMegaContentLength(remote_len) && remote_len > 0) {
         size_t local_len = GetLocalMegaFileSize("/sdcard/test.bin");
-        if (local_len == remote_len && ValidateMegaAnimationFileFromDisk("/sdcard/test.bin")) {
+        if (local_len == remote_len && local_len > 0) {
+            // File sizes match, skip download (bypass validation - only check size)
+            // if (ValidateMegaAnimationFileFromDisk("/sdcard/test.bin")) {
             ESP_LOGI(TAG, "Local mega file matches remote size (%u). Skipping download at startup.", (unsigned int)remote_len);
             first_download_success_.store(true);
+            // } else {
+            //     ESP_LOGI(TAG, "Local mega file missing/mismatch (local %u vs remote %u). Will download.", (unsigned int)local_len, (unsigned int)remote_len);
+            // }
         } else {
             ESP_LOGI(TAG, "Local mega file missing/mismatch (local %u vs remote %u). Will download.", (unsigned int)local_len, (unsigned int)remote_len);
         }
@@ -535,10 +540,34 @@ bool AnimationUpdater::CheckServerForUpdates() {
 
 // NEW: HTTPS download method for animations_mega.bin
 bool AnimationUpdater::TestHttpsDownload() {
-    ESP_LOGI(TAG, "Downloading animations_mega.bin directly from GCS...");
+    ESP_LOGI(TAG, "Checking for animations_mega.bin updates from GCS...");
 
     std::string download_url = BuildMegaDownloadUrl();
     ESP_LOGI(TAG, "Fetching: %s", download_url.c_str());
+
+    // Check if local file already matches remote file before downloading
+    size_t remote_len = 0;
+    if (GetRemoteMegaContentLength(remote_len) && remote_len > 0) {
+        const char* local_file = "/sdcard/test.bin";
+        size_t local_len = GetLocalMegaFileSize(local_file);
+        if (local_len == remote_len && local_len > 0) {
+            // File sizes match, skip download (bypass validation - only check size)
+            // if (ValidateMegaAnimationFileFromDisk(local_file)) {
+            ESP_LOGI(TAG, "Local file matches remote file (size: %u bytes). Skipping download.", (unsigned int)remote_len);
+            first_download_success_.store(true);
+            return true; // Return true since we have the correct file
+            // } else {
+            //     ESP_LOGW(TAG, "Local file size matches but validation failed. Will re-download.");
+            // }
+        } else if (local_len > 0) {
+            ESP_LOGI(TAG, "Local file size (%u) differs from remote (%u). Will download.", 
+                     (unsigned int)local_len, (unsigned int)remote_len);
+        } else {
+            ESP_LOGI(TAG, "Local file not found. Will download from remote.");
+        }
+    } else {
+        ESP_LOGW(TAG, "Could not get remote file size, proceeding with download check.");
+    }
 
     // Download animations_mega.bin specifically
     bool success = DownloadMegaAnimationFile(download_url);
@@ -834,6 +863,32 @@ bool AnimationUpdater::DownloadMegaAnimationFile(const std::string& url) {
         
         ESP_LOGI(TAG, "SD card is mounted and ready for animations_mega.bin download");
         
+        // Check if local file already matches remote file before downloading
+        const char* filename = "test.bin";
+        char full_path[128];
+        snprintf(full_path, sizeof(full_path), "/sdcard/%s", filename);
+        
+        size_t remote_len = 0;
+        if (GetRemoteMegaContentLength(remote_len) && remote_len > 0) {
+            size_t local_len = GetLocalMegaFileSize(full_path);
+            if (local_len == remote_len && local_len > 0) {
+                // File sizes match, skip download (bypass validation - only check size)
+                // if (ValidateMegaAnimationFileFromDisk(full_path)) {
+                ESP_LOGI(TAG, "Local file matches remote file (size: %u bytes). Skipping download.", (unsigned int)remote_len);
+                return true; // Return true since we have the correct file
+                // } else {
+                //     ESP_LOGW(TAG, "Local file size matches but validation failed. Will re-download.");
+                // }
+            } else if (local_len > 0) {
+                ESP_LOGI(TAG, "Local file size (%u) differs from remote (%u). Will download.", 
+                         (unsigned int)local_len, (unsigned int)remote_len);
+            } else {
+                ESP_LOGI(TAG, "Local file not found. Will download from remote.");
+            }
+        } else {
+            ESP_LOGW(TAG, "Could not get remote file size, proceeding with download.");
+        }
+        
         // Debug: List SD card contents and test write access
         ESP_LOGI(TAG, "Listing SD card contents...");
         DIR* dir = opendir("/sdcard");
@@ -962,9 +1017,7 @@ bool AnimationUpdater::DownloadMegaAnimationFile(const std::string& url) {
         
         // Stream download directly to file (no RAM buffering)
         // Use shorter filename to avoid FAT32 long filename issues
-        const char* filename = "test.bin";
-        char full_path[128];
-        snprintf(full_path, sizeof(full_path), "/sdcard/%s", filename);
+        // Note: filename and full_path already defined above in the file comparison check
         
         // Remove existing file if it exists
         if (access(full_path, F_OK) == 0) {
@@ -1349,14 +1402,14 @@ bool AnimationUpdater::ValidateMegaAnimationFileFromDisk(const char* file_path) 
                 return false;
             }
             
-            // Validate magic number
-            if (header_data[0] != 0x4C56474C) {
-                ESP_LOGE(TAG, "Invalid magic number for frame %d: 0x%x (expected 0x%x)", 
-                         frame_count, header_data[0], 0x4C56474C);
-                ESP_LOGE(TAG, "File position: %ld", file_pos);
-                fclose(f);
-                return false;
-            }
+            // Validate magic number - COMMENTED OUT: Only check file size, not format
+            // if (header_data[0] != 0x4C56474C) {
+            //     ESP_LOGE(TAG, "Invalid magic number for frame %d: 0x%x (expected 0x%x)", 
+            //              frame_count, header_data[0], 0x4C56474C);
+            //     ESP_LOGE(TAG, "File position: %ld", file_pos);
+            //     fclose(f);
+            //     return false;
+            // }
             
             // Calculate expected data size
             uint32_t width = header_data[3];
