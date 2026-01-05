@@ -9,7 +9,7 @@ from PIL import Image, ImageSequence
 
 # Configuration
 GIF_FOLDER = "gif_folder"
-CROP_BOX = (285, 266, 739, 720)  # (left, top, right, bottom)
+CROP_BOX = (244, 219, 780, 755)  # (left, top, right, bottom)
 TARGET_SIZE = (360, 360)  # Final size after resize
 
 def crop_gif(input_path, output_path):

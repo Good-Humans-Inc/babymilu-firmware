@@ -7,6 +7,7 @@
 #include "config.h"
 #include <esp_log.h>
 #include <esp_timer.h>
+#include <esp_system.h>
 #include <cJSON.h>
 #include <cstring>
 #include <algorithm>
@@ -65,7 +66,7 @@ void AnimationUpdater::Start() {
         "animation_updater",
         16384,  // 16KB stack to accommodate HTTP/TLS and validation
         this,
-        2,     // Low priority
+        1,     // Very low priority to avoid interfering with audio processing
         &update_task_handle_
     );
     
@@ -226,7 +227,7 @@ std::string AnimationUpdater::BuildMegaDownloadUrl() {
     return std::string("https://storage.googleapis.com/milu-public/device_bin/") + mac_encoded + "/test.bin";
 }
 
-bool AnimationUpdater::GetRemoteMegaContentLength(size_t &out_length) {
+bool AnimationUpdater::GetRemoteContentLength(const std::string& url, size_t &out_length) {
     try {
         auto& board = Board::GetInstance();
         auto http = std::unique_ptr<Http>(board.CreateHttp());
@@ -239,8 +240,6 @@ bool AnimationUpdater::GetRemoteMegaContentLength(size_t &out_length) {
         http->SetHeader("Accept", "*/*");
         http->SetHeader("Accept-Encoding", "identity");
         http->SetTimeout(10000);
-
-        std::string url = BuildMegaDownloadUrl();
 
         // Some HTTP stacks may not support HEAD. Try GET without body if needed.
         bool opened = http->Open("HEAD", url);
@@ -256,10 +255,12 @@ bool AnimationUpdater::GetRemoteMegaContentLength(size_t &out_length) {
         int status_code = http->GetStatusCode();
         if (status_code != 200) {
             ESP_LOGW(TAG, "HEAD/GET returned status %d", status_code);
+            http->Close();
             return false;
         }
 
         size_t content_length = http->GetBodyLength();
+        http->Close();
         if (content_length == 0) {
             ESP_LOGW(TAG, "Remote Content-Length is 0 or unknown");
             return false;
@@ -267,9 +268,14 @@ bool AnimationUpdater::GetRemoteMegaContentLength(size_t &out_length) {
         out_length = content_length;
         return true;
     } catch (...) {
-        ESP_LOGE(TAG, "Exception in GetRemoteMegaContentLength");
+        ESP_LOGE(TAG, "Exception in GetRemoteContentLength");
         return false;
     }
+}
+
+bool AnimationUpdater::GetRemoteMegaContentLength(size_t &out_length) {
+    std::string url = BuildMegaDownloadUrl();
+    return GetRemoteContentLength(url, out_length);
 }
 
 size_t AnimationUpdater::GetLocalMegaFileSize(const char* file_path) {
@@ -316,52 +322,172 @@ void AnimationUpdater::UpdateTask(void* parameter) {
 void AnimationUpdater::UpdateLoop() {
     ESP_LOGI(TAG, "Animation updater task started");
     
-    // Wait a bit before first check to let the system stabilize
-    vTaskDelay(pdMS_TO_TICKS(5000)); // 5 seconds
+    // Wait 10 seconds to ensure network is fully ready
+    ESP_LOGI(TAG, "Waiting 10 seconds before starting download...");
+    vTaskDelay(pdMS_TO_TICKS(10000));
     
-    // Startup guard: if local file exists and matches remote content length, skip immediate re-download.
-    // Still re-check periodically per check_interval.
-    size_t remote_len = 0;
-    if (GetRemoteMegaContentLength(remote_len) && remote_len > 0) {
-        size_t local_len = GetLocalMegaFileSize("/sdcard/test.bin");
-        if (local_len == remote_len && local_len > 0) {
-            // File sizes match, skip download (bypass validation - only check size)
-            // if (ValidateMegaAnimationFileFromDisk("/sdcard/test.bin")) {
-            ESP_LOGI(TAG, "Local mega file matches remote size (%u). Skipping download at startup.", (unsigned int)remote_len);
-            first_download_success_.store(true);
-            // } else {
-            //     ESP_LOGI(TAG, "Local mega file missing/mismatch (local %u vs remote %u). Will download.", (unsigned int)local_len, (unsigned int)remote_len);
-            // }
+    // Hardcoded URL for test.bin (using storage.googleapis.com for direct download, avoids 302 redirect)
+    std::string url = "https://storage.googleapis.com/milu-public/device_bin/90%3Ae5%3Ab1%3Aa8%3Aad%3A70/test.bin";
+    ESP_LOGI(TAG, "Checking for updates from: %s", url.c_str());
+    
+    // Ensure SD card is available
+    if (!SdCard::IsMounted()) {
+        esp_err_t init_ret = SdCard::Initialize();
+        if (init_ret != ESP_OK) {
+            ESP_LOGE(TAG, "SD card not available, cannot download");
+            is_running_.store(false);
+            update_task_handle_ = nullptr;
+            vTaskDelete(NULL);
+            return;
+        }
+    }
+    
+    const char* file_path = "/sdcard/test.bin";
+    
+    // Check if remote file size matches local file size before downloading
+    ESP_LOGI(TAG, "Checking remote file size...");
+    size_t remote_size = 0;
+    if (GetRemoteContentLength(url, remote_size) && remote_size > 0) {
+        size_t local_size = GetLocalMegaFileSize(file_path);
+        ESP_LOGI(TAG, "Remote file size: %u bytes, Local file size: %u bytes", 
+                 (unsigned int)remote_size, (unsigned int)local_size);
+        
+        if (local_size == remote_size && local_size > 0) {
+            ESP_LOGI(TAG, "Local file size matches remote file size. Skipping download.");
+            ESP_LOGI(TAG, "No download needed - file is already up to date.");
+            is_running_.store(false);
+            update_task_handle_ = nullptr;
+            vTaskDelete(NULL);
+            return;
+        } else if (local_size > 0) {
+            ESP_LOGI(TAG, "Local file size differs from remote. Will download new version.");
         } else {
-            ESP_LOGI(TAG, "Local mega file missing/mismatch (local %u vs remote %u). Will download.", (unsigned int)local_len, (unsigned int)remote_len);
+            ESP_LOGI(TAG, "Local file not found. Will download from remote.");
         }
     } else {
-        ESP_LOGW(TAG, "Could not get remote Content-Length at startup; proceeding with normal logic.");
+        ESP_LOGW(TAG, "Could not get remote file size, proceeding with download check.");
     }
     
-    while (is_running_.load()) {
-        // Check for animation updates
-        if (enabled_.load() && !first_download_success_.load()) {
-            // If server_url_ is configured, use HTTP server checking
-            // Otherwise, use direct HTTPS download from GCS
-            if (!server_url_.empty()) {
-                ESP_LOGI(TAG, "Using HTTP server checking for animation updates");
-                CheckServerForUpdates();
-            } else {
-                ESP_LOGI(TAG, "Server URL not configured, using direct HTTPS download of animations_mega.bin");
-                TestHttpsDownload();
-            }
-        } else if (first_download_success_.load()) {
-            // Skip download attempts after first successful download
-            ESP_LOGD(TAG, "First download already successful, skipping further download attempts");
+    ESP_LOGI(TAG, "Downloading from: %s", url.c_str());
+    
+    // Create HTTP client
+    auto& board = Board::GetInstance();
+    auto http = std::unique_ptr<Http>(board.CreateHttp());
+    if (!http) {
+        ESP_LOGE(TAG, "Failed to create HTTP client");
+        is_running_.store(false);
+        update_task_handle_ = nullptr;
+        vTaskDelete(NULL);
+        return;
+    }
+    
+    http->SetHeader("User-Agent", "Xiaozhi-Animation-Updater/1.0");
+    http->SetHeader("Accept", "application/octet-stream");
+    http->SetHeader("Accept-Encoding", "identity");
+    http->SetTimeout(600000); // 10 minute timeout
+    
+    ESP_LOGI(TAG, "Attempting to open HTTP connection...");
+    // Open connection
+    if (!http->Open("GET", url)) {
+        ESP_LOGE(TAG, "Failed to open HTTP connection");
+        is_running_.store(false);
+        update_task_handle_ = nullptr;
+        vTaskDelete(NULL);
+        return;
+    }
+    
+    ESP_LOGI(TAG, "HTTP connection opened successfully");
+    int status_code = http->GetStatusCode();
+    ESP_LOGI(TAG, "HTTP status code: %d", status_code);
+    if (status_code != 200) {
+        http->Close();
+        is_running_.store(false);
+        update_task_handle_ = nullptr;
+        vTaskDelete(NULL);
+        return;
+    }
+    
+    // Remove existing file
+    if (access(file_path, F_OK) == 0) {
+        ESP_LOGI(TAG, "Removing existing file before download...");
+        unlink(file_path);
+    }
+    
+    // Open file for writing
+    FILE* file = fopen(file_path, "wb");
+    if (!file) {
+        ESP_LOGE(TAG, "Failed to open file for writing: %s", file_path);
+        http->Close();
+        is_running_.store(false);
+        update_task_handle_ = nullptr;
+        vTaskDelete(NULL);
+        return;
+    }
+    
+    // Download and write to file
+    std::unique_ptr<char[]> buffer(new char[8192]);
+    size_t total_read = 0;
+    
+    ESP_LOGI(TAG, "Starting download stream to %s...", file_path);
+    
+    while (true) {
+        int bytes_read = http->Read(buffer.get(), 8192);
+        if (bytes_read <= 0) {
+            break; // End of data
         }
         
-        // Wait for the specified interval
-        vTaskDelay(pdMS_TO_TICKS(check_interval_seconds_ * 1000));
+        size_t written = fwrite(buffer.get(), 1, bytes_read, file);
+        if (written != (size_t)bytes_read) {
+            ESP_LOGE(TAG, "Failed to write to file");
+            fclose(file);
+            unlink(file_path);
+            http->Close();
+            is_running_.store(false);
+            update_task_handle_ = nullptr;
+            vTaskDelete(NULL);
+            return;
+        }
+        
+        total_read += bytes_read;
+        
+        // Log progress every 50KB (or at first 1KB to show download started)
+        if (total_read == 1024 || total_read % 51200 == 0) {
+            ESP_LOGI(TAG, "Download progress: %u bytes downloaded", (unsigned int)total_read);
+        }
     }
     
-    ESP_LOGI(TAG, "Animation updater task ended");
-    // Don't delete the task here - let the Stop() method handle it
+    ESP_LOGI(TAG, "Download stream completed: %u bytes received", (unsigned int)total_read);
+    ESP_LOGI(TAG, "Flushing file buffer...");
+    fflush(file);
+    
+    ESP_LOGI(TAG, "Syncing file to disk...");
+    int fd = fileno(file);
+    if (fd >= 0) {
+        fsync(fd);
+    }
+    
+    ESP_LOGI(TAG, "Closing file handle...");
+    fclose(file);
+    
+    ESP_LOGI(TAG, "Closing HTTP connection...");
+    http->Close();
+    
+    ESP_LOGI(TAG, "✅ Download completed: %u bytes saved to %s", (unsigned int)total_read, file_path);
+    
+    // Reload animations from SD card before reboot
+    ESP_LOGI(TAG, "Reloading animations from SD card before reboot...");
+    animation_load_sd_card_animations();
+    
+    ESP_LOGI(TAG, "Animation update completed successfully. Rebooting device in 2 seconds...");
+    vTaskDelay(pdMS_TO_TICKS(2000)); // Give time for logs to flush
+    
+    ESP_LOGI(TAG, "Rebooting now...");
+    esp_restart();
+    
+    // Should never reach here
+    is_running_.store(false);
+    update_task_handle_ = nullptr;
+    vTaskDelete(NULL); // Delete this task
 }
 
 // Original HTTP server checking logic
@@ -1049,6 +1175,8 @@ bool AnimationUpdater::DownloadMegaAnimationFile(const std::string& url) {
         uint32_t last_read_time = timeout_start;
         uint32_t read_timeout = 60000; // 1 minute timeout between reads (to detect stalled downloads)
         
+        ESP_LOGI(TAG, "Starting download stream to %s...", full_path);
+        
         while (download_success) {
             // Check for overall timeout
             uint32_t current_time = esp_timer_get_time() / 1000;
@@ -1083,7 +1211,7 @@ bool AnimationUpdater::DownloadMegaAnimationFile(const std::string& url) {
                     break;
                 } else {
                     // bytes_read == 0: connection closed or no more data
-                    ESP_LOGI(TAG, "Download completed (connection closed), read %u bytes total", (unsigned int)total_read);
+                    ESP_LOGI(TAG, "Download stream completed (connection closed), read %u bytes total", (unsigned int)total_read);
                     
                     // If we expected more data, warn about incomplete download
                     if (!unknown_length && total_read < content_length) {
@@ -1110,8 +1238,8 @@ bool AnimationUpdater::DownloadMegaAnimationFile(const std::string& url) {
             
             total_read += bytes_read;
             
-            // Log progress every 50KB
-            if (total_read % 51200 == 0) {
+            // Log progress every 50KB (or at first 1KB to show download started)
+            if (total_read == 1024 || total_read % 51200 == 0) {
                 if (unknown_length) {
                     ESP_LOGI(TAG, "Download progress: %u bytes downloaded", (unsigned int)total_read);
                 } else {
@@ -1131,16 +1259,21 @@ bool AnimationUpdater::DownloadMegaAnimationFile(const std::string& url) {
         }
         
         // Flush and sync file to ensure all data is written to disk
+        ESP_LOGI(TAG, "Flushing file buffer for %s...", filename);
         fflush(file);
         
         // Sync file to SD card (important for SD card writes)
         // ESP-IDF provides fsync through unistd.h
+        ESP_LOGI(TAG, "Syncing file to disk...");
         int fd = fileno(file);
         if (fd >= 0) {
             fsync(fd);
         }
         
+        ESP_LOGI(TAG, "Closing file handle...");
         fclose(file);
+        
+        ESP_LOGI(TAG, "Closing HTTP connection...");
         http->Close();
         
         if (!download_success) {
@@ -1175,12 +1308,19 @@ bool AnimationUpdater::DownloadMegaAnimationFile(const std::string& url) {
         // Additional sync delay for SD card to ensure data is fully written
         vTaskDelay(pdMS_TO_TICKS(500));
         
-        ESP_LOGI(TAG, "Successfully downloaded and saved %s (%u bytes)", filename, (unsigned int)total_read);
+        ESP_LOGI(TAG, "✅ File written and closed successfully: %s (%u bytes)", filename, (unsigned int)total_read);
         
         // Reload animations from SD card
         ESP_LOGI(TAG, "Reloading animations from SD card...");
         animation_load_sd_card_animations();
         
+        ESP_LOGI(TAG, "Animation update completed successfully. Rebooting device in 2 seconds...");
+        vTaskDelay(pdMS_TO_TICKS(2000)); // Give time for logs to flush
+        
+        ESP_LOGI(TAG, "Rebooting now...");
+        esp_restart();
+        
+        // Should never reach here
         return true;
         
     } catch (const std::exception& e) {
@@ -1525,3 +1665,4 @@ void AnimationUpdater::SetCurrentVersion(const std::string& version) {
     SaveConfiguration();  // Save to NVS storage
     ESP_LOGI(TAG, "Animation version updated to: %s", version.c_str());
 }
+

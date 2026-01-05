@@ -1093,9 +1093,9 @@ public:
         if (level > 100) level = 100;
         
         // Log battery status
-        ESP_LOGI(TAG, "[BATTERY] Voltage: %d mV, Current: %d mA, Level: %d%%, Charging: %s, Discharging: %s",
+        /*ESP_LOGI(TAG, "[BATTERY] Voltage: %d mV, Current: %d mA, Level: %d%%, Charging: %s, Discharging: %s",
                  voltage_mv, current_ma, level, charging ? "yes" : "no", discharging ? "yes" : "no");
-        
+        */
         return true;
     }
 
