@@ -20,6 +20,7 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include <errno.h>
+#include <unistd.h>  // For unlink() and access()
 #include <wifi_station.h>
 
 // Overlay pixel format magic number (0x4F50584C = "OPXL" in ASCII)
@@ -1777,8 +1778,16 @@ bool animation_load_talk_from_sd_card(void)
  */
 bool animation_extract_gif_from_test_bin(const char* gif_name, uint8_t** data, size_t* size)
 {
+    // Static flag to track if we've already failed to read the header
+    static bool header_read_failed = false;
+    
     if (!gif_name || !data || !size) {
         ESP_LOGE("animation", "Invalid parameters for GIF extraction");
+        return false;
+    }
+    
+    // If we've already failed to read the header, skip immediately
+    if (header_read_failed) {
         return false;
     }
     
@@ -1830,6 +1839,16 @@ bool animation_extract_gif_from_test_bin(const char* gif_name, uint8_t** data, s
         fread(&data_length, sizeof(uint32_t), 1, f) != 1) {
         ESP_LOGE("animation", "Failed to read test.bin header");
         fclose(f);
+        
+        // First failure: delete test.bin and set flag to skip future attempts
+        ESP_LOGE("animation", "Deleting corrupted test.bin file and skipping animation loading");
+        if (unlink(test_bin_path) == 0) {
+            ESP_LOGI("animation", "Successfully deleted corrupted test.bin: %s", test_bin_path);
+        } else {
+            ESP_LOGW("animation", "Failed to delete test.bin: %s (error: %s)", test_bin_path, strerror(errno));
+        }
+        
+        header_read_failed = true;
         return false;
     }
     
@@ -2014,6 +2033,16 @@ bool animation_load_gifs_from_test_bin(void)
                 free(gif_data);
             }
         } else {
+            // Check if test.bin was deleted (header read failure)
+            // If this is the first GIF and test.bin doesn't exist, it means header read failed
+            if (i == 0) {
+                // Check if test.bin exists by trying to access it
+                if (access("/sdcard/test.bin", F_OK) != 0 && access("/sdcard/TEST.BIN", F_OK) != 0) {
+                    // test.bin was deleted due to header read failure
+                    ESP_LOGE("animation", "test.bin header read failed and file was deleted, skipping all GIF loading");
+                    return false;
+                }
+            }
             ESP_LOGW("animation", "⚠ GIF not found in test.bin: %s", gif_names[i]);
         }
     }
