@@ -15,7 +15,7 @@ except ImportError:
     sys.exit(1)
 
 
-def publish_test_message(broker_host, broker_port, topic, message_type="test", message_text="hello world"):
+def publish_test_message(broker_host, broker_port, topic, message_type="test", message_text="hello world", volume=None):
     """
     Publish a test message to the MQTT broker.
     
@@ -25,6 +25,7 @@ def publish_test_message(broker_host, broker_port, topic, message_type="test", m
         topic: MQTT topic to publish to
         message_type: Type field for the JSON message
         message_text: Message content
+        volume: Volume value (0-100) for adjust_volume type
     """
     # Create MQTT client
     client = mqtt.Client()
@@ -46,9 +47,19 @@ def publish_test_message(broker_host, broker_port, topic, message_type="test", m
     
     # Create JSON message
     payload = {
-        "type": message_type,
-        "message": message_text
+        "type": message_type
     }
+    
+    # For adjust_volume type, use volume field (preferred) or message field (fallback)
+    if message_type == "adjust_volume" and volume is not None:
+        if volume < 0 or volume > 100:
+            print(f"✗ Error: Volume must be between 0-100, got: {volume}")
+            sys.exit(1)
+        payload["volume"] = volume
+        payload["message"] = str(volume)  # Also include in message for compatibility
+    else:
+        payload["message"] = message_text
+    
     json_payload = json.dumps(payload)
     
     print(f"Connecting to broker: {broker_host}:{broker_port}")
@@ -96,6 +107,12 @@ Examples:
   
   # Trigger remote animation update
   python test_mqtt_publish.py --type "remote_anim_update" --message ""
+  
+  # Adjust volume to 50
+  python test_mqtt_publish.py --type "adjust_volume" --volume 50
+  
+  # Adjust volume to 75
+  python test_mqtt_publish.py --type "adjust_volume" --volume 75
         """
     )
     
@@ -131,6 +148,13 @@ Examples:
     )
     
     parser.add_argument(
+        "--volume",
+        type=int,
+        default=None,
+        help="Volume value (0-100) for adjust_volume type (default: None)"
+    )
+    
+    parser.add_argument(
         "--topic",
         default=None,
         help="Full MQTT topic (overrides --mac if provided)"
@@ -146,20 +170,34 @@ Examples:
         mac = args.mac.lower()
         topic = f"xiaozhi/{mac}/down"
     
+    # Validate volume if adjust_volume type is used
+    if args.type == "adjust_volume":
+        if args.volume is None:
+            print("✗ Error: --volume is required when using --type 'adjust_volume'")
+            sys.exit(1)
+        if args.volume < 0 or args.volume > 100:
+            print(f"✗ Error: Volume must be between 0-100, got: {args.volume}")
+            sys.exit(1)
+    
     # Publish the message
     publish_test_message(
         broker_host=args.broker,
         broker_port=args.port,
         topic=topic,
         message_type=args.type,
-        message_text=args.message
+        message_text=args.message,
+        volume=args.volume
     )
     
     print("-" * 60)
     print("✓ Script completed successfully")
     print("\nCheck device logs for:")
     print("  - MQTT RX topic=... len=... prefix=...")
-    print("  - Processing message type: test")
+    if args.type == "adjust_volume":
+        print(f"  - Processing message type: adjust_volume")
+        print(f"  - Volume adjusted to {args.volume}")
+    else:
+        print(f"  - Processing message type: {args.type}")
 
 
 if __name__ == "__main__":

@@ -34,6 +34,7 @@
 #endif
 
 #include <cstring>
+#include <cstdlib>
 #include <esp_log.h>
 #include <cJSON.h>
 #include <driver/gpio.h>
@@ -1042,6 +1043,38 @@ void Application::Start()
                 });
             } else {
                 ESP_LOGW(TAG, "play_url missing 'url' field");
+            }
+        } else if (strcmp(type->valuestring, "adjust_volume") == 0) {
+            // Handle volume adjustment: accepts "volume" (number) or "message" (number as string)
+            auto volume_item = cJSON_GetObjectItem(root, "volume");
+            int target_volume = -1;
+            
+            if (cJSON_IsNumber(volume_item)) {
+                target_volume = volume_item->valueint;
+            } else {
+                // Fallback to "message" field for compatibility with test script pattern
+                auto message_item = cJSON_GetObjectItem(root, "message");
+                if (cJSON_IsString(message_item)) {
+                    // Try to parse message as integer
+                    target_volume = atoi(message_item->valuestring);
+                } else if (cJSON_IsNumber(message_item)) {
+                    target_volume = message_item->valueint;
+                }
+            }
+            
+            if (target_volume >= 0 && target_volume <= 100) {
+                ESP_LOGI(TAG, "Received adjust_volume command, setting volume to %d", target_volume);
+                Schedule([this, target_volume]() {
+                    auto codec = Board::GetInstance().GetAudioCodec();
+                    if (codec != nullptr) {
+                        codec->SetOutputVolume(target_volume);
+                        ESP_LOGI(TAG, "Volume adjusted to %d", target_volume);
+                    } else {
+                        ESP_LOGW(TAG, "Cannot adjust volume: audio codec not available");
+                    }
+                });
+            } else {
+                ESP_LOGW(TAG, "adjust_volume requires volume value between 0-100, got: %d", target_volume);
             }
         } else {
             ESP_LOGW(TAG, "Unknown message type: %s", type->valuestring);
