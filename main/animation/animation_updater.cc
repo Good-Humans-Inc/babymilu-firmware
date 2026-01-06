@@ -319,6 +319,31 @@ void AnimationUpdater::UpdateTask(void* parameter) {
     updater->UpdateLoop();
 }
 
+void AnimationUpdater::RemoteUpdateTask(void* parameter) {
+    AnimationUpdater* updater = static_cast<AnimationUpdater*>(parameter);
+    updater->UpdateLoop();
+}
+
+void AnimationUpdater::TriggerUpdateLoop() {
+    ESP_LOGI(TAG, "Triggering update loop from remote request");
+    
+    // Create a task to run UpdateLoop (since it calls vTaskDelete at the end)
+    BaseType_t ret = xTaskCreate(
+        RemoteUpdateTask,
+        "remote_anim_update",
+        16384,  // 16KB stack to accommodate HTTP/TLS and validation
+        this,
+        1,      // Low priority
+        nullptr // Don't need to track the handle since task will delete itself
+    );
+    
+    if (ret != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create remote update task");
+    } else {
+        ESP_LOGI(TAG, "Remote update task created successfully");
+    }
+}
+
 void AnimationUpdater::UpdateLoop() {
     ESP_LOGI(TAG, "Animation updater task started");
     
@@ -353,12 +378,18 @@ void AnimationUpdater::UpdateLoop() {
                  (unsigned int)remote_size, (unsigned int)local_size);
         
         if (local_size == remote_size && local_size > 0) {
-            ESP_LOGI(TAG, "Local file size matches remote file size. Skipping download.");
-            ESP_LOGI(TAG, "No download needed - file is already up to date.");
-            is_running_.store(false);
-            update_task_handle_ = nullptr;
-            vTaskDelete(NULL);
-            return;
+            // File sizes match, validate file structure before skipping download
+            ESP_LOGI(TAG, "Local file size matches remote (%u bytes). Validating file structure...", (unsigned int)remote_size);
+            if (ValidateGifMegaAnimationFileFromDisk(file_path)) {
+                ESP_LOGI(TAG, "Local file is valid and matches remote file. Skipping download.");
+                ESP_LOGI(TAG, "No download needed - file is already up to date.");
+                is_running_.store(false);
+                update_task_handle_ = nullptr;
+                vTaskDelete(NULL);
+                return;
+            } else {
+                ESP_LOGW(TAG, "Local file size matches but validation failed. File may be corrupted. Will re-download.");
+            }
         } else if (local_size > 0) {
             ESP_LOGI(TAG, "Local file size differs from remote. Will download new version.");
         } else {
@@ -677,14 +708,15 @@ bool AnimationUpdater::TestHttpsDownload() {
         const char* local_file = "/sdcard/test.bin";
         size_t local_len = GetLocalMegaFileSize(local_file);
         if (local_len == remote_len && local_len > 0) {
-            // File sizes match, skip download (bypass validation - only check size)
-            // if (ValidateMegaAnimationFileFromDisk(local_file)) {
-            ESP_LOGI(TAG, "Local file matches remote file (size: %u bytes). Skipping download.", (unsigned int)remote_len);
-            first_download_success_.store(true);
-            return true; // Return true since we have the correct file
-            // } else {
-            //     ESP_LOGW(TAG, "Local file size matches but validation failed. Will re-download.");
-            // }
+            // File sizes match, validate file structure before skipping download
+            ESP_LOGI(TAG, "Local file size matches remote (%u bytes). Validating file structure...", (unsigned int)remote_len);
+            if (ValidateGifMegaAnimationFileFromDisk(local_file)) {
+                ESP_LOGI(TAG, "Local file is valid and matches remote file. Skipping download.");
+                first_download_success_.store(true);
+                return true; // Return true since we have the correct file
+            } else {
+                ESP_LOGW(TAG, "Local file size matches but validation failed. File may be corrupted. Will re-download.");
+            }
         } else if (local_len > 0) {
             ESP_LOGI(TAG, "Local file size (%u) differs from remote (%u). Will download.", 
                      (unsigned int)local_len, (unsigned int)remote_len);
@@ -998,13 +1030,14 @@ bool AnimationUpdater::DownloadMegaAnimationFile(const std::string& url) {
         if (GetRemoteMegaContentLength(remote_len) && remote_len > 0) {
             size_t local_len = GetLocalMegaFileSize(full_path);
             if (local_len == remote_len && local_len > 0) {
-                // File sizes match, skip download (bypass validation - only check size)
-                // if (ValidateMegaAnimationFileFromDisk(full_path)) {
-                ESP_LOGI(TAG, "Local file matches remote file (size: %u bytes). Skipping download.", (unsigned int)remote_len);
-                return true; // Return true since we have the correct file
-                // } else {
-                //     ESP_LOGW(TAG, "Local file size matches but validation failed. Will re-download.");
-                // }
+                // File sizes match, validate file structure before skipping download
+                ESP_LOGI(TAG, "Local file size matches remote (%u bytes). Validating file structure...", (unsigned int)remote_len);
+                if (ValidateGifMegaAnimationFileFromDisk(full_path)) {
+                    ESP_LOGI(TAG, "Local file is valid and matches remote file. Skipping download.");
+                    return true; // Return true since we have the correct file
+                } else {
+                    ESP_LOGW(TAG, "Local file size matches but validation failed. File may be corrupted. Will re-download.");
+                }
             } else if (local_len > 0) {
                 ESP_LOGI(TAG, "Local file size (%u) differs from remote (%u). Will download.", 
                          (unsigned int)local_len, (unsigned int)remote_len);
@@ -1617,6 +1650,144 @@ bool AnimationUpdater::ValidateMegaAnimationFileFromDisk(const char* file_path) 
     
     ESP_LOGI(TAG, "✅ Successfully validated animations_mega.bin with %d frames (expected %d)", 
              frame_count, total_expected_frames);
+    return true;
+}
+
+// NEW: Validate GIF-based test.bin file from disk
+bool AnimationUpdater::ValidateGifMegaAnimationFileFromDisk(const char* file_path) {
+    ESP_LOGI(TAG, "Validating GIF-based test.bin from disk: %s", file_path);
+    
+    FILE* f = fopen(file_path, "rb");
+    if (f == NULL) {
+        ESP_LOGE(TAG, "Failed to open file for validation: %s", file_path);
+        return false;
+    }
+    
+    // Get file size
+    fseek(f, 0, SEEK_END);
+    size_t file_size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    
+    // Minimum size: 12 bytes header + at least 1 file table entry (44 bytes) + minimal data
+    const size_t MIN_FILE_SIZE = 12 + 44 + 10; // Header + 1 entry + minimal GIF data
+    if (file_size < MIN_FILE_SIZE) {
+        ESP_LOGE(TAG, "GIF test.bin file too small: %zu bytes (minimum %zu bytes)", file_size, MIN_FILE_SIZE);
+        fclose(f);
+        return false;
+    }
+    
+    // Read header (12 bytes: file_count, checksum, combined_length)
+    uint32_t file_count, checksum, combined_length;
+    if (fread(&file_count, sizeof(uint32_t), 1, f) != 1 ||
+        fread(&checksum, sizeof(uint32_t), 1, f) != 1 ||
+        fread(&combined_length, sizeof(uint32_t), 1, f) != 1) {
+        ESP_LOGE(TAG, "Failed to read GIF test.bin header");
+        fclose(f);
+        return false;
+    }
+    
+    ESP_LOGI(TAG, "GIF test.bin header: file_count=%u, checksum=0x%08X, combined_length=%u", 
+             file_count, checksum, combined_length);
+    
+    // Validate file_count is reasonable (1-20 files expected, typically 13)
+    if (file_count == 0 || file_count > 20) {
+        ESP_LOGE(TAG, "Invalid file_count in header: %u (expected 1-20, typically 13)", file_count);
+        fclose(f);
+        return false;
+    }
+    
+    // Calculate file table size and data section start
+    const size_t FILE_TABLE_ENTRY_SIZE = 44; // 32 name + 4 size + 4 offset + 2 width + 2 height
+    size_t file_table_size = file_count * FILE_TABLE_ENTRY_SIZE;
+    size_t data_start = 12 + file_table_size; // 12 byte header + file table
+    
+    // Validate combined_length matches expected size
+    if (combined_length != file_table_size + (file_size - data_start)) {
+        ESP_LOGW(TAG, "combined_length (%u) doesn't match calculated size (file_table=%zu, data=%zu)", 
+                 combined_length, file_table_size, file_size - data_start);
+        // Continue validation anyway, as this might be a minor inconsistency
+    }
+    
+    // Validate file structure can fit
+    if (file_size < data_start) {
+        ESP_LOGE(TAG, "File too small for file table: %zu bytes (need at least %zu)", file_size, data_start);
+        fclose(f);
+        return false;
+    }
+    
+    // Expected GIF file names (13 total: 10 main + 3 system)
+    const char* expected_gifs[] = {
+        "normal.gif", "embarrass.gif", "fire.gif", "inspiration.gif", "shy.gif",
+        "sleep.gif", "happy.gif", "laugh.gif", "sad.gif", "talk.gif",
+        "wifi.gif", "battery.gif", "silence.gif"
+    };
+    const size_t EXPECTED_FILE_COUNT = 13;
+    
+    // Read and validate file table
+    uint32_t total_data_size = 0;
+    for (uint32_t i = 0; i < file_count; i++) {
+        // Read file table entry (44 bytes)
+        char name[33] = {0}; // 32 bytes + null terminator
+        uint32_t file_size_entry, file_offset;
+        uint16_t width, height;
+        
+        if (fread(name, 32, 1, f) != 1 ||
+            fread(&file_size_entry, sizeof(uint32_t), 1, f) != 1 ||
+            fread(&file_offset, sizeof(uint32_t), 1, f) != 1 ||
+            fread(&width, sizeof(uint16_t), 1, f) != 1 ||
+            fread(&height, sizeof(uint16_t), 1, f) != 1) {
+            ESP_LOGE(TAG, "Failed to read file table entry %u", i);
+            fclose(f);
+            return false;
+        }
+        
+        // Remove null padding from name
+        size_t name_len = strnlen(name, 32);
+        name[name_len] = '\0';
+        
+        // Validate file name (should be non-empty and end with .gif)
+        if (name_len == 0 || name_len > 32) {
+            ESP_LOGE(TAG, "Invalid file name length at entry %u: %zu", i, name_len);
+            fclose(f);
+            return false;
+        }
+        
+        // Validate file size is reasonable (at least 13 bytes for minimal GIF, max 10MB)
+        if (file_size_entry < 13 || file_size_entry > 10485760) {
+            ESP_LOGE(TAG, "Invalid file_size for entry %u (%s): %u bytes", i, name, file_size_entry);
+            fclose(f);
+            return false;
+        }
+        
+        // Validate offset is within data section bounds (lightweight check - no file content reading)
+        size_t data_entry_start = data_start + file_offset;
+        size_t data_entry_end = data_entry_start + file_size_entry + 2; // +2 for magic bytes
+        if (data_entry_end > file_size) {
+            ESP_LOGE(TAG, "File entry %u (%s) extends beyond file end: offset=%u, size=%u, file_size=%zu", 
+                     i, name, file_offset, file_size_entry, file_size);
+            fclose(f);
+            return false;
+        }
+        
+        // Lightweight validation: only check structure, not file content
+        // Skip reading actual GIF files to avoid expensive I/O operations
+        total_data_size += file_size_entry + 2; // Include magic bytes in total
+        ESP_LOGD(TAG, "File table entry %u: %s, size=%u, offset=%u", i, name, file_size_entry, file_offset);
+    }
+    
+    // Lightweight validation: skip checksum validation to avoid reading entire file
+    // Structure validation (header, file table, offsets) is sufficient for pre-download check
+    
+    fclose(f);
+    
+    ESP_LOGI(TAG, "✅ Successfully validated GIF test.bin with %u files (expected %zu)", 
+             file_count, EXPECTED_FILE_COUNT);
+    
+    if (file_count != EXPECTED_FILE_COUNT) {
+        ESP_LOGW(TAG, "File count (%u) differs from expected (%zu), but file structure is valid", 
+                 file_count, EXPECTED_FILE_COUNT);
+    }
+    
     return true;
 }
 

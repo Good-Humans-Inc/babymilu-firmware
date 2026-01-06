@@ -55,6 +55,9 @@ public:
     // Version management
     std::string GetCurrentVersion() const;
     void SetCurrentVersion(const std::string& version);
+    
+    // Trigger the update loop (runs in a separate task)
+    void TriggerUpdateLoop();
 
 private:
     AnimationUpdater();
@@ -66,6 +69,7 @@ private:
     
     // Background task
     static void UpdateTask(void* parameter);
+    static void RemoteUpdateTask(void* parameter);
     void UpdateLoop();
     
     // HTTP operations
@@ -85,6 +89,7 @@ private:
     bool SaveMegaAnimationToSpiffs(const std::string& data); // Note: Now saves to SD card
     bool ValidateMegaAnimationFile(const std::string& data);
     bool ValidateMegaAnimationFileFromDisk(const char* file_path);
+    bool ValidateGifMegaAnimationFileFromDisk(const char* file_path);
     bool GetRemoteContentLength(const std::string& url, size_t &out_length);
     bool GetRemoteMegaContentLength(size_t &out_length);
     size_t GetLocalMegaFileSize(const char* file_path);

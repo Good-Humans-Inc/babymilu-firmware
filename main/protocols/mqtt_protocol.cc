@@ -4,6 +4,7 @@
 #include "settings.h"
 #include "config.h"
 #include "ota.h"
+#include "animation/animation_updater.h"
 
 #include <esp_log.h>
 #include <ml307_mqtt.h>
@@ -253,6 +254,15 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
                 });
             }
             // Don't forward goodbye to on_incoming_json_ as it's a protocol-level message
+        } else if (strcmp(type->valuestring, "remote_anim_update") == 0) {
+            // Remote animation update request - trigger animation updater's update loop
+            ESP_LOGI(TAG, "Received remote_anim_update message, triggering animation update loop");
+            Application::GetInstance().Schedule([]() {
+                auto& anim_updater = AnimationUpdater::GetInstance();
+                ESP_LOGI(TAG, "Calling AnimationUpdater::TriggerUpdateLoop()");
+                anim_updater.TriggerUpdateLoop();
+            });
+            // Don't forward remote_anim_update to on_incoming_json_ as it's a protocol-level message
         } else {
             // Forward all other message types (including "listen", "tts", "stt", etc.) to Application handler
             ESP_LOGI(TAG, "Forwarding MQTT message type '%s' to Application::OnIncomingJson", type->valuestring);
