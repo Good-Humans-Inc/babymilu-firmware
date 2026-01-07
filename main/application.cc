@@ -757,8 +757,10 @@ void Application::Start()
     }
 
     // Initialize and start the animation updater
-    AnimationUpdater::GetInstance().Initialize();
-    AnimationUpdater::GetInstance().Start();
+    // COMMENTED OUT: Disable automatic animation updater startup
+    // Only MQTT remote_anim_update messages will trigger animation updates
+    // AnimationUpdater::GetInstance().Initialize();
+    // AnimationUpdater::GetInstance().Start();
 
     // Check for new firmware version or get the MQTT broker address
     CheckNewVersion();
@@ -861,7 +863,13 @@ void Application::Start()
     protocol_->OnIncomingJson([this, display](const cJSON *root)
                               {
         // Parse JSON data
+        ESP_LOGI(TAG, "OnIncomingJson: Entry point - message received");
         auto type = cJSON_GetObjectItem(root, "type");
+        if (type && cJSON_IsString(type)) {
+            ESP_LOGI(TAG, "OnIncomingJson: Message type='%s'", type->valuestring);
+        } else {
+            ESP_LOGW(TAG, "OnIncomingJson: Message missing or invalid type field");
+        }
         if (strcmp(type->valuestring, "tts") == 0) {
             auto state = cJSON_GetObjectItem(root, "state");
             if (strcmp(state->valuestring, "start") == 0) {
@@ -964,9 +972,18 @@ void Application::Start()
             }
 #if CONFIG_IOT_PROTOCOL_MCP
         } else if (strcmp(type->valuestring, "mcp") == 0) {
+            ESP_LOGI(TAG, "OnIncomingJson: Received MCP message");
             auto payload = cJSON_GetObjectItem(root, "payload");
             if (cJSON_IsObject(payload)) {
+                char* payload_str = cJSON_PrintUnformatted(payload);
+                if (payload_str) {
+                    ESP_LOGI(TAG, "OnIncomingJson: MCP payload: %s", payload_str);
+                    cJSON_free(payload_str);
+                }
+                ESP_LOGI(TAG, "OnIncomingJson: Forwarding MCP payload to McpServer::ParseMessage");
                 McpServer::GetInstance().ParseMessage(payload);
+            } else {
+                ESP_LOGW(TAG, "OnIncomingJson: MCP message missing or invalid payload");
             }
 #endif
 #if CONFIG_IOT_PROTOCOL_XIAOZHI
@@ -1823,10 +1840,14 @@ bool Application::CanEnterSleepMode()
 
 void Application::SendMcpMessage(const std::string &payload)
 {
+    ESP_LOGI(TAG, "SendMcpMessage: Scheduling MCP message send, payload_size=%zu bytes", payload.length());
     Schedule([this, payload]()
              {
         if (protocol_) {
+            ESP_LOGI(TAG, "SendMcpMessage: Executing scheduled send, protocol available");
             protocol_->SendMcpMessage(payload);
+        } else {
+            ESP_LOGW(TAG, "SendMcpMessage: Protocol not available, cannot send MCP message");
         } });
 }
 
@@ -2056,20 +2077,18 @@ void Application::OpenWebSocketConnection() {
     
     // For remote wakeup (ws_start): Behavior depends on alarm mode
     // - Normal mode: Automatically enter listening state (for normal conversations)
-    // - Alarm mode: Skip listening, let TTS play first, then listening starts after TTS
+    // - Alarm mode: Still send listen:start to establish voice connection, but TTS can interrupt
     if (device_state_ == kDeviceStateIdle) {
-        if (is_alarm_mode_) {
-            // Alarm mode: Don't start listening automatically
-            // Server will send TTS first, then listening will start after TTS stops
-            ESP_LOGI(TAG, "Alarm mode: WebSocket opened via ws_start, skipping automatic listening (TTS will play first)");
-        } else {
-            // Normal mode: Automatically enter listening state
-            ESP_LOGI(TAG, "Remote wakeup: WebSocket opened via ws_start, automatically entering listening state");
-            // Small delay to ensure WebSocket connection is fully ready before starting listening
-            // This prevents race conditions where connection might not be ready immediately
-            vTaskDelay(pdMS_TO_TICKS(100));
-            // Verify connection is still open before proceeding
-            if (websocket_protocol_ && websocket_protocol_->IsAudioChannelOpened()) {
+        // Small delay to ensure WebSocket connection is fully ready before starting listening
+        // This prevents race conditions where connection might not be ready immediately
+        vTaskDelay(pdMS_TO_TICKS(100));
+        // Verify connection is still open before proceeding
+        if (websocket_protocol_ && websocket_protocol_->IsAudioChannelOpened()) {
+            if (is_alarm_mode_) {
+                // Alarm mode: Still send listen:start to establish voice connection
+                // Server can send TTS first (which will stop listening), or process audio immediately
+                // After TTS stops, listening will automatically resume
+                ESP_LOGI(TAG, "Alarm mode: WebSocket opened via ws_start, sending listen:start to establish voice connection (TTS can interrupt)");
                 // Use AutoStop for remote wake so TTS stop resumes listening automatically
                 SetListeningMode(kListeningModeAutoStop);
                 // SetListeningMode() calls SetDeviceState(kDeviceStateListening) which will:
@@ -2077,8 +2096,17 @@ void Application::OpenWebSocketConnection() {
                 // - Send listen start message
                 // - Start audio capture
             } else {
-                ESP_LOGW(TAG, "WebSocket connection not ready after delay, cannot start listening automatically");
+                // Normal mode: Automatically enter listening state
+                ESP_LOGI(TAG, "Remote wakeup: WebSocket opened via ws_start, automatically entering listening state");
+                // Use AutoStop for remote wake so TTS stop resumes listening automatically
+                SetListeningMode(kListeningModeAutoStop);
+                // SetListeningMode() calls SetDeviceState(kDeviceStateListening) which will:
+                // - Turn on red light (via led->OnStateChanged())
+                // - Send listen start message
+                // - Start audio capture
             }
+        } else {
+            ESP_LOGW(TAG, "WebSocket connection not ready after delay, cannot start listening automatically");
         }
     }
     else if (device_state_ == kDeviceStateSpeaking) {

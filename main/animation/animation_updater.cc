@@ -351,8 +351,8 @@ void AnimationUpdater::UpdateLoop() {
     ESP_LOGI(TAG, "Waiting 10 seconds before starting download...");
     vTaskDelay(pdMS_TO_TICKS(10000));
     
-    // Hardcoded URL for test.bin (using storage.googleapis.com for direct download, avoids 302 redirect)
-    std::string url = "https://storage.googleapis.com/milu-public/device_bin/90%3Ae5%3Ab1%3Aa8%3Aad%3A70/test.bin";
+    // Build download URL dynamically (uses configured server_url_ or constructs from MAC address)
+    std::string url = BuildMegaDownloadUrl();
     ESP_LOGI(TAG, "Checking for updates from: %s", url.c_str());
     
     // Ensure SD card is available

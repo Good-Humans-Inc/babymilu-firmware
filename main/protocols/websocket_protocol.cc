@@ -66,7 +66,18 @@ bool WebsocketProtocol::SendAudio(const AudioStreamPacket& packet) {
 
 bool WebsocketProtocol::SendText(const std::string& text) {
     if (websocket_ == nullptr) {
+        ESP_LOGW(TAG, "SendText: WebSocket is null, cannot send");
         return false;
+    }
+
+    // Check if this is an MCP message for more detailed logging
+    if (text.find("\"type\":\"mcp\"") != std::string::npos) {
+        ESP_LOGI(TAG, "SendText: Sending MCP message, size=%zu bytes", text.length());
+        if (text.length() < 500) {
+            ESP_LOGI(TAG, "SendText: MCP message content: %s", text.c_str());
+        } else {
+            ESP_LOGI(TAG, "SendText: MCP message preview (first 200 chars): %.200s...", text.c_str());
+        }
     }
 
     if (!websocket_->Send(text)) {
@@ -75,6 +86,9 @@ bool WebsocketProtocol::SendText(const std::string& text) {
         return false;
     }
 
+    if (text.find("\"type\":\"mcp\"") != std::string::npos) {
+        ESP_LOGI(TAG, "SendText: MCP message sent successfully via WebSocket");
+    }
     return true;
 }
 

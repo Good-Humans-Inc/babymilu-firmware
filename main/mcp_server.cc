@@ -231,6 +231,8 @@ void McpServer::ParseCapabilities(const cJSON* capabilities) {
 }
 
 void McpServer::ParseMessage(const cJSON* json) {
+    ESP_LOGI(TAG, "ParseMessage: MCP message received, parsing...");
+    
     // Check JSONRPC version
     auto version = cJSON_GetObjectItem(json, "jsonrpc");
     if (version == nullptr || !cJSON_IsString(version) || strcmp(version->valuestring, "2.0") != 0) {
@@ -246,6 +248,7 @@ void McpServer::ParseMessage(const cJSON* json) {
     }
     
     auto method_str = std::string(method->valuestring);
+    ESP_LOGI(TAG, "ParseMessage: MCP method='%s'", method_str.c_str());
     if (method_str.find("notifications") == 0) {
         return;
     }
@@ -263,8 +266,10 @@ void McpServer::ParseMessage(const cJSON* json) {
         return;
     }
     auto id_int = id->valueint;
+    ESP_LOGI(TAG, "ParseMessage: MCP message id=%d", id_int);
     
     if (method_str == "initialize") {
+        ESP_LOGI(TAG, "ParseMessage: Handling 'initialize' request");
         if (cJSON_IsObject(params)) {
             auto capabilities = cJSON_GetObjectItem(params, "capabilities");
             if (cJSON_IsObject(capabilities)) {
@@ -277,6 +282,7 @@ void McpServer::ParseMessage(const cJSON* json) {
         message += "\"}}";
         ReplyResult(id_int, message);
     } else if (method_str == "tools/list") {
+        ESP_LOGI(TAG, "ParseMessage: Handling 'tools/list' request");
         std::string cursor_str = "";
         if (params != nullptr) {
             auto cursor = cJSON_GetObjectItem(params, "cursor");
@@ -321,6 +327,12 @@ void McpServer::ReplyResult(int id, const std::string& result) {
     payload += std::to_string(id) + ",\"result\":";
     payload += result;
     payload += "}";
+    ESP_LOGI(TAG, "ReplyResult: Sending MCP response, id=%d, payload_size=%zu bytes", id, payload.length());
+    if (payload.length() < 500) {
+        ESP_LOGI(TAG, "ReplyResult: Payload preview: %s", payload.c_str());
+    } else {
+        ESP_LOGI(TAG, "ReplyResult: Payload preview (first 200 chars): %.200s...", payload.c_str());
+    }
     Application::GetInstance().SendMcpMessage(payload);
 }
 
@@ -330,16 +342,19 @@ void McpServer::ReplyError(int id, const std::string& message) {
     payload += ",\"error\":{\"message\":\"";
     payload += message;
     payload += "\"}}";
+    ESP_LOGI(TAG, "ReplyError: Sending MCP error response, id=%d, message=%s", id, message.c_str());
     Application::GetInstance().SendMcpMessage(payload);
 }
 
 void McpServer::GetToolsList(int id, const std::string& cursor) {
+    ESP_LOGI(TAG, "tools/list: Request received, id=%d, cursor='%s', total_tools=%zu", id, cursor.c_str(), tools_.size());
     const int max_payload_size = 8000;
     std::string json = "{\"tools\":[";
     
     bool found_cursor = cursor.empty();
     auto it = tools_.begin();
     std::string next_cursor = "";
+    size_t tools_added = 0;
     
     while (it != tools_.end()) {
         // 如果我们还没有找到起始位置，继续搜索
@@ -361,8 +376,11 @@ void McpServer::GetToolsList(int id, const std::string& cursor) {
         }
         
         json += tool_json;
+        tools_added++;
         ++it;
     }
+    
+    ESP_LOGI(TAG, "tools/list: Built JSON with %zu tools, current_size=%zu", tools_added, json.length());
     
     if (json.back() == ',') {
         json.pop_back();
@@ -379,6 +397,13 @@ void McpServer::GetToolsList(int id, const std::string& cursor) {
         json += "]}";
     } else {
         json += "],\"nextCursor\":\"" + next_cursor + "\"}";
+    }
+    
+    ESP_LOGI(TAG, "tools/list: Final response size=%zu bytes, has_next_cursor=%s", json.length(), next_cursor.empty() ? "false" : "true");
+    if (json.length() < 500) {
+        ESP_LOGI(TAG, "tools/list: Response preview: %s", json.c_str());
+    } else {
+        ESP_LOGI(TAG, "tools/list: Response preview (first 200 chars): %.200s...", json.c_str());
     }
     
     ReplyResult(id, json);
