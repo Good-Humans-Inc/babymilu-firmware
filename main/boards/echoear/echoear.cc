@@ -8,6 +8,7 @@
 #include "backlight.h"
 #include "animation/animation.h"
 #include "sd_card.h"
+#include "power_save_timer.h"
 
 #include <wifi_station.h>
 #include <ssid_manager.h>
@@ -353,6 +354,7 @@ private:
     static volatile uint32_t touch_event_count_;  // Counter for touch events
     QueueHandle_t touch_event_queue_;  // Queue for touch interrupt events
     TaskHandle_t touch_event_task_handle_;  // Task handle for processing touch events
+    PowerSaveTimer* power_save_timer_ = nullptr;
 
     void InitializeI2c() {
         ESP_LOGI(TAG, "[BMI270] Initializing I2C bus for BMI270 compatibility");
@@ -424,6 +426,9 @@ private:
                     !WifiStation::GetInstance().IsConnected()) {
                     board.ResetWifiConfiguration();
                 }
+                if (board.power_save_timer_) {
+                    board.power_save_timer_->WakeUp();
+                }
                 app.ToggleChatState();
             }
         }
@@ -447,6 +452,9 @@ private:
                 if (app.GetDeviceState() == kDeviceStateStarting && 
                     !WifiStation::GetInstance().IsConnected()) {
                     board.ResetWifiConfiguration();
+                }
+                if (board.power_save_timer_) {
+                    board.power_save_timer_->WakeUp();
                 }
                 app.ToggleChatState();
             }
@@ -493,6 +501,9 @@ private:
                     
                     // Process gestures (swipe up/down for volume control)
                     if (gesture != Cst816s::GESTURE_NONE && gesture != last_gesture) {
+                        if (board->power_save_timer_) {
+                            board->power_save_timer_->WakeUp();
+                        }
                         auto codec = board->GetAudioCodec();
                         if (codec != nullptr) {
                             int current_volume = codec->output_volume();
@@ -560,6 +571,9 @@ private:
                         
                         if (!last_touch_state) {
                             ESP_LOGI(TAG, "[TOUCH] Touch pressed at (%d, %d)", x, y);
+                            if (board->power_save_timer_) {
+                                board->power_save_timer_->WakeUp();
+                            }
                         }
                         last_touch_state = true;
                         
@@ -980,11 +994,36 @@ private:
         backlight_->RestoreBrightness();
     }
 
+    void InitializePowerSaveTimer() {
+        // Create power save timer: -1 (no CPU freq limit), 30 seconds to sleep, -1 (no shutdown)
+        power_save_timer_ = new PowerSaveTimer(-1, 30, -1);
+        power_save_timer_->OnEnterSleepMode([this]() {
+            ESP_LOGI(TAG, "Enabling sleep mode - setting brightness to 20 and switching to sleep animation");
+            GetBacklight()->SetBrightness(20, false);  // false = temporary, don't save to settings
+            auto display = GetDisplay();
+            if (display) {
+                display->SetEmotion("sleepy");  // Switch to sleep.gif animation
+            }
+        });
+        power_save_timer_->OnExitSleepMode([this]() {
+            ESP_LOGI(TAG, "Exiting sleep mode - restoring brightness and animation");
+            GetBacklight()->RestoreBrightness();
+            auto display = GetDisplay();
+            if (display) {
+                display->SetEmotion("neutral");  // Restore to neutral animation
+            }
+        });
+        power_save_timer_->SetEnabled(true);
+    }
+
     void InitializeButtons() {
         boot_button_.OnClick([this]() {
             auto& app = Application::GetInstance();
             if (app.GetDeviceState() == kDeviceStateStarting && !WifiStation::GetInstance().IsConnected()) {
                 ResetWifiConfiguration();
+            }
+            if (power_save_timer_) {
+                power_save_timer_->WakeUp();
             }
             app.ToggleChatState();
         });
@@ -1008,6 +1047,7 @@ public:
         InitializeSpi();
         Initializest77916Display();
         InitializeButtons();
+        InitializePowerSaveTimer();
         ESP_LOGI(TAG, "[TOUCH] About to call InitializeTouchButton()");
         InitializeTouchButton();
         ESP_LOGI(TAG, "[TOUCH] InitializeTouchButton() returned");

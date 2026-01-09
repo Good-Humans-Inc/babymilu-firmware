@@ -124,8 +124,16 @@ void Display::UpdateStatusBar(bool update_all) {
     // 更新电池图标 (always check battery level for logging, even if UI is disabled)
     int battery_level;
     bool charging, discharging;
+    static bool prev_charging = false;  // Track previous charging state
     const char* icon = nullptr;
     if (board.GetBatteryLevel(battery_level, charging, discharging)) {
+        // Play charge sound when USB charging is detected (transition from not charging to charging)
+        if (charging && !prev_charging) {
+            auto& app = Application::GetInstance();
+            app.PlaySound(Lang::Sounds::P3_CHARGE);
+        }
+        prev_charging = charging;  // Update previous state
+        
         if (charging) {
             icon = FONT_AWESOME_BATTERY_CHARGING;
         } else {
