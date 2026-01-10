@@ -7,8 +7,18 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <cstring>
+#include <cstdarg>
+#include <cstdio>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 
 #define TAG "ErrorLogUpload"
+
+// Static variables for error logging hook
+static bool s_error_logging_enabled = false;
+static vprintf_like_t s_original_vprintf = nullptr;
+static SemaphoreHandle_t s_log_mutex = nullptr;
+static bool s_in_hook = false; // Flag to prevent recursion
 
 std::string ErrorLogUploader::GetCurrentTimestamp() {
     time_t now = time(NULL);
@@ -165,6 +175,135 @@ esp_err_t ErrorLogUploader::UploadErrorLog() {
     }
     
     ESP_LOGI(TAG, "Error log uploaded successfully, status: %d, response: %s", status_code, response.c_str());
+    
+    // After successful upload, delete the error log file to start fresh
+    // Note: This will be done after enabling error logging, so new errors can be captured
+    remove(ERROR_LOG_FILE);
+    
     return ESP_OK;
+}
+
+// vprintf hook function that captures ESP log messages and writes to SD card
+int ErrorLogVprintfHook(const char* format, va_list args) {
+    // Prevent recursion - if we're already in the hook, just call original and return
+    if (s_in_hook) {
+        if (s_original_vprintf) {
+            va_list args_copy;
+            va_copy(args_copy, args);
+            int result = s_original_vprintf(format, args_copy);
+            va_end(args_copy);
+            return result;
+        }
+        return 0;
+    }
+    
+    s_in_hook = true;
+    
+    // First call the original vprintf to maintain normal logging
+    int result = 0;
+    if (s_original_vprintf) {
+        va_list args_copy;
+        va_copy(args_copy, args);
+        result = s_original_vprintf(format, args_copy);
+        va_end(args_copy);
+    }
+    
+    // If error logging is enabled and SD card is mounted, write to file
+    if (s_error_logging_enabled && SdCard::IsMounted()) {
+        // Take mutex to prevent concurrent writes
+        if (s_log_mutex && xSemaphoreTake(s_log_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+            // Format the log message
+            char log_buffer[512];
+            va_list args_copy2;
+            va_copy(args_copy2, args);
+            int len = vsnprintf(log_buffer, sizeof(log_buffer), format, args_copy2);
+            va_end(args_copy2);
+            
+            if (len > 0 && len < (int)sizeof(log_buffer)) {
+                // Filter: Only write ERROR (E) and WARNING (W) messages to err.txt
+                // ESP-IDF log format: "E (timestamp) TAG: message" or "W (timestamp) TAG: message"
+                // Skip INFO (I) and DEBUG (D) messages to keep the error log focused
+                bool should_log = false;
+                if (len >= 2) {
+                    // Check if message starts with "E (" for ERROR or "W (" for WARNING
+                    if ((log_buffer[0] == 'E' && log_buffer[1] == ' ') ||
+                        (log_buffer[0] == 'W' && log_buffer[1] == ' ')) {
+                        should_log = true;
+                    }
+                }
+                
+                if (should_log) {
+                    // Write directly to file to avoid recursion from AppendToFile's logging
+                    // This bypasses SdCard::AppendToFile which would log and cause recursion
+                    // Use the same path as ERROR_LOG_FILE constant: "/sdcard/err.txt"
+                    const char* full_path = "/sdcard/err.txt";
+                    FILE* file = fopen(full_path, "a");  // "a" = append mode
+                    if (file != NULL) {
+                        size_t bytes_written = fwrite(log_buffer, 1, len, file);
+                        fflush(file);  // Ensure data is flushed
+                        fclose(file);
+                        // Ignore write errors silently to avoid recursion
+                        (void)bytes_written;
+                    }
+                    // If file open fails, silently ignore to avoid recursion
+                }
+            }
+            
+            xSemaphoreGive(s_log_mutex);
+        }
+    }
+    
+    s_in_hook = false;
+    return result;
+}
+
+void ErrorLogUploader::EnableErrorLoggingToSD() {
+    if (s_error_logging_enabled) {
+        ESP_LOGW(TAG, "Error logging to SD card is already enabled");
+        return;
+    }
+    
+    // Check if SD card is mounted
+    if (!SdCard::IsMounted()) {
+        ESP_LOGW(TAG, "SD card is not mounted, cannot enable error logging to SD card");
+        return;
+    }
+    
+    // Create mutex if it doesn't exist
+    if (s_log_mutex == nullptr) {
+        s_log_mutex = xSemaphoreCreateMutex();
+        if (s_log_mutex == nullptr) {
+            ESP_LOGE(TAG, "Failed to create mutex for error logging");
+            return;
+        }
+    }
+    
+    // Store the original vprintf function
+    s_original_vprintf = esp_log_set_vprintf(ErrorLogVprintfHook);
+    
+    if (s_original_vprintf == nullptr) {
+        ESP_LOGW(TAG, "esp_log_set_vprintf returned nullptr, logging hook may not work correctly");
+        // Still set a default if needed
+        s_original_vprintf = vprintf;
+    }
+    
+    s_error_logging_enabled = true;
+    ESP_LOGI(TAG, "Error logging to SD card enabled - ESP errors will be written to /sdcard/err.txt");
+}
+
+void ErrorLogUploader::DisableErrorLoggingToSD() {
+    if (!s_error_logging_enabled) {
+        ESP_LOGW(TAG, "Error logging to SD card is not enabled");
+        return;
+    }
+    
+    // Restore the original vprintf function
+    if (s_original_vprintf) {
+        esp_log_set_vprintf(s_original_vprintf);
+        s_original_vprintf = nullptr;
+    }
+    
+    s_error_logging_enabled = false;
+    ESP_LOGI(TAG, "Error logging to SD card disabled");
 }
 

@@ -1715,14 +1715,6 @@ bool AnimationUpdater::ValidateGifMegaAnimationFileFromDisk(const char* file_pat
         return false;
     }
     
-    // Expected GIF file names (13 total: 10 main + 3 system)
-    const char* expected_gifs[] = {
-        "normal.gif", "embarrass.gif", "fire.gif", "inspiration.gif", "shy.gif",
-        "sleep.gif", "happy.gif", "laugh.gif", "sad.gif", "talk.gif",
-        "wifi.gif", "battery.gif", "silence.gif"
-    };
-    const size_t EXPECTED_FILE_COUNT = 13;
-    
     // Read and validate file table
     uint32_t total_data_size = 0;
     for (uint32_t i = 0; i < file_count; i++) {
@@ -1780,13 +1772,7 @@ bool AnimationUpdater::ValidateGifMegaAnimationFileFromDisk(const char* file_pat
     
     fclose(f);
     
-    ESP_LOGI(TAG, "✅ Successfully validated GIF test.bin with %u files (expected %zu)", 
-             file_count, EXPECTED_FILE_COUNT);
-    
-    if (file_count != EXPECTED_FILE_COUNT) {
-        ESP_LOGW(TAG, "File count (%u) differs from expected (%zu), but file structure is valid", 
-                 file_count, EXPECTED_FILE_COUNT);
-    }
+    ESP_LOGI(TAG, "✅ Successfully validated GIF test.bin with %u files", file_count);
     
     return true;
 }

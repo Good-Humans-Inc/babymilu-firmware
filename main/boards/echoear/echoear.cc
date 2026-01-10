@@ -609,14 +609,14 @@ private:
             vTaskDelay(pdMS_TO_TICKS(1000));  // Wait 1 second
             
             uint32_t current_count = EchoEar::touch_event_count_;
-            /*if (current_count > last_count) {
+            if (current_count > last_count) {
                 ESP_LOGI(TAG, "[TOUCH] Touch sensor status: Events detected! Total events: %lu (GPIO7)", 
                          (unsigned long)current_count);
                 last_count = current_count;
             } else {
                 ESP_LOGI(TAG, "[TOUCH] Touch sensor status: No new events (GPIO7), total=%lu", 
                          (unsigned long)current_count);
-            }*/
+            }
         }
     }
 

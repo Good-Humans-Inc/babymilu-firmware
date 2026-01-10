@@ -767,8 +767,22 @@ void Application::Start()
 
     // Upload error log if available
     ESP_LOGI(TAG, "Attempting to upload error log...");
-    ErrorLogUploader::UploadErrorLog();
-    ESP_LOGI(TAG, "Error log upload attempt completed");
+    esp_err_t upload_result = ErrorLogUploader::UploadErrorLog();
+    ESP_LOGI(TAG, "Error log upload attempt completed with result: %s", esp_err_to_name(upload_result));
+    
+    // After upload attempt (regardless of success/failure), enable error logging to SD card
+    // This will capture all subsequent ESP errors and write them to /sdcard/err.txt
+    // so they can be uploaded on the next startup
+    ESP_LOGI(TAG, "Enabling error logging to SD card for future errors...");
+    ErrorLogUploader::EnableErrorLoggingToSD();
+    
+    // Test error logging to SD card with sample error messages
+    // These test messages will be captured and written to err.txt for verification
+    ESP_LOGI(TAG, "Testing error logging to SD card...");
+    ESP_LOGW(TAG, "[TEST] Warning: This is a test warning message to verify SD card error logging");
+    ESP_LOGE(TAG, "[TEST] Error: This is a test error message to verify SD card error logging");
+    ESP_LOGE(TAG, "[TEST] Simulated error condition: File operation failed");
+    ESP_LOGW(TAG, "[TEST] Test completed - check /sdcard/err.txt for logged errors");
 
     // Seed MQTT config on first boot if unset (allows setting broker at build time)
     {
