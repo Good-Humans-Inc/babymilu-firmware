@@ -1625,9 +1625,9 @@ void Application::SetDeviceState(DeviceState state)
         break;
     case kDeviceStateListening:
         display->SetStatus(Lang::Strings::LISTENING);
-        // Use "surprised" emotion which maps to ANIMATION_INSPIRATION (inspiration.gif)
-        display->SetEmotion("surprised");
-        ESP_LOGI(TAG, "Listening state: showing inspiration animation");
+        // Use "listening" emotion which maps to ANIMATION_LISTENING (listening_loop.gif)
+        display->SetEmotion("listening");
+        ESP_LOGI(TAG, "Listening state: showing listening animation");
         // Update the IoT states before sending the start listening command
 #if CONFIG_IOT_PROTOCOL_XIAOZHI
         UpdateIotStates();

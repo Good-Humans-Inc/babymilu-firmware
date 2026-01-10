@@ -1131,9 +1131,9 @@ void LcdDisplay::SetEmotion(const char *emotion)
 
     static const std::vector<Emotion> emotions = {
         {ANIMATION_STATIC_NORMAL, "neutral"},
-        {ANIMATION_HAPPY, "happy"},
+        {ANIMATION_SMIRK, "happy"},
         {ANIMATION_LAUGH, "laughing"},
-        {ANIMATION_HAPPY, "funny"},
+        {ANIMATION_SMIRK, "funny"},
         {ANIMATION_SAD, "sad"},
         {ANIMATION_FIRE, "angry"},
         //{ANIMATION_EMBARRESSED, "crying"},
@@ -1150,7 +1150,8 @@ void LcdDisplay::SetEmotion(const char *emotion)
         {ANIMATION_TALK, "confident"},
         {ANIMATION_SLEEP, "sleepy"},
         {ANIMATION_SHY, "silly"},
-        {ANIMATION_TALK, "confused"}};
+        {ANIMATION_TALK, "confused"},
+        {ANIMATION_LISTENING, "listening"}};
 
     // Check volume first - if volume is 0, lock to silence animation
     auto& board = Board::GetInstance();

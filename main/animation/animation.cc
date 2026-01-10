@@ -83,6 +83,8 @@ static Animation_t sd_laugh = {0};
 static Animation_t sd_sad = {0};
 static Animation_t sd_talk = {0};
 static Animation_t sd_silence = {0};
+static Animation_t sd_listening = {0};
+static Animation_t sd_smirk = {0};
 static Animation_t sd_wifi = {0};
 static Animation_t sd_battery = {0};
 
@@ -92,6 +94,11 @@ static Animation_t sd_battery = {0};
     (anim).gif_path = NULL; \
     (anim).gif_data = NULL; \
     (anim).gif_data_size = 0; \
+    (anim).has_start_gif = false; \
+    (anim).gif_start_data = NULL; \
+    (anim).gif_start_data_size = 0; \
+    (anim).gif_loop_data = NULL; \
+    (anim).gif_loop_data_size = 0; \
 } while(0)
 
 // Function to get the appropriate animation (SD card only)
@@ -156,6 +163,10 @@ Animation_t* get_animation(int index) {
             return animation_get_talk_animation();
         case 11: // ANIMATION_SILENCE
             return animation_get_silence_animation();
+        case 12: // ANIMATION_LISTENING
+            return animation_get_listening_animation();
+        case 13: // ANIMATION_SMIRK
+            return animation_get_smirk_animation();
         default:
             return animation_get_normal_animation();
     }
@@ -198,6 +209,10 @@ void plat_animation_task(void *arg)
 {
     auto display = Board::GetInstance().GetDisplay();
     int last_animation = -1; // Track last animation to detect changes
+    bool in_start_phase = false; // Track if we're in start phase (for start+loop animations)
+    bool start_gif_played = false; // Flag to ensure start GIF is only played once per animation
+    bool loop_gif_set = false; // Flag to track if loop GIF has been set (prevent multiple calls)
+    TickType_t start_phase_start_time = 0; // When we started the start phase
     TickType_t last_log_time = xTaskGetTickCount(); // Track time for periodic logging
     
     while (1)
@@ -241,13 +256,55 @@ void plat_animation_task(void *arg)
         
         // Handle GIF animations
         if (current_anim->use_gif && current_anim->gif_data) {
-            // GIF animations are handled by LVGL automatically
-            // Only set it when animation changes, not repeatedly
-            if (last_animation != now_animation) {
-                display->SetEmotionGif(current_anim->gif_data, current_anim->gif_data_size);
+            // Check if animation has changed
+            bool animation_changed = (last_animation != now_animation);
+            
+            if (animation_changed) {
+                // Animation changed - reset all flags and start fresh
+                in_start_phase = false;
+                start_gif_played = false;
+                loop_gif_set = false;
+                start_phase_start_time = 0;
+                
+                // For animations with start GIF: start with start GIF
+                // For animations without start GIF: use main/loop GIF directly
+                if (current_anim->has_start_gif && current_anim->gif_start_data && current_anim->gif_loop_data) {
+                    // New animation with start+loop: start with start GIF (only once)
+                    in_start_phase = true;
+                    start_gif_played = true; // Mark that we've played the start GIF
+                    loop_gif_set = false; // Loop GIF not set yet
+                    start_phase_start_time = xTaskGetTickCount();
+                    display->SetEmotionGif(current_anim->gif_start_data, current_anim->gif_start_data_size);
+                    ESP_LOGD("plat_animation_task", "Animation changed to %d: Starting with start GIF", now_animation);
+                } else {
+                    // New animation without start GIF: use main/loop GIF directly
+                    in_start_phase = false;
+                    start_gif_played = true; // Mark as played (no start GIF to play)
+                    loop_gif_set = true; // Main GIF is the loop
+                    display->SetEmotionGif(current_anim->gif_data, current_anim->gif_data_size);
+                    ESP_LOGD("plat_animation_task", "Animation changed to %d: Using main GIF", now_animation);
+                }
                 last_animation = now_animation;
-                ESP_LOGD("plat_animation_task", "Set GIF animation %d", now_animation);
+            } else {
+                // Same animation - preserve current state, only transition from start to loop
+                if (current_anim->has_start_gif && current_anim->gif_start_data && current_anim->gif_loop_data) {
+                    if (in_start_phase && start_gif_played && !loop_gif_set) {
+                        // Still in start phase - check if we should switch to loop (after ~1 second)
+                        TickType_t elapsed = xTaskGetTickCount() - start_phase_start_time;
+                        if (elapsed >= pdMS_TO_TICKS(1000)) {
+                            // Switch to loop phase (only once)
+                            display->SetEmotionGif(current_anim->gif_loop_data, current_anim->gif_loop_data_size);
+                            in_start_phase = false; // Stay in loop phase
+                            loop_gif_set = true; // Mark loop GIF as set
+                            ESP_LOGD("plat_animation_task", "Switched to GIF loop animation %d", now_animation);
+                        }
+                        // else: still playing start GIF, do nothing (LVGL handles the animation)
+                    }
+                    // else: already in loop phase (loop_gif_set == true), do nothing (LVGL handles the animation)
+                }
+                // else: animation without start GIF, already displaying main GIF, do nothing
             }
+            
             // Check less frequently for GIFs since they animate themselves
             vTaskDelay(pdMS_TO_TICKS(1000));
             continue;
@@ -340,6 +397,8 @@ void animation_load_sd_card_animations(void)
     INIT_ANIM(sd_sad);
     INIT_ANIM(sd_talk);
     INIT_ANIM(sd_silence);
+    INIT_ANIM(sd_listening);
+    INIT_ANIM(sd_smirk);
     INIT_ANIM(sd_wifi);
     INIT_ANIM(sd_battery);
     
@@ -444,8 +503,20 @@ void animation_cleanup_sd_card_animation(Animation_t* anim)
             free(anim->gif_path);
             anim->gif_path = NULL;
         }
+        // Free start+loop GIF data
+        if (anim->gif_start_data) {
+            free(anim->gif_start_data);
+            anim->gif_start_data = NULL;
+        }
+        if (anim->gif_loop_data) {
+            free(anim->gif_loop_data);
+            anim->gif_loop_data = NULL;
+        }
         anim->use_gif = false;
+        anim->has_start_gif = false;
         anim->gif_data_size = 0;
+        anim->gif_start_data_size = 0;
+        anim->gif_loop_data_size = 0;
     }
     
     // Free image data and descriptors
@@ -620,6 +691,32 @@ Animation_t* animation_get_silence_animation(void)
         return &sd_silence;
     }
     ESP_LOGW("animation", "No silence animation available from SD card");
+    return NULL;
+}
+
+// Function to get the appropriate listening animation (SD card only)
+Animation_t* animation_get_listening_animation(void)
+{
+    if (sd_listening.use_gif && sd_listening.gif_data && sd_listening.gif_data_size > 0) {
+        return &sd_listening;
+    }
+    if (sd_listening.use_spiffs && sd_listening.imges && sd_listening.len > 0) {
+        return &sd_listening;
+    }
+    ESP_LOGW("animation", "No listening animation available from SD card");
+    return NULL;
+}
+
+// Function to get the appropriate smirk animation (SD card only)
+Animation_t* animation_get_smirk_animation(void)
+{
+    if (sd_smirk.use_gif && sd_smirk.gif_data && sd_smirk.gif_data_size > 0) {
+        return &sd_smirk;
+    }
+    if (sd_smirk.use_spiffs && sd_smirk.imges && sd_smirk.len > 0) {
+        return &sd_smirk;
+    }
+    ESP_LOGW("animation", "No smirk animation available from SD card");
     return NULL;
 }
 
@@ -1960,6 +2057,7 @@ bool animation_load_gif_animation(Animation_t* anim, const char* gif_name, uint8
     anim->gif_data_size = gif_size;
     anim->use_gif = true;
     anim->use_spiffs = true; // Mark as loaded from storage
+    anim->has_start_gif = false; // Single GIF, no start/loop separation
     
     // Store GIF name for reference
     anim->gif_path = (char*)malloc(strlen(gif_name) + 1);
@@ -1978,6 +2076,84 @@ bool animation_load_gif_animation(Animation_t* anim, const char* gif_name, uint8
 }
 
 /**
+ * Load a GIF animation with start+loop support
+ * @param anim Animation structure to load into
+ * @param gif_loop_name Name of the loop GIF (e.g., "happy_loop.gif")
+ * @param gif_loop_data Loop GIF file data
+ * @param gif_loop_size Size of loop GIF data
+ * @param gif_start_name Name of the start GIF (e.g., "happy_start.gif") - can be NULL
+ * @param gif_start_data Start GIF file data - can be NULL
+ * @param gif_start_size Size of start GIF data - can be 0
+ * @return true on success, false on failure
+ */
+bool animation_load_gif_animation_with_start_loop(Animation_t* anim, 
+                                                   const char* gif_loop_name, uint8_t* gif_loop_data, size_t gif_loop_size,
+                                                   const char* gif_start_name, uint8_t* gif_start_data, size_t gif_start_size)
+{
+    if (!anim || !gif_loop_name || !gif_loop_data || gif_loop_size == 0) {
+        ESP_LOGE("animation", "Invalid parameters for GIF animation loading (loop required)");
+        return false;
+    }
+    
+    // Clean up existing animation
+    animation_cleanup_sd_card_animation(anim);
+    
+    // Allocate memory for loop GIF data (copy it)
+    anim->gif_loop_data = (uint8_t*)malloc(gif_loop_size);
+    if (!anim->gif_loop_data) {
+        ESP_LOGE("animation", "Failed to allocate memory for loop GIF data");
+        return false;
+    }
+    memcpy(anim->gif_loop_data, gif_loop_data, gif_loop_size);
+    anim->gif_loop_data_size = gif_loop_size;
+    
+    // Set loop GIF as the main GIF data for backward compatibility
+    anim->gif_data = anim->gif_loop_data;
+    anim->gif_data_size = gif_loop_size;
+    
+    // Load start GIF if provided
+    if (gif_start_name && gif_start_data && gif_start_size > 0) {
+        anim->gif_start_data = (uint8_t*)malloc(gif_start_size);
+        if (!anim->gif_start_data) {
+            ESP_LOGE("animation", "Failed to allocate memory for start GIF data");
+            free(anim->gif_loop_data);
+            anim->gif_loop_data = NULL;
+            anim->gif_data = NULL;
+            return false;
+        }
+        memcpy(anim->gif_start_data, gif_start_data, gif_start_size);
+        anim->gif_start_data_size = gif_start_size;
+        anim->has_start_gif = true;
+    } else {
+        anim->has_start_gif = false;
+    }
+    
+    anim->use_gif = true;
+    anim->use_spiffs = true; // Mark as loaded from storage
+    
+    // Store GIF name for reference (use loop name)
+    anim->gif_path = (char*)malloc(strlen(gif_loop_name) + 1);
+    if (anim->gif_path) {
+        strcpy(anim->gif_path, gif_loop_name);
+    }
+    
+    // For GIFs, we don't use the frame-based system
+    anim->len = 1; // Single GIF animation
+    anim->imges = NULL;
+    anim->animations = NULL;
+    anim->spiffs_imgs = NULL;
+    
+    if (anim->has_start_gif) {
+        ESP_LOGI("animation", "Successfully loaded GIF animation with start+loop: %s + %s (%d + %d bytes)", 
+                 gif_start_name, gif_loop_name, gif_start_size, gif_loop_size);
+    } else {
+        ESP_LOGI("animation", "Successfully loaded GIF animation (loop only): %s (%d bytes)", 
+                 gif_loop_name, gif_loop_size);
+    }
+    return true;
+}
+
+/**
  * Load all GIF animations from test.bin
  * @return true if at least one GIF was loaded, false otherwise
  */
@@ -1990,60 +2166,173 @@ bool animation_load_gifs_from_test_bin(void)
     
     ESP_LOGI("animation", "Loading GIF animations from test.bin...");
     
-    // Animation names in order (matching AnimationType_e and the 10 main GIFs + 3 system GIFs)
-    const char* gif_names[] = {
-        "normal.gif",      // ANIMATION_STATIC_NORMAL / ANIMATION_NORMAL
-        "embarrass.gif",   // ANIMATION_EMBARRESSED
-        "fire.gif",        // ANIMATION_FIRE
-        "inspiration.gif", // ANIMATION_INSPIRATION
-        "shy.gif",         // ANIMATION_SHY
-        "sleep.gif",       // ANIMATION_SLEEP
-        "happy.gif",       // ANIMATION_HAPPY
-        "laugh.gif",       // ANIMATION_LAUGH
-        "sad.gif",         // ANIMATION_SAD
-        "talk.gif",        // ANIMATION_TALK
-        "silence.gif",     // ANIMATION_SILENCE
-        "wifi.gif",        // System GIF (for future use)
-        "battery.gif",     // System GIF (for future use)
+    // Animation names in order (matching AnimationType_e)
+    const char* anim_names[] = {
+        "normal",      // ANIMATION_STATIC_NORMAL / ANIMATION_NORMAL
+        "embarrass",   // ANIMATION_EMBARRESSED
+        "fire",        // ANIMATION_FIRE
+        "inspiration", // ANIMATION_INSPIRATION
+        "shy",         // ANIMATION_SHY
+        "sleep",       // ANIMATION_SLEEP
+        "happy",       // ANIMATION_HAPPY
+        "laugh",       // ANIMATION_LAUGH
+        "sad",         // ANIMATION_SAD
+        "talk",        // ANIMATION_TALK
+        "silence",     // ANIMATION_SILENCE
     };
+    
+    // Animations that have _start variants
+    const char* anims_with_start[] = {"fire", "happy", "inspiration", "laugh"};
+    bool has_start[11] = {false};
+    for (int i = 0; i < 11; i++) {
+        for (int j = 0; j < 4; j++) {
+            if (strcmp(anim_names[i], anims_with_start[j]) == 0) {
+                has_start[i] = true;
+                break;
+            }
+        }
+    }
     
     Animation_t* animations[] = {
         &sd_normal, &sd_embarrass, &sd_fire, &sd_inspiration,
         &sd_shy, &sd_sleep, &sd_happy, &sd_laugh, &sd_sad, &sd_talk,
-        &sd_silence, &sd_wifi, &sd_battery
+        &sd_silence
     };
     
     int loaded_count = 0;
     
-    // Load each GIF (10 main animations + 3 system GIFs)
-    for (int i = 0; i < 13; i++) {
+    // Load each main animation (11 animations)
+    for (int i = 0; i < 11; i++) {
+        char loop_name[64];
+        char start_name[64];
+        snprintf(loop_name, sizeof(loop_name), "%s_loop.gif", anim_names[i]);
+        snprintf(start_name, sizeof(start_name), "%s_start.gif", anim_names[i]);
+        
+        uint8_t* gif_loop_data = NULL;
+        size_t gif_loop_size = 0;
+        uint8_t* gif_start_data = NULL;
+        size_t gif_start_size = 0;
+        
+        // Try to load loop GIF (required)
+        if (!animation_extract_gif_from_test_bin(loop_name, &gif_loop_data, &gif_loop_size)) {
+            ESP_LOGW("animation", "⚠ Loop GIF not found in test.bin: %s", loop_name);
+            continue;
+        }
+        
+        // Try to load start GIF if this animation has one
+        if (has_start[i]) {
+            if (!animation_extract_gif_from_test_bin(start_name, &gif_start_data, &gif_start_size)) {
+                ESP_LOGW("animation", "⚠ Start GIF not found in test.bin: %s (using loop only)", start_name);
+                // Continue with loop only
+            }
+        }
+        
+        // Load animation with start+loop or loop only
+        if (gif_start_data && gif_start_size > 0) {
+            if (animation_load_gif_animation_with_start_loop(
+                    animations[i], loop_name, gif_loop_data, gif_loop_size,
+                    start_name, gif_start_data, gif_start_size)) {
+                loaded_count++;
+                ESP_LOGI("animation", "✅ Loaded GIF: %s + %s", start_name, loop_name);
+            } else {
+                ESP_LOGE("animation", "❌ Failed to load GIF animation: %s + %s", start_name, loop_name);
+            }
+        } else {
+            if (animation_load_gif_animation_with_start_loop(
+                    animations[i], loop_name, gif_loop_data, gif_loop_size,
+                    NULL, NULL, 0)) {
+                loaded_count++;
+                ESP_LOGI("animation", "✅ Loaded GIF: %s", loop_name);
+            } else {
+                ESP_LOGE("animation", "❌ Failed to load GIF animation: %s", loop_name);
+            }
+        }
+        
+        // Free extracted data (it's copied in animation_load_gif_animation_with_start_loop)
+        if (gif_loop_data) {
+            free(gif_loop_data);
+        }
+        if (gif_start_data) {
+            free(gif_start_data);
+        }
+    }
+    
+    // Load listening animation (extra GIF)
+    char listening_name[64] = "listening_loop.gif";
+    uint8_t* listening_gif_data = NULL;
+    size_t listening_gif_size = 0;
+    
+    if (animation_extract_gif_from_test_bin(listening_name, &listening_gif_data, &listening_gif_size)) {
+        if (animation_load_gif_animation_with_start_loop(
+                &sd_listening, listening_name, listening_gif_data, listening_gif_size,
+                NULL, NULL, 0)) {
+            loaded_count++;
+            ESP_LOGI("animation", "✅ Loaded listening GIF: %s", listening_name);
+        } else {
+            ESP_LOGE("animation", "❌ Failed to load listening GIF: %s", listening_name);
+        }
+        
+        if (listening_gif_data) {
+            free(listening_gif_data);
+        }
+    } else {
+        ESP_LOGW("animation", "⚠ Listening GIF not found in test.bin: %s", listening_name);
+    }
+    
+    // Load smirk animation (extra GIF)
+    char smirk_name[64] = "smirk_loop.gif";
+    uint8_t* smirk_gif_data = NULL;
+    size_t smirk_gif_size = 0;
+    
+    if (animation_extract_gif_from_test_bin(smirk_name, &smirk_gif_data, &smirk_gif_size)) {
+        if (animation_load_gif_animation_with_start_loop(
+                &sd_smirk, smirk_name, smirk_gif_data, smirk_gif_size,
+                NULL, NULL, 0)) {
+            loaded_count++;
+            ESP_LOGI("animation", "✅ Loaded smirk GIF: %s", smirk_name);
+        } else {
+            ESP_LOGE("animation", "❌ Failed to load smirk GIF: %s", smirk_name);
+        }
+        
+        if (smirk_gif_data) {
+            free(smirk_gif_data);
+        }
+    } else {
+        ESP_LOGW("animation", "⚠ Smirk GIF not found in test.bin: %s", smirk_name);
+    }
+    
+    // Load system GIFs (wifi, battery)
+    const char* system_names[] = {"wifi", "battery"};
+    Animation_t* system_anims[] = {&sd_wifi, &sd_battery};
+    
+    for (int i = 0; i < 2; i++) {
+        char gif_name[64];
+        snprintf(gif_name, sizeof(gif_name), "%s.gif", system_names[i]);
+        
         uint8_t* gif_data = NULL;
         size_t gif_size = 0;
         
-        if (animation_extract_gif_from_test_bin(gif_names[i], &gif_data, &gif_size)) {
-            if (animation_load_gif_animation(animations[i], gif_names[i], gif_data, gif_size)) {
+        if (animation_extract_gif_from_test_bin(gif_name, &gif_data, &gif_size)) {
+            if (animation_load_gif_animation(system_anims[i], gif_name, gif_data, gif_size)) {
                 loaded_count++;
-                ESP_LOGI("animation", "✅ Loaded GIF: %s", gif_names[i]);
+                ESP_LOGI("animation", "✅ Loaded system GIF: %s", gif_name);
             } else {
-                ESP_LOGE("animation", "❌ Failed to load GIF animation: %s", gif_names[i]);
+                ESP_LOGE("animation", "❌ Failed to load system GIF: %s", gif_name);
             }
             
-            // Free extracted data (it's copied in animation_load_gif_animation)
             if (gif_data) {
                 free(gif_data);
             }
         } else {
-            // Check if test.bin was deleted (header read failure)
-            // If this is the first GIF and test.bin doesn't exist, it means header read failed
-            if (i == 0) {
-                // Check if test.bin exists by trying to access it
-                if (access("/sdcard/test.bin", F_OK) != 0 && access("/sdcard/TEST.BIN", F_OK) != 0) {
-                    // test.bin was deleted due to header read failure
-                    ESP_LOGE("animation", "test.bin header read failed and file was deleted, skipping all GIF loading");
-                    return false;
-                }
-            }
-            ESP_LOGW("animation", "⚠ GIF not found in test.bin: %s", gif_names[i]);
+            ESP_LOGW("animation", "⚠ System GIF not found in test.bin: %s", gif_name);
+        }
+    }
+    
+    // Check if test.bin was deleted (header read failure)
+    if (loaded_count == 0) {
+        if (access("/sdcard/test.bin", F_OK) != 0 && access("/sdcard/TEST.BIN", F_OK) != 0) {
+            ESP_LOGE("animation", "test.bin header read failed and file was deleted, skipping all GIF loading");
+            return false;
         }
     }
     

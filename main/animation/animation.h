@@ -13,6 +13,12 @@ typedef struct _Animation_t{
     char* gif_path;                 // Path to GIF file (for file-based loading)
     uint8_t* gif_data;              // GIF data in memory (if loaded into RAM)
     size_t gif_data_size;           // Size of GIF data
+    // Start+Loop GIF support
+    bool has_start_gif;             // True if this animation has a separate start GIF
+    uint8_t* gif_start_data;       // Start GIF data in memory (if loaded into RAM)
+    size_t gif_start_data_size;    // Size of start GIF data
+    uint8_t* gif_loop_data;         // Loop GIF data in memory (if loaded into RAM)
+    size_t gif_loop_data_size;      // Size of loop GIF data
 }Animation_t;
 
 
@@ -29,6 +35,8 @@ typedef enum _AnimationType_e {
     ANIMATION_SAD,
     ANIMATION_TALK,
     ANIMATION_SILENCE,
+    ANIMATION_LISTENING,
+    ANIMATION_SMIRK,
     ANIMATION_NUM
 }AnimationType_e;
 
@@ -47,6 +55,8 @@ Animation_t* animation_get_laugh_animation(void);
 Animation_t* animation_get_sad_animation(void);
 Animation_t* animation_get_talk_animation(void);
 Animation_t* animation_get_silence_animation(void);
+Animation_t* animation_get_listening_animation(void);
+Animation_t* animation_get_smirk_animation(void);
 Animation_t* animation_get_battery_animation(void);
 Animation_t* animation_get_wifi_animation(void);
 void animation_load_sd_card_animations(void);
@@ -75,3 +85,6 @@ bool animation_load_talk_from_sd_card(void);
 bool animation_load_gifs_from_test_bin(void);
 bool animation_extract_gif_from_test_bin(const char* gif_name, uint8_t** data, size_t* size);
 bool animation_load_gif_animation(Animation_t* anim, const char* gif_name, uint8_t* gif_data, size_t gif_size);
+bool animation_load_gif_animation_with_start_loop(Animation_t* anim, 
+                                                   const char* gif_loop_name, uint8_t* gif_loop_data, size_t gif_loop_size,
+                                                   const char* gif_start_name, uint8_t* gif_start_data, size_t gif_start_size);
