@@ -721,7 +721,7 @@ private:
         
         // Create periodic logging task
         ESP_LOGI(TAG, "[TOUCH] Creating periodic logging task");
-        BaseType_t task_ret1 = xTaskCreatePinnedToCore(touch_log_task, "touch_log_task", 2 * 1024, this, 1, NULL, 1);
+        BaseType_t task_ret1 = xTaskCreatePinnedToCore(touch_log_task, "touch_log_task", 6 * 1024, this, 1, NULL, 1);
         ESP_LOGI(TAG, "[TOUCH] touch_log_task creation result: %d", task_ret1);
         if (task_ret1 == pdPASS) {
             ESP_LOGI(TAG, "[TOUCH] ✓ touch_log_task created successfully");
