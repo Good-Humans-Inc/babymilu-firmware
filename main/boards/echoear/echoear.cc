@@ -14,6 +14,7 @@
 #include <ssid_manager.h>
 #include "settings.h"
 #include <esp_log.h>
+#include <esp_random.h>
 
 #include <driver/i2c_master.h>
 #include "i2c_device.h"
@@ -28,6 +29,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 #include <freertos/task.h>
+#include <string>
 
 // BMI270 includes
 #include "bmi270_api.h"
@@ -355,6 +357,8 @@ private:
     QueueHandle_t touch_event_queue_;  // Queue for touch interrupt events
     TaskHandle_t touch_event_task_handle_;  // Task handle for processing touch events
     PowerSaveTimer* power_save_timer_ = nullptr;
+    esp_timer_handle_t emotion_reset_timer_ = nullptr;  // Timer to reset emotion to previous state after one animation cycle
+    std::string previous_emotion_ = "neutral";  // Store previous emotion string to restore
 
     void InitializeI2c() {
         ESP_LOGI(TAG, "[BMI270] Initializing I2C bus for BMI270 compatibility");
@@ -706,6 +710,49 @@ private:
                                              
                                              if (state == TOUCH_STATE_ACTIVE) {
                                                  ESP_LOGI(TAG, "[TOUCH] Touch button pressed (channel %lu)", (unsigned long)channel);
+                                                 
+                                                 // Get board instance and display
+                                                 EchoEar* board = static_cast<EchoEar*>(cb_arg);
+                                                 if (board != nullptr) {
+                                                     // Wake up power save timer
+                                                     if (board->power_save_timer_) {
+                                                         board->power_save_timer_->WakeUp();
+                                                     }
+                                                     
+                                                     // Stop any existing emotion reset timer
+                                                     if (board->emotion_reset_timer_ != nullptr) {
+                                                         esp_timer_stop(board->emotion_reset_timer_);
+                                                     }
+                                                     
+                                                     // Store current emotion state - default to "neutral" if unknown
+                                                     // (We can't easily detect the current emotion, so default to neutral)
+                                                     board->previous_emotion_ = "neutral";
+                                                     
+                                                     // Randomly select one of three emotions
+                                                     const char* emotions[] = {"angry", "happy", "embarrassed"};
+                                                     uint32_t random_index = esp_random() % 3;
+                                                     const char* selected_emotion = emotions[random_index];
+                                                     
+                                                     // Set the random emotion on display
+                                                     auto display = board->GetDisplay();
+                                                     if (display != nullptr) {
+                                                         display->SetEmotion(selected_emotion);
+                                                         ESP_LOGI(TAG, "[TOUCH] Random emotion selected: %s", selected_emotion);
+                                                     }
+                                                     
+                                                     // Calculate animation duration: frames * frame_delay (500ms per frame)
+                                                     // Animation frame counts: Fire(4), Smirk/Happy(4), Embarrassed(3)
+                                                     int frame_counts[] = {4, 4, 3};  // angry, happy, embarrassed
+                                                     int frame_count = frame_counts[random_index];
+                                                     int64_t animation_duration_us = frame_count * 500 * 1000;  // frames * 500ms in microseconds
+                                                     
+                                                     // Start timer to restore previous emotion after one animation cycle
+                                                     if (board->emotion_reset_timer_ != nullptr) {
+                                                         esp_timer_start_once(board->emotion_reset_timer_, animation_duration_us);
+                                                         ESP_LOGI(TAG, "[TOUCH] Timer set to restore emotion '%s' after %lld ms (one cycle)", 
+                                                                  board->previous_emotion_.c_str(), animation_duration_us / 1000);
+                                                     }
+                                                 }
                                              } else {
                                                  ESP_LOGI(TAG, "[TOUCH] Touch button released (channel %lu)", (unsigned long)channel);
                                              }
@@ -1016,6 +1063,28 @@ private:
         power_save_timer_->SetEnabled(true);
     }
 
+    void InitializeEmotionResetTimer() {
+        // Create timer to reset emotion to previous state after one animation cycle
+        const esp_timer_create_args_t timer_args = {
+            .callback = [](void* arg) {
+                EchoEar* board = static_cast<EchoEar*>(arg);
+                if (board != nullptr) {
+                    // Restore previous emotion
+                    auto display = board->GetDisplay();
+                    if (display != nullptr) {
+                        display->SetEmotion(board->previous_emotion_.c_str());
+                        ESP_LOGI(TAG, "[TOUCH] Emotion restored to previous state: %s", board->previous_emotion_.c_str());
+                    }
+                }
+            },
+            .arg = this,
+            .dispatch_method = ESP_TIMER_TASK,
+            .name = "emotion_reset_timer",
+            .skip_unhandled_events = true,
+        };
+        ESP_ERROR_CHECK(esp_timer_create(&timer_args, &emotion_reset_timer_));
+    }
+
     void InitializeButtons() {
         boot_button_.OnClick([this]() {
             auto& app = Application::GetInstance();
@@ -1048,6 +1117,7 @@ public:
         Initializest77916Display();
         InitializeButtons();
         InitializePowerSaveTimer();
+        InitializeEmotionResetTimer();
         ESP_LOGI(TAG, "[TOUCH] About to call InitializeTouchButton()");
         InitializeTouchButton();
         ESP_LOGI(TAG, "[TOUCH] InitializeTouchButton() returned");
