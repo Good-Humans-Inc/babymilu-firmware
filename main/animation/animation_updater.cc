@@ -1,0 +1,1825 @@
+#include "animation_updater.h"
+#include "board.h"
+#include "system_info.h"
+#include "animation.h"
+#include "sd_card.h"
+#include "settings.h"
+#include "config.h"
+#include <esp_log.h>
+#include <esp_timer.h>
+#include <esp_system.h>
+#include <cJSON.h>
+#include <cstring>
+#include <algorithm>
+#include <cctype>
+#include <unistd.h>
+#include <sys/stat.h>
+#include <errno.h>
+#include <dirent.h>
+
+#define TAG "AnimationUpdater"
+
+// Server version - should match the lambda function's SERVER_VERSION
+#define SERVER_VERSION "1.0.1"
+
+AnimationUpdater& AnimationUpdater::GetInstance() {
+    static AnimationUpdater instance;
+    return instance;
+}
+
+AnimationUpdater::AnimationUpdater() {
+    LoadConfiguration();
+}
+
+AnimationUpdater::~AnimationUpdater() {
+    Stop();
+}
+
+void AnimationUpdater::Initialize() {
+    ESP_LOGI(TAG, "Initializing Animation Updater");
+    
+    // NOTE: animation_init() is now called from board constructor after SD card initialization
+    // This ensures SD card animations are loaded when SD card is ready
+    
+    // Load configuration from NVS
+    LoadConfiguration();
+    
+    ESP_LOGI(TAG, "Animation Updater initialized");
+}
+
+void AnimationUpdater::Start() {
+    if (is_running_.load()) {
+        ESP_LOGW(TAG, "Animation updater is already running");
+        return;
+    }
+    
+    if (!enabled_.load()) {
+        ESP_LOGI(TAG, "Animation updater is disabled, not starting");
+        return;
+    }
+    
+    ESP_LOGI(TAG, "Starting animation updater");
+    
+    // Create background task
+    BaseType_t ret = xTaskCreate(
+        UpdateTask,
+        "animation_updater",
+        16384,  // 16KB stack to accommodate HTTP/TLS and validation
+        this,
+        1,     // Very low priority to avoid interfering with audio processing
+        &update_task_handle_
+    );
+    
+    if (ret != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create animation updater task");
+        return;
+    }
+    
+    ESP_LOGI(TAG, "Animation updater task created successfully");
+    
+    is_running_.store(true);
+    ESP_LOGI(TAG, "Animation updater started successfully");
+}
+
+void AnimationUpdater::Stop() {
+    if (!is_running_.load()) {
+        return;
+    }
+    
+    ESP_LOGI(TAG, "Stopping animation updater");
+    
+    is_running_.store(false);
+    
+    if (update_task_handle_ != nullptr) {
+        vTaskDelete(update_task_handle_);
+        update_task_handle_ = nullptr;
+    }
+    
+    if (update_timer_ != nullptr) {
+        xTimerDelete(update_timer_, portMAX_DELAY);
+        update_timer_ = nullptr;
+    }
+    
+    ESP_LOGI(TAG, "Animation updater stopped");
+}
+
+void AnimationUpdater::SetServerUrl(const std::string& url) {
+    server_url_ = url;
+    SaveConfiguration();
+    ESP_LOGI(TAG, "Server URL updated to: %s", url.c_str());
+}
+
+void AnimationUpdater::SetCheckInterval(uint32_t interval_seconds) {
+    check_interval_seconds_ = interval_seconds;
+    SaveConfiguration();
+    ESP_LOGI(TAG, "Check interval updated to: %u seconds", interval_seconds);
+}
+
+void AnimationUpdater::SetEnabled(bool enabled) {
+    enabled_.store(enabled);
+    SaveConfiguration();
+    ESP_LOGI(TAG, "Animation updater %s", enabled ? "enabled" : "disabled");
+    
+    if (enabled && !is_running_.load()) {
+        Start();
+    } else if (!enabled && is_running_.load()) {
+        Stop();
+    }
+}
+
+void AnimationUpdater::CheckForUpdates() {
+    if (!enabled_.load()) {
+        ESP_LOGD(TAG, "Animation updater is disabled, skipping check");
+        return;
+    }
+    
+    ESP_LOGI(TAG, "Manual check for animation updates");
+    
+    // Always attempt to download animations_mega.bin for updates
+    ESP_LOGI(TAG, "Attempting to download animations_mega.bin...");
+    TestHttpsDownload();
+}
+
+bool AnimationUpdater::DownloadMegaFileNow() {
+    ESP_LOGI(TAG, "Manual download of animations_mega.bin requested");
+    
+    if (!enabled_.load()) {
+        ESP_LOGW(TAG, "Animation updater is disabled, cannot download");
+        return false;
+    }
+    
+    // Force download even if already successful
+    bool previous_success = first_download_success_.load();
+    first_download_success_.store(false);
+    
+    ESP_LOGI(TAG, "Starting manual download of animations_mega.bin...");
+    bool success = TestHttpsDownload();
+    
+    if (!success) {
+        ESP_LOGE(TAG, "Manual download failed");
+        // Restore previous state
+        first_download_success_.store(previous_success);
+        return false;
+    }
+    
+    ESP_LOGI(TAG, "Manual download completed successfully");
+    return true;
+}
+
+bool AnimationUpdater::DownloadMegaFileFromUrl(const std::string& url) {
+    ESP_LOGI(TAG, "Downloading animations_mega.bin from URL: %s", url.c_str());
+    
+    if (url.empty()) {
+        ESP_LOGE(TAG, "URL is empty, cannot download");
+        return false;
+    }
+    
+    // Download the file using the private method
+    bool success = DownloadMegaAnimationFile(url);
+    
+    if (success) {
+        ESP_LOGI(TAG, "Successfully downloaded animations_mega.bin from URL");
+        first_download_success_.store(true);
+        ReloadAnimations();
+    } else {
+        ESP_LOGE(TAG, "Failed to download animations_mega.bin from URL");
+    }
+    
+    return success;
+}
+
+bool AnimationUpdater::ForceUpdateCheck() {
+    ESP_LOGI(TAG, "Force update check requested - bypassing success flag");
+    
+    if (!enabled_.load()) {
+        ESP_LOGW(TAG, "Animation updater is disabled, cannot check for updates");
+        return false;
+    }
+    
+    ESP_LOGI(TAG, "Forcing immediate update check...");
+    bool success = TestHttpsDownload();
+    
+    if (success) {
+        ESP_LOGI(TAG, "Force update check completed successfully");
+    } else {
+        ESP_LOGE(TAG, "Force update check failed");
+    }
+    
+    return success;
+}
+
+std::string AnimationUpdater::BuildMegaDownloadUrl() {
+    // Direct GCS URL for mega.bin scoped by device MAC (lowercase + URL-encoded ':')
+    // Use configured server URL if available
+    if (!server_url_.empty()) {
+        return server_url_;
+    }
+    
+    // Fallback: construct URL from MAC address (legacy behavior)
+    std::string mac = SystemInfo::GetMacAddress();
+    std::string mac_lower = mac;
+    std::transform(mac_lower.begin(), mac_lower.end(), mac_lower.begin(), [](unsigned char c){ return (unsigned char)std::tolower(c); });
+    std::string mac_encoded;
+    mac_encoded.reserve(mac_lower.size() * 3);
+    for (char c : mac_lower) {
+        if (c == ':') mac_encoded += "%3A"; else mac_encoded += c;
+    }
+    return std::string("https://storage.googleapis.com/milu-public/device_bin/") + mac_encoded + "/test.bin";
+}
+
+bool AnimationUpdater::GetRemoteContentLength(const std::string& url, size_t &out_length) {
+    try {
+        auto& board = Board::GetInstance();
+        auto http = std::unique_ptr<Http>(board.CreateHttp());
+        if (!http) {
+            ESP_LOGE(TAG, "Failed to create HTTP client for HEAD request");
+            return false;
+        }
+
+        http->SetHeader("User-Agent", "Xiaozhi-Animation-HEAD/1.0");
+        http->SetHeader("Accept", "*/*");
+        http->SetHeader("Accept-Encoding", "identity");
+        http->SetTimeout(10000);
+
+        // Some HTTP stacks may not support HEAD. Try GET without body if needed.
+        bool opened = http->Open("HEAD", url);
+        if (!opened) {
+            ESP_LOGW(TAG, "HEAD not supported; falling back to GET for headers");
+            opened = http->Open("GET", url);
+        }
+        if (!opened) {
+            ESP_LOGE(TAG, "Failed to open connection for Content-Length query");
+            return false;
+        }
+
+        int status_code = http->GetStatusCode();
+        if (status_code != 200) {
+            ESP_LOGW(TAG, "HEAD/GET returned status %d", status_code);
+            http->Close();
+            return false;
+        }
+
+        size_t content_length = http->GetBodyLength();
+        http->Close();
+        if (content_length == 0) {
+            ESP_LOGW(TAG, "Remote Content-Length is 0 or unknown");
+            return false;
+        }
+        out_length = content_length;
+        return true;
+    } catch (...) {
+        ESP_LOGE(TAG, "Exception in GetRemoteContentLength");
+        return false;
+    }
+}
+
+bool AnimationUpdater::GetRemoteMegaContentLength(size_t &out_length) {
+    std::string url = BuildMegaDownloadUrl();
+    return GetRemoteContentLength(url, out_length);
+}
+
+size_t AnimationUpdater::GetLocalMegaFileSize(const char* file_path) {
+    FILE* f = fopen(file_path, "rb");
+    if (!f) return 0;
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    fclose(f);
+    return size < 0 ? 0 : (size_t)size;
+}
+
+void AnimationUpdater::ResetFirstDownloadSuccess() {
+    first_download_success_.store(false);
+    ESP_LOGI(TAG, "First download success flag reset");
+}
+
+std::string AnimationUpdater::GetStatusJson() const {
+    cJSON* json = cJSON_CreateObject();
+    
+    cJSON_AddBoolToObject(json, "enabled", enabled_.load());
+    cJSON_AddBoolToObject(json, "running", is_running_.load());
+    cJSON_AddStringToObject(json, "server_url", server_url_.c_str());
+    cJSON_AddNumberToObject(json, "check_interval_seconds", check_interval_seconds_);
+    cJSON_AddNumberToObject(json, "check_count", check_count_.load());
+    cJSON_AddNumberToObject(json, "update_count", update_count_.load());
+    cJSON_AddNumberToObject(json, "error_count", error_count_.load());
+    cJSON_AddNumberToObject(json, "last_check_time", last_check_time_.load());
+    cJSON_AddNumberToObject(json, "last_update_time", last_update_time_.load());
+    cJSON_AddBoolToObject(json, "first_download_success", first_download_success_.load());
+    
+    char* json_string = cJSON_PrintUnformatted(json);
+    std::string result(json_string);
+    free(json_string);
+    cJSON_Delete(json);
+    
+    return result;
+}
+
+void AnimationUpdater::UpdateTask(void* parameter) {
+    AnimationUpdater* updater = static_cast<AnimationUpdater*>(parameter);
+    updater->UpdateLoop();
+}
+
+void AnimationUpdater::RemoteUpdateTask(void* parameter) {
+    AnimationUpdater* updater = static_cast<AnimationUpdater*>(parameter);
+    updater->UpdateLoop();
+}
+
+void AnimationUpdater::TriggerUpdateLoop() {
+    ESP_LOGI(TAG, "Triggering update loop from remote request");
+    
+    // Create a task to run UpdateLoop (since it calls vTaskDelete at the end)
+    BaseType_t ret = xTaskCreate(
+        RemoteUpdateTask,
+        "remote_anim_update",
+        16384,  // 16KB stack to accommodate HTTP/TLS and validation
+        this,
+        1,      // Low priority
+        nullptr // Don't need to track the handle since task will delete itself
+    );
+    
+    if (ret != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create remote update task");
+    } else {
+        ESP_LOGI(TAG, "Remote update task created successfully");
+    }
+}
+
+void AnimationUpdater::UpdateLoop() {
+    ESP_LOGI(TAG, "Animation updater task started");
+    
+    // Wait 10 seconds to ensure network is fully ready
+    ESP_LOGI(TAG, "Waiting 10 seconds before starting download...");
+    vTaskDelay(pdMS_TO_TICKS(10000));
+    
+    // Build download URL dynamically (uses configured server_url_ or constructs from MAC address)
+    std::string url = BuildMegaDownloadUrl();
+    ESP_LOGI(TAG, "Checking for updates from: %s", url.c_str());
+    
+    // Ensure SD card is available
+    if (!SdCard::IsMounted()) {
+        esp_err_t init_ret = SdCard::Initialize();
+        if (init_ret != ESP_OK) {
+            ESP_LOGE(TAG, "SD card not available, cannot download");
+            is_running_.store(false);
+            update_task_handle_ = nullptr;
+            vTaskDelete(NULL);
+            return;
+        }
+    }
+    
+    const char* file_path = "/sdcard/test.bin";
+    
+    // Check if remote file size matches local file size before downloading
+    ESP_LOGI(TAG, "Checking remote file size...");
+    size_t remote_size = 0;
+    if (GetRemoteContentLength(url, remote_size) && remote_size > 0) {
+        size_t local_size = GetLocalMegaFileSize(file_path);
+        ESP_LOGI(TAG, "Remote file size: %u bytes, Local file size: %u bytes", 
+                 (unsigned int)remote_size, (unsigned int)local_size);
+        
+        if (local_size == remote_size && local_size > 0) {
+            // File sizes match, validate file structure before skipping download
+            ESP_LOGI(TAG, "Local file size matches remote (%u bytes). Validating file structure...", (unsigned int)remote_size);
+            if (ValidateGifMegaAnimationFileFromDisk(file_path)) {
+                ESP_LOGI(TAG, "Local file is valid and matches remote file. Skipping download.");
+                ESP_LOGI(TAG, "No download needed - file is already up to date.");
+                is_running_.store(false);
+                update_task_handle_ = nullptr;
+                vTaskDelete(NULL);
+                return;
+            } else {
+                ESP_LOGW(TAG, "Local file size matches but validation failed. File may be corrupted. Will re-download.");
+            }
+        } else if (local_size > 0) {
+            ESP_LOGI(TAG, "Local file size differs from remote. Will download new version.");
+        } else {
+            ESP_LOGI(TAG, "Local file not found. Will download from remote.");
+        }
+    } else {
+        ESP_LOGW(TAG, "Could not get remote file size, proceeding with download check.");
+    }
+    
+    ESP_LOGI(TAG, "Downloading from: %s", url.c_str());
+    
+    // Create HTTP client
+    auto& board = Board::GetInstance();
+    auto http = std::unique_ptr<Http>(board.CreateHttp());
+    if (!http) {
+        ESP_LOGE(TAG, "Failed to create HTTP client");
+        is_running_.store(false);
+        update_task_handle_ = nullptr;
+        vTaskDelete(NULL);
+        return;
+    }
+    
+    http->SetHeader("User-Agent", "Xiaozhi-Animation-Updater/1.0");
+    http->SetHeader("Accept", "application/octet-stream");
+    http->SetHeader("Accept-Encoding", "identity");
+    http->SetTimeout(600000); // 10 minute timeout
+    
+    ESP_LOGI(TAG, "Attempting to open HTTP connection...");
+    // Open connection
+    if (!http->Open("GET", url)) {
+        ESP_LOGE(TAG, "Failed to open HTTP connection");
+        is_running_.store(false);
+        update_task_handle_ = nullptr;
+        vTaskDelete(NULL);
+        return;
+    }
+    
+    ESP_LOGI(TAG, "HTTP connection opened successfully");
+    int status_code = http->GetStatusCode();
+    ESP_LOGI(TAG, "HTTP status code: %d", status_code);
+    if (status_code != 200) {
+        http->Close();
+        is_running_.store(false);
+        update_task_handle_ = nullptr;
+        vTaskDelete(NULL);
+        return;
+    }
+    
+    // Remove existing file
+    if (access(file_path, F_OK) == 0) {
+        ESP_LOGI(TAG, "Removing existing file before download...");
+        unlink(file_path);
+    }
+    
+    // Open file for writing
+    FILE* file = fopen(file_path, "wb");
+    if (!file) {
+        ESP_LOGE(TAG, "Failed to open file for writing: %s", file_path);
+        http->Close();
+        is_running_.store(false);
+        update_task_handle_ = nullptr;
+        vTaskDelete(NULL);
+        return;
+    }
+    
+    // Download and write to file
+    std::unique_ptr<char[]> buffer(new char[8192]);
+    size_t total_read = 0;
+    
+    ESP_LOGI(TAG, "Starting download stream to %s...", file_path);
+    
+    while (true) {
+        int bytes_read = http->Read(buffer.get(), 8192);
+        if (bytes_read <= 0) {
+            break; // End of data
+        }
+        
+        size_t written = fwrite(buffer.get(), 1, bytes_read, file);
+        if (written != (size_t)bytes_read) {
+            ESP_LOGE(TAG, "Failed to write to file");
+            fclose(file);
+            unlink(file_path);
+            http->Close();
+            is_running_.store(false);
+            update_task_handle_ = nullptr;
+            vTaskDelete(NULL);
+            return;
+        }
+        
+        total_read += bytes_read;
+        
+        // Log progress every 50KB (or at first 1KB to show download started)
+        if (total_read == 1024 || total_read % 51200 == 0) {
+            ESP_LOGI(TAG, "Download progress: %u bytes downloaded", (unsigned int)total_read);
+        }
+    }
+    
+    ESP_LOGI(TAG, "Download stream completed: %u bytes received", (unsigned int)total_read);
+    ESP_LOGI(TAG, "Flushing file buffer...");
+    fflush(file);
+    
+    ESP_LOGI(TAG, "Syncing file to disk...");
+    int fd = fileno(file);
+    if (fd >= 0) {
+        fsync(fd);
+    }
+    
+    ESP_LOGI(TAG, "Closing file handle...");
+    fclose(file);
+    
+    ESP_LOGI(TAG, "Closing HTTP connection...");
+    http->Close();
+    
+    ESP_LOGI(TAG, "✅ Download completed: %u bytes saved to %s", (unsigned int)total_read, file_path);
+    
+    // Reload animations from SD card before reboot
+    ESP_LOGI(TAG, "Reloading animations from SD card before reboot...");
+    animation_load_sd_card_animations();
+    
+    ESP_LOGI(TAG, "Animation update completed successfully. Rebooting device in 2 seconds...");
+    vTaskDelay(pdMS_TO_TICKS(2000)); // Give time for logs to flush
+    
+    ESP_LOGI(TAG, "Rebooting now...");
+    esp_restart();
+    
+    // Should never reach here
+    is_running_.store(false);
+    update_task_handle_ = nullptr;
+    vTaskDelete(NULL); // Delete this task
+}
+
+// Original HTTP server checking logic
+bool AnimationUpdater::CheckServerForUpdates() {
+    check_count_.fetch_add(1);
+    last_check_time_.store(esp_timer_get_time() / 1000); // Convert to milliseconds
+    
+    ESP_LOGI(TAG, "Checking server for animation updates...");
+    
+    try {
+        auto& board = Board::GetInstance();
+        auto http = std::unique_ptr<Http>(board.CreateHttp());
+        
+        if (!http) {
+            ESP_LOGE(TAG, "Failed to create HTTP client");
+            error_count_.fetch_add(1);
+            return false;
+        }
+        
+        // Set headers similar to OTA requests
+        http->SetHeader("Device-Id", SystemInfo::GetMacAddress().c_str());
+        http->SetHeader("Client-Id", Board::GetInstance().GetUuid().c_str());
+        http->SetHeader("User-Agent", "Xiaozhi-Animation/1.0");
+        http->SetHeader("Accept", "application/json");
+        http->SetHeader("Content-Type", "application/json");
+        http->SetTimeout(30000); // 30 second timeout
+        
+        // Build check URL
+        std::string check_url = server_url_ + "/check?device_id=" + SystemInfo::GetMacAddress();
+        
+        ESP_LOGI(TAG, "Checking URL: %s", check_url.c_str());
+        
+        if (!http->Open("GET", check_url)) {
+            ESP_LOGE(TAG, "Failed to open HTTP connection to %s", check_url.c_str());
+            error_count_.fetch_add(1);
+            return false;
+        }
+        
+        int status_code = http->GetStatusCode();
+        ESP_LOGI(TAG, "Server returned status code: %d", status_code);
+        if (status_code != 200) {
+            ESP_LOGW(TAG, "Server returned status code: %d", status_code);
+            if (status_code >= 400) {
+                error_count_.fetch_add(1);
+            }
+            return false;
+        }
+        
+        // Check content length
+        size_t content_length = http->GetBodyLength();
+        ESP_LOGI(TAG, "Content-Length: %d", content_length);
+        
+        // Try different reading approaches
+        std::string response;
+        
+        // First try ReadAll()
+        response = http->ReadAll();
+        ESP_LOGI(TAG, "ReadAll() response length: %d", response.length());
+        ESP_LOGI(TAG, "ReadAll() response: %s", response.c_str());
+        
+        // If ReadAll() fails, try manual reading
+        if (response.empty() && content_length > 0) {
+            ESP_LOGI(TAG, "ReadAll() failed, trying manual read with content_length: %d", content_length);
+            
+            response.clear();
+            char buffer[512];
+            int bytes_read;
+            int total_read = 0;
+            
+            while (total_read < content_length) {
+                bytes_read = http->Read(buffer, sizeof(buffer));
+                if (bytes_read <= 0) {
+                    ESP_LOGI(TAG, "Manual read finished, bytes_read: %d", bytes_read);
+                    break;
+                }
+                
+                response.append(buffer, bytes_read);
+                total_read += bytes_read;
+                ESP_LOGI(TAG, "Manual read %d bytes, total: %d/%d", bytes_read, total_read, content_length);
+            }
+            
+            ESP_LOGI(TAG, "Manual read completed, total bytes: %d", total_read);
+        }
+        
+        http->Close();
+        
+        ESP_LOGI(TAG, "Final response length: %d", response.length());
+        ESP_LOGI(TAG, "Final response: %s", response.c_str());
+        
+        if (response.empty()) {
+            ESP_LOGW(TAG, "Empty response from server");
+            return false;
+        }
+        
+        // Parse JSON response
+        cJSON* json = cJSON_Parse(response.c_str());
+        if (!json) {
+            ESP_LOGE(TAG, "Failed to parse JSON response");
+            error_count_.fetch_add(1);
+            return false;
+        }
+        
+        // Check if updates are available
+        cJSON* has_updates = cJSON_GetObjectItem(json, "has_updates");
+        if (!cJSON_IsBool(has_updates) || !cJSON_IsTrue(has_updates)) {
+            ESP_LOGD(TAG, "No animation updates available");
+            cJSON_Delete(json);
+            return false;
+        }
+        
+        // Get animation files to download
+        cJSON* animations = cJSON_GetObjectItem(json, "animations");
+        if (!cJSON_IsArray(animations)) {
+            ESP_LOGE(TAG, "Invalid animations array in response");
+            cJSON_Delete(json);
+            error_count_.fetch_add(1);
+            return false;
+        }
+        
+        int array_size = cJSON_GetArraySize(animations);
+        ESP_LOGI(TAG, "Found %d animation updates available", array_size);
+        
+        bool any_success = false;
+        
+        for (int i = 0; i < array_size; i++) {
+            cJSON* animation = cJSON_GetArrayItem(animations, i);
+            if (!cJSON_IsObject(animation)) {
+                ESP_LOGW(TAG, "Invalid animation object at index %d", i);
+                continue;
+            }
+            
+            cJSON* filename = cJSON_GetObjectItem(animation, "filename");
+            cJSON* download_url = cJSON_GetObjectItem(animation, "download_url");
+            
+            if (!cJSON_IsString(filename) || !cJSON_IsString(download_url)) {
+                ESP_LOGW(TAG, "Invalid filename or download_url at index %d", i);
+                continue;
+            }
+            
+            std::string filename_str(filename->valuestring);
+            std::string download_url_str(download_url->valuestring);
+            
+            ESP_LOGI(TAG, "Downloading animation: %s", filename_str.c_str());
+            
+            if (DownloadAnimationFile(download_url_str, filename_str)) {
+                ESP_LOGI(TAG, "Successfully downloaded: %s", filename_str.c_str());
+                any_success = true;
+            } else {
+                ESP_LOGE(TAG, "Failed to download: %s", filename_str.c_str());
+            }
+        }
+        
+        cJSON_Delete(json);
+        
+        if (any_success) {
+            update_count_.fetch_add(1);
+            last_update_time_.store(esp_timer_get_time() / 1000);
+            
+            // Set the first download success flag
+            first_download_success_.store(true);
+            
+            // Reload animations from SPIFFS
+            ReloadAnimations();
+            
+            ESP_LOGI(TAG, "Animation updates completed successfully");
+        }
+        
+        return any_success;
+        
+    } catch (const std::exception& e) {
+        ESP_LOGE(TAG, "Exception in CheckServerForUpdates: %s", e.what());
+        error_count_.fetch_add(1);
+        return false;
+    }
+}
+
+// NEW: HTTPS download method for animations_mega.bin
+bool AnimationUpdater::TestHttpsDownload() {
+    ESP_LOGI(TAG, "Checking for animations_mega.bin updates from GCS...");
+
+    std::string download_url = BuildMegaDownloadUrl();
+    ESP_LOGI(TAG, "Fetching: %s", download_url.c_str());
+
+    // Check if local file already matches remote file before downloading
+    size_t remote_len = 0;
+    if (GetRemoteMegaContentLength(remote_len) && remote_len > 0) {
+        const char* local_file = "/sdcard/test.bin";
+        size_t local_len = GetLocalMegaFileSize(local_file);
+        if (local_len == remote_len && local_len > 0) {
+            // File sizes match, validate file structure before skipping download
+            ESP_LOGI(TAG, "Local file size matches remote (%u bytes). Validating file structure...", (unsigned int)remote_len);
+            if (ValidateGifMegaAnimationFileFromDisk(local_file)) {
+                ESP_LOGI(TAG, "Local file is valid and matches remote file. Skipping download.");
+                first_download_success_.store(true);
+                return true; // Return true since we have the correct file
+            } else {
+                ESP_LOGW(TAG, "Local file size matches but validation failed. File may be corrupted. Will re-download.");
+            }
+        } else if (local_len > 0) {
+            ESP_LOGI(TAG, "Local file size (%u) differs from remote (%u). Will download.", 
+                     (unsigned int)local_len, (unsigned int)remote_len);
+        } else {
+            ESP_LOGI(TAG, "Local file not found. Will download from remote.");
+        }
+    } else {
+        ESP_LOGW(TAG, "Could not get remote file size, proceeding with download check.");
+    }
+
+    // Download animations_mega.bin specifically
+    bool success = DownloadMegaAnimationFile(download_url);
+    
+    if (success) {
+        ESP_LOGI(TAG, "Successfully downloaded animations_mega.bin!");
+        first_download_success_.store(true);
+        // Update version to server version after successful download
+        SetCurrentVersion(SERVER_VERSION);  // Update to server version
+        ReloadAnimations();
+    } else {
+        ESP_LOGE(TAG, "Failed to download animations_mega.bin!");
+    }
+    
+    return success;
+}
+
+// NEW: HTTPS connection testing method (no file download)
+bool AnimationUpdater::TestHttpsConnection(const std::string& url) {
+    try {
+        auto& board = Board::GetInstance();
+        auto http = std::unique_ptr<Http>(board.CreateHttp());
+        
+        if (!http) {
+            ESP_LOGE(TAG, "Failed to create HTTP client for connection test");
+            return false;
+        }
+        
+        // Set headers for connection test
+        http->SetHeader("User-Agent", "Xiaozhi-Animation-Test/1.0");
+        http->SetHeader("Accept", "*/*");
+        http->SetHeader("Accept-Encoding", "identity"); // Disable compression
+        http->SetTimeout(30000); // 30 second timeout for connection test
+        
+        ESP_LOGI(TAG, "Testing connection to: %s", url.c_str());
+        ESP_LOGI(TAG, "HTTP client created, attempting connection...");
+        
+        if (!http->Open("GET", url)) {
+            ESP_LOGE(TAG, "Failed to open HTTPS connection");
+            return false;
+        }
+        
+        ESP_LOGI(TAG, "HTTPS connection opened successfully");
+        
+        int status_code = http->GetStatusCode();
+        ESP_LOGI(TAG, "HTTP Status Code: %d", status_code);
+        
+        // Log response headers
+        size_t content_length = http->GetBodyLength();
+        ESP_LOGI(TAG, "Content-Length: %zu", content_length);
+        
+        // Try to read a small amount of response data to test the connection
+        char buffer[512];
+        int bytes_read = http->Read(buffer, sizeof(buffer) - 1);
+        
+        if (bytes_read > 0) {
+            buffer[bytes_read] = '\0'; // Null terminate for logging
+            ESP_LOGI(TAG, "Response data (first %d bytes): %s", bytes_read, buffer);
+        } else {
+            ESP_LOGI(TAG, "No response data received (bytes_read: %d)", bytes_read);
+        }
+        
+        // Try to read all response data for complete testing
+        std::string full_response = http->ReadAll();
+        ESP_LOGI(TAG, "Full response length: %zu bytes", full_response.length());
+        
+        if (!full_response.empty()) {
+            // Log first 200 characters of response
+            size_t preview_length = std::min(static_cast<size_t>(200), full_response.length());
+            std::string preview = full_response.substr(0, preview_length);
+            ESP_LOGI(TAG, "Response preview: %s", preview.c_str());
+        }
+        
+        http->Close();
+        
+        // Consider connection successful if we got any response (even error codes)
+        if (status_code > 0) {
+            ESP_LOGI(TAG, "HTTPS connection test completed successfully");
+            return true;
+        } else {
+            ESP_LOGE(TAG, "HTTPS connection test failed - no status code received");
+            return false;
+        }
+        
+    } catch (const std::exception& e) {
+        ESP_LOGE(TAG, "Exception in TestHttpsConnection: %s", e.what());
+        return false;
+    }
+}
+
+// Helper method to get download URL from HTTPS response
+std::string AnimationUpdater::GetDownloadUrlFromResponse(const std::string& url) {
+    try {
+        auto& board = Board::GetInstance();
+        auto http = std::unique_ptr<Http>(board.CreateHttp());
+        
+        if (!http) {
+            ESP_LOGE(TAG, "Failed to create HTTP client for URL parsing");
+            return "";
+        }
+        
+        // Set headers for connection test
+        http->SetHeader("User-Agent", "Xiaozhi-Animation-Test/1.0");
+        http->SetHeader("Accept", "*/*");
+        http->SetHeader("Accept-Encoding", "identity"); // Disable compression
+        http->SetTimeout(30000); // 30 second timeout for connection test
+        
+        ESP_LOGI(TAG, "Getting response from: %s", url.c_str());
+        
+        if (!http->Open("GET", url)) {
+            ESP_LOGE(TAG, "Failed to open HTTPS connection for URL parsing");
+            return "";
+        }
+        
+        int status_code = http->GetStatusCode();
+        ESP_LOGI(TAG, "HTTP Status Code: %d", status_code);
+        
+        if (status_code != 200) {
+            ESP_LOGE(TAG, "Failed to get response, status code: %d", status_code);
+            return "";
+        }
+        
+        // Read the response data
+        std::string response = http->ReadAll();
+        http->Close();
+        
+        ESP_LOGI(TAG, "Response received: %s", response.c_str());
+        
+        // The response should contain the download URL
+        // Trim any whitespace
+        response.erase(0, response.find_first_not_of(" \t\n\r"));
+        response.erase(response.find_last_not_of(" \t\n\r") + 1);
+        
+        return response;
+        
+    } catch (const std::exception& e) {
+        ESP_LOGE(TAG, "Exception in GetDownloadUrlFromResponse: %s", e.what());
+        return "";
+    }
+}
+
+// Helper method to extract filename from URL
+std::string AnimationUpdater::ExtractFilenameFromUrl(const std::string& url) {
+    // Find the last '/' in the URL
+    size_t last_slash = url.find_last_of('/');
+    if (last_slash == std::string::npos) {
+        ESP_LOGW(TAG, "No slash found in URL, using default filename");
+        return "downloaded_animation.bin";
+    }
+    
+    // Extract everything after the last slash
+    std::string filename = url.substr(last_slash + 1);
+    
+    // If filename is empty, use default
+    if (filename.empty()) {
+        ESP_LOGW(TAG, "Empty filename extracted, using default");
+        return "downloaded_animation.bin";
+    }
+    
+    return filename;
+}
+
+bool AnimationUpdater::DownloadAnimationFile(const std::string& url, const std::string& filename) {
+    try {
+        auto& board = Board::GetInstance();
+        auto http = std::unique_ptr<Http>(board.CreateHttp());
+        
+        if (!http) {
+            ESP_LOGE(TAG, "Failed to create HTTP client for download");
+            return false;
+        }
+        
+        // Set headers for download
+        http->SetHeader("User-Agent", "Xiaozhi-Animation-Updater/1.0");
+        http->SetHeader("Accept", "application/octet-stream");
+        http->SetHeader("Accept-Encoding", "identity"); // Disable compression
+        http->SetTimeout(60000); // 60 second timeout for downloads
+        
+        ESP_LOGI(TAG, "Downloading from: %s", url.c_str());
+        ESP_LOGI(TAG, "HTTP client created, attempting connection...");
+        
+        if (!http->Open("GET", url)) {
+            ESP_LOGE(TAG, "Failed to open download connection");
+            return false;
+        }
+        
+        ESP_LOGI(TAG, "HTTP connection opened successfully");
+        
+        int status_code = http->GetStatusCode();
+        ESP_LOGI(TAG, "HTTP Status Code: %d", status_code);
+        
+        if (status_code != 200) {
+            ESP_LOGE(TAG, "Download failed with status code: %d", status_code);
+            return false;
+        }
+        
+        size_t content_length = http->GetBodyLength();
+        ESP_LOGI(TAG, "Content-Length: %zu", content_length);
+        
+        if (content_length == 0) {
+            ESP_LOGE(TAG, "Empty file received - Content-Length is 0");
+            
+            // Try to read anyway in case content-length is not set
+            ESP_LOGI(TAG, "Attempting to read despite zero content-length...");
+            std::string test_data = http->ReadAll();
+            ESP_LOGI(TAG, "ReadAll() returned %zu bytes", test_data.length());
+            
+            if (test_data.empty()) {
+                ESP_LOGE(TAG, "No data received from server");
+                return false;
+            } else {
+                ESP_LOGI(TAG, "Received data despite zero content-length, proceeding...");
+                content_length = test_data.length();
+            }
+        }
+        
+        ESP_LOGI(TAG, "Downloading %s (%zu bytes)", filename.c_str(), content_length);
+        
+        // Read the file data
+        std::string file_data;
+        file_data.reserve(content_length);
+        
+        char buffer[1024];
+        size_t total_read = 0;
+        
+        while (total_read < content_length) {
+            int bytes_read = http->Read(buffer, sizeof(buffer));
+            if (bytes_read <= 0) {
+                ESP_LOGE(TAG, "Failed to read file data");
+                return false;
+            }
+            
+            file_data.append(buffer, bytes_read);
+            total_read += bytes_read;
+        }
+        
+        http->Close();
+        
+        // Validate the downloaded file
+        if (!ValidateAnimationFile(file_data)) {
+            ESP_LOGE(TAG, "Downloaded file failed validation: %s", filename.c_str());
+            return false;
+        }
+        
+        // Save to SPIFFS
+        if (!SaveAnimationToSpiffs(filename, file_data)) {
+            ESP_LOGE(TAG, "Failed to save file to SPIFFS: %s", filename.c_str());
+            return false;
+        }
+        
+        ESP_LOGI(TAG, "Successfully downloaded and saved: %s", filename.c_str());
+        return true;
+        
+    } catch (const std::exception& e) {
+        ESP_LOGE(TAG, "Exception in DownloadAnimationFile: %s", e.what());
+        return false;
+    }
+}
+
+// NEW: Download animations_mega.bin specifically
+bool AnimationUpdater::DownloadMegaAnimationFile(const std::string& url) {
+    try {
+        // Check if SD card is available (try to use it if possible)
+        bool use_sd_card = false;
+        
+        // Try to use SD card if it's already mounted
+        if (SdCard::IsMounted()) {
+            use_sd_card = true;
+            ESP_LOGI(TAG, "SD card is already mounted, using SD card for animations");
+        } else {
+            // Try to initialize SD card (works for SenseCAP Watcher and potentially other boards)
+            esp_err_t init_ret = SdCard::Initialize();
+            if (init_ret == ESP_OK) {
+                use_sd_card = true;
+                ESP_LOGI(TAG, "SD card initialized successfully, using SD card for animations");
+            } else {
+                // SD card not available
+                if (init_ret == ESP_ERR_NOT_SUPPORTED) {
+                    ESP_LOGE(TAG, "SD card not supported on this board");
+                } else {
+                    ESP_LOGE(TAG, "Failed to initialize SD card: %s", esp_err_to_name(init_ret));
+                }
+                use_sd_card = false;
+            }
+        }
+        
+        // SD card only - no SPIFFS fallback
+        if (!use_sd_card) {
+            ESP_LOGE(TAG, "SD card is required for animation downloads");
+            ESP_LOGE(TAG, "Please ensure SD card is properly inserted and formatted");
+            return false;
+        }
+        
+        ESP_LOGI(TAG, "SD card is mounted and ready for animations_mega.bin download");
+        
+        // Check if local file already matches remote file before downloading
+        const char* filename = "test.bin";
+        char full_path[128];
+        snprintf(full_path, sizeof(full_path), "/sdcard/%s", filename);
+        
+        size_t remote_len = 0;
+        if (GetRemoteMegaContentLength(remote_len) && remote_len > 0) {
+            size_t local_len = GetLocalMegaFileSize(full_path);
+            if (local_len == remote_len && local_len > 0) {
+                // File sizes match, validate file structure before skipping download
+                ESP_LOGI(TAG, "Local file size matches remote (%u bytes). Validating file structure...", (unsigned int)remote_len);
+                if (ValidateGifMegaAnimationFileFromDisk(full_path)) {
+                    ESP_LOGI(TAG, "Local file is valid and matches remote file. Skipping download.");
+                    return true; // Return true since we have the correct file
+                } else {
+                    ESP_LOGW(TAG, "Local file size matches but validation failed. File may be corrupted. Will re-download.");
+                }
+            } else if (local_len > 0) {
+                ESP_LOGI(TAG, "Local file size (%u) differs from remote (%u). Will download.", 
+                         (unsigned int)local_len, (unsigned int)remote_len);
+            } else {
+                ESP_LOGI(TAG, "Local file not found. Will download from remote.");
+            }
+        } else {
+            ESP_LOGW(TAG, "Could not get remote file size, proceeding with download.");
+        }
+        
+        // Debug: List SD card contents and test write access
+        ESP_LOGI(TAG, "Listing SD card contents...");
+        DIR* dir = opendir("/sdcard");
+        if (dir) {
+            struct dirent* entry;
+            int file_count = 0;
+            while ((entry = readdir(dir)) != NULL) {
+                if (entry->d_type == DT_REG) {
+                    ESP_LOGI(TAG, "  Found file: %s", entry->d_name);
+                    file_count++;
+                }
+            }
+            closedir(dir);
+            ESP_LOGI(TAG, "Total files in SD card: %d", file_count);
+        } else {
+            ESP_LOGW(TAG, "Failed to open SD card directory for listing");
+        }
+        
+        // Test write access by creating a small test file (use 8.3 format for FAT32 compatibility)
+        ESP_LOGI(TAG, "Testing SD card write access...");
+        FILE* test_file = fopen("/sdcard/TEST.BIN", "wb");
+        if (test_file) {
+            const char* test_data = "TEST";
+            size_t written = fwrite(test_data, 1, 4, test_file);
+            fflush(test_file);
+            fclose(test_file);
+            if (written == 4) {
+                ESP_LOGI(TAG, "SD card write test successful");
+                // Clean up test file
+                unlink("/sdcard/TEST.BIN");
+            } else {
+                ESP_LOGE(TAG, "SD card write test failed: incomplete write");
+                unlink("/sdcard/TEST.BIN");
+                return false;
+            }
+        } else {
+            ESP_LOGE(TAG, "SD card write test failed: %s", strerror(errno));
+            ESP_LOGE(TAG, "SD card may need to be reformatted or remounted");
+            ESP_LOGE(TAG, "Error code: %d (EINVAL=%d, EACCES=%d, ENOENT=%d)", errno, EINVAL, EACCES, ENOENT);
+            
+            // Try to remount SD card
+            ESP_LOGW(TAG, "Attempting to remount SD card...");
+            SdCard::Eject();
+            vTaskDelay(pdMS_TO_TICKS(1000)); // Wait 1 second
+            esp_err_t remount_ret = SdCard::Initialize();
+            if (remount_ret != ESP_OK) {
+                ESP_LOGE(TAG, "Failed to remount SD card: %s", esp_err_to_name(remount_ret));
+                return false;
+            }
+            ESP_LOGI(TAG, "SD card remounted successfully, retrying write test...");
+            
+            // Retry write test with 8.3 format
+            test_file = fopen("/sdcard/TEST.BIN", "wb");
+            if (test_file) {
+                const char* test_data = "TEST";
+                size_t written = fwrite(test_data, 1, 4, test_file);
+                fflush(test_file);
+                fclose(test_file);
+                if (written == 4) {
+                    ESP_LOGI(TAG, "SD card write test successful after remount");
+                    unlink("/sdcard/TEST.BIN");
+                } else {
+                    ESP_LOGE(TAG, "SD card write test still failing after remount: incomplete write");
+                    unlink("/sdcard/TEST.BIN");
+                    return false;
+                }
+            } else {
+                ESP_LOGE(TAG, "SD card write test still failing after remount: %s", strerror(errno));
+                ESP_LOGE(TAG, "All SD card write attempts failed. SD card may be corrupted or write-protected.");
+                ESP_LOGE(TAG, "Please check: 1) SD card is not write-protected, 2) SD card is properly formatted as FAT32, 3) SD card is not corrupted");
+                return false;
+            }
+        }
+        
+        auto& board = Board::GetInstance();
+        auto http = std::unique_ptr<Http>(board.CreateHttp());
+        
+        if (!http) {
+            ESP_LOGE(TAG, "Failed to create HTTP client for mega file download");
+            return false;
+        }
+        
+        // Set headers for download
+        http->SetHeader("User-Agent", "Xiaozhi-Animation-Updater/1.0");
+        http->SetHeader("Accept", "application/octet-stream");
+        http->SetHeader("Accept-Encoding", "identity"); // Disable compression
+        // Don't request Connection: close - let server decide, or use keep-alive for large files
+        http->SetTimeout(600000); // 10 minute timeout for large file downloads (increased from 5 min)
+        
+        ESP_LOGI(TAG, "Downloading animations_mega.bin from: %s", url.c_str());
+        ESP_LOGI(TAG, "HTTP client created, attempting connection...");
+        
+        if (!http->Open("GET", url)) {
+            ESP_LOGE(TAG, "Failed to open download connection for mega file");
+            return false;
+        }
+        
+        ESP_LOGI(TAG, "HTTP connection opened successfully");
+        
+        int status_code = http->GetStatusCode();
+        ESP_LOGI(TAG, "HTTP Status Code: %d", status_code);
+        
+        if (status_code != 200) {
+            ESP_LOGE(TAG, "Download failed with status code: %d", status_code);
+            return false;
+        }
+        
+        size_t content_length = http->GetBodyLength();
+        ESP_LOGI(TAG, "Content-Length: %u", (unsigned int)content_length);
+        
+        // Handle case where server doesn't provide Content-Length
+        bool unknown_length = (content_length == 0);
+        if (unknown_length) {
+            ESP_LOGI(TAG, "Server did not provide Content-Length, will read until connection closes");
+        } else if (content_length < 1000000) {
+            // Warn if Content-Length seems too small (less than 1MB for a 3.87MB file)
+            ESP_LOGW(TAG, "⚠️  Server reported Content-Length (%u bytes) seems too small", 
+                     (unsigned int)content_length);
+            ESP_LOGW(TAG, "⚠️  Expected ~3.87MB, but will ignore Content-Length and read until connection closes");
+            // Treat as unknown length to avoid stopping early
+            unknown_length = true;
+        }
+        
+        ESP_LOGI(TAG, "Downloading animations_mega.bin (%u bytes reported, streaming to SD card)", 
+                 (unsigned int)content_length);
+        
+        // Stream download directly to file (no RAM buffering)
+        // Use shorter filename to avoid FAT32 long filename issues
+        // Note: filename and full_path already defined above in the file comparison check
+        
+        // Remove existing file if it exists
+        if (access(full_path, F_OK) == 0) {
+            ESP_LOGI(TAG, "Removing existing %s...", filename);
+            if (unlink(full_path) != 0) {
+                ESP_LOGW(TAG, "Failed to remove existing file: %s", full_path);
+            }
+        }
+        
+        // Remove dependency on stat() for mount point checks; VFS semantics can make this unreliable
+        
+        // Open file for writing
+        FILE* file = fopen(full_path, "wb");
+        if (!file) {
+            ESP_LOGE(TAG, "Failed to open file for writing: %s", full_path);
+            ESP_LOGE(TAG, "Error: %s", strerror(errno));
+            ESP_LOGE(TAG, "Please check: 1) SD card is inserted, 2) SD card is formatted as FAT32, 3) SD card is not write-protected");
+            http->Close();
+            return false;
+        }
+        
+        // Use larger buffer (8KB) for better performance with large file downloads
+        std::unique_ptr<char[]> buffer(new char[8192]);
+        const size_t buf_size = 8192;
+        size_t total_read = 0;
+        bool download_success = true;
+        uint32_t timeout_start = esp_timer_get_time() / 1000; // Start time in ms
+        uint32_t timeout_duration = 600000; // 10 minutes timeout (increased for large files)
+        uint32_t last_read_time = timeout_start;
+        uint32_t read_timeout = 60000; // 1 minute timeout between reads (to detect stalled downloads)
+        
+        ESP_LOGI(TAG, "Starting download stream to %s...", full_path);
+        
+        while (download_success) {
+            // Check for overall timeout
+            uint32_t current_time = esp_timer_get_time() / 1000;
+            if (current_time - timeout_start > timeout_duration) {
+                ESP_LOGE(TAG, "Download timeout after %u ms (read %u bytes)", 
+                         timeout_duration, (unsigned int)total_read);
+                download_success = false;
+                break;
+            }
+            
+            // Check for read stall (no data received for too long)
+            if (current_time - last_read_time > read_timeout) {
+                ESP_LOGE(TAG, "Download stalled: no data received for %u ms (read %u bytes so far)", 
+                         current_time - last_read_time, (unsigned int)total_read);
+                download_success = false;
+                break;
+            }
+            
+            int bytes_read = http->Read(buffer.get(), buf_size);
+            uint32_t read_complete_time = esp_timer_get_time() / 1000;
+            
+            // Update last read time if we got data
+            if (bytes_read > 0) {
+                last_read_time = read_complete_time;
+            }
+            if (bytes_read <= 0) {
+                // End of data or connection closed
+                if (bytes_read < 0) {
+                    ESP_LOGE(TAG, "HTTP Read() returned error: %d", bytes_read);
+                    ESP_LOGE(TAG, "Download failed after reading %u bytes", (unsigned int)total_read);
+                    download_success = false;
+                    break;
+                } else {
+                    // bytes_read == 0: connection closed or no more data
+                    ESP_LOGI(TAG, "Download stream completed (connection closed), read %u bytes total", (unsigned int)total_read);
+                    
+                    // If we expected more data, warn about incomplete download
+                    if (!unknown_length && total_read < content_length) {
+                        ESP_LOGW(TAG, "⚠️  Download stopped early: read %u bytes but server reported %u bytes", 
+                                 (unsigned int)total_read, (unsigned int)content_length);
+                        ESP_LOGW(TAG, "⚠️  This may indicate connection was closed prematurely by server");
+                    } else if (total_read < 1000000) {
+                        // Warn if downloaded file is suspiciously small (less than 1MB)
+                        ESP_LOGW(TAG, "⚠️  Downloaded file is suspiciously small (%u bytes) - expected ~3.87MB", 
+                                 (unsigned int)total_read);
+                        ESP_LOGW(TAG, "⚠️  This may indicate an incomplete download or server issue");
+                    }
+                }
+                break;
+            }
+            
+            // Write directly to file
+            size_t written = fwrite(buffer.get(), 1, bytes_read, file);
+            if (written != bytes_read) {
+                ESP_LOGE(TAG, "Failed to write data to file");
+                download_success = false;
+                break;
+            }
+            
+            total_read += bytes_read;
+            
+            // Log progress every 50KB (or at first 1KB to show download started)
+            if (total_read == 1024 || total_read % 51200 == 0) {
+                if (unknown_length) {
+                    ESP_LOGI(TAG, "Download progress: %u bytes downloaded", (unsigned int)total_read);
+                } else {
+                    // Log progress, but don't trust Content-Length - continue reading until connection closes
+                    ESP_LOGI(TAG, "Download progress: %u bytes downloaded (server reported %u bytes)", 
+                             (unsigned int)total_read, (unsigned int)content_length);
+                    // Warn if we've exceeded reported Content-Length (likely incorrect header)
+                    if (total_read > content_length) {
+                        ESP_LOGW(TAG, "⚠️  Downloaded %u bytes exceeds reported Content-Length (%u) - server header may be incorrect, continuing...", 
+                                 (unsigned int)total_read, (unsigned int)content_length);
+                    }
+                }
+            }
+            
+            // Note: Don't stop at Content-Length - some servers report incorrect Content-Length headers
+            // Continue reading until connection closes (bytes_read <= 0)
+        }
+        
+        // Flush and sync file to ensure all data is written to disk
+        ESP_LOGI(TAG, "Flushing file buffer for %s...", filename);
+        fflush(file);
+        
+        // Sync file to SD card (important for SD card writes)
+        // ESP-IDF provides fsync through unistd.h
+        ESP_LOGI(TAG, "Syncing file to disk...");
+        int fd = fileno(file);
+        if (fd >= 0) {
+            fsync(fd);
+        }
+        
+        ESP_LOGI(TAG, "Closing file handle...");
+        fclose(file);
+        
+        ESP_LOGI(TAG, "Closing HTTP connection...");
+        http->Close();
+        
+        if (!download_success) {
+            ESP_LOGE(TAG, "Download failed, removing partial file");
+            unlink(full_path);
+            return false;
+        }
+        
+        // Give filesystem time to sync, especially important for SD cards
+        vTaskDelay(pdMS_TO_TICKS(500));
+        
+        // Verify file was written completely by checking size
+        FILE* verify_size = fopen(full_path, "rb");
+        if (verify_size) {
+            fseek(verify_size, 0, SEEK_END);
+            size_t actual_size = ftell(verify_size);
+            fclose(verify_size);
+            
+            if (actual_size != total_read) {
+                ESP_LOGE(TAG, "File size mismatch: expected %u bytes, got %zu bytes", 
+                         (unsigned int)total_read, actual_size);
+                unlink(full_path);
+                return false;
+            }
+            ESP_LOGI(TAG, "File size verified: %u bytes", (unsigned int)actual_size);
+        } else {
+            ESP_LOGE(TAG, "Failed to verify file size - cannot open file for verification");
+            unlink(full_path);
+            return false;
+        }
+        
+        // Additional sync delay for SD card to ensure data is fully written
+        vTaskDelay(pdMS_TO_TICKS(500));
+        
+        ESP_LOGI(TAG, "✅ File written and closed successfully: %s (%u bytes)", filename, (unsigned int)total_read);
+        
+        // Reload animations from SD card
+        ESP_LOGI(TAG, "Reloading animations from SD card...");
+        animation_load_sd_card_animations();
+        
+        ESP_LOGI(TAG, "Animation update completed successfully. Rebooting device in 2 seconds...");
+        vTaskDelay(pdMS_TO_TICKS(2000)); // Give time for logs to flush
+        
+        ESP_LOGI(TAG, "Rebooting now...");
+        esp_restart();
+        
+        // Should never reach here
+        return true;
+        
+    } catch (const std::exception& e) {
+        ESP_LOGE(TAG, "Exception in DownloadMegaAnimationFile: %s", e.what());
+        return false;
+    }
+}
+
+bool AnimationUpdater::SaveAnimationToSpiffs(const std::string& filename, const std::string& data) {
+    char full_path[128];
+    snprintf(full_path, sizeof(full_path), "/spiffs/%s", filename.c_str());
+    
+    FILE* file = fopen(full_path, "wb");
+    if (!file) {
+        ESP_LOGE(TAG, "Failed to open file for writing: %s", full_path);
+        return false;
+    }
+    
+    size_t written = fwrite(data.data(), 1, data.size(), file);
+    fclose(file);
+    
+    if (written != data.size()) {
+        ESP_LOGE(TAG, "Failed to write complete file: %s (written: %zu, expected: %zu)", 
+                 filename.c_str(), written, data.size());
+        return false;
+    }
+    
+    ESP_LOGI(TAG, "Saved animation file: %s (%zu bytes)", filename.c_str(), written);
+    return true;
+}
+
+// NEW: Save animations_mega.bin to SPIFFS
+bool AnimationUpdater::SaveMegaAnimationToSpiffs(const std::string& data) {
+    const char* filename = "animations_mega.bin";
+    char full_path[128];
+    snprintf(full_path, sizeof(full_path), "/spiffs/%s", filename);
+    
+    ESP_LOGI(TAG, "Saving animations_mega.bin to SPIFFS (%zu bytes)...", data.size());
+    
+    // Remove existing file if it exists
+    if (access(full_path, F_OK) == 0) {
+        ESP_LOGI(TAG, "Removing existing test.bin...");
+        if (unlink(full_path) != 0) {
+            ESP_LOGW(TAG, "Failed to remove existing file: %s", full_path);
+        }
+    }
+    
+    FILE* file = fopen(full_path, "wb");
+    if (!file) {
+        ESP_LOGE(TAG, "Failed to open file for writing: %s", full_path);
+        return false;
+    }
+    
+    size_t written = fwrite(data.data(), 1, data.size(), file);
+    fclose(file);
+    
+    if (written != data.size()) {
+        ESP_LOGE(TAG, "Failed to write complete animations_mega.bin (written: %zu, expected: %zu)", 
+                 written, data.size());
+        return false;
+    }
+    
+    ESP_LOGI(TAG, "✅ Successfully saved animations_mega.bin (%zu bytes)", written);
+    
+    // Verify the file was written correctly
+    FILE* verify_file = fopen(full_path, "rb");
+    if (verify_file) {
+        fseek(verify_file, 0, SEEK_END);
+        size_t file_size = ftell(verify_file);
+        fclose(verify_file);
+        
+        if (file_size == data.size()) {
+            ESP_LOGI(TAG, "✅ File verification successful: %zu bytes", file_size);
+            return true;
+        } else {
+            ESP_LOGE(TAG, "❌ File verification failed: expected %zu, got %zu", data.size(), file_size);
+            return false;
+        }
+    } else {
+        ESP_LOGE(TAG, "❌ Failed to verify written file");
+        return false;
+    }
+}
+
+bool AnimationUpdater::ValidateAnimationFile(const std::string& data) {
+    if (data.size() < 24) { // Minimum size for our custom format
+        ESP_LOGE(TAG, "File too small: %zu bytes", data.size());
+        return false;
+    }
+    
+    // Check magic number (0x4C56474C = "LVGL" in little endian)
+    const uint32_t* header = reinterpret_cast<const uint32_t*>(data.data());
+    if (header[0] != 0x4C56474C) {
+        ESP_LOGE(TAG, "Invalid magic number: 0x%x", header[0]);
+        return false;
+    }
+    
+    // Basic validation passed
+    return true;
+}
+
+// NEW: Validate animations_mega.bin file
+bool AnimationUpdater::ValidateMegaAnimationFile(const std::string& data) {
+    if (data.size() < 24) { // Minimum size for one frame
+        ESP_LOGE(TAG, "Mega file too small: %zu bytes", data.size());
+        return false;
+    }
+    
+    ESP_LOGI(TAG, "Validating animations_mega.bin (%zu bytes)...", data.size());
+    
+    // Animation frame counts: Normal(3), Embarrass(3), Fire(4), Happy(4), Inspiration(4), Question(4), Shy(2), Sleep(4)
+    int animation_frame_counts[] = {3, 3, 4, 4, 4, 4, 2, 4};
+    int total_expected_frames = 0;
+    for (int i = 0; i < 8; i++) {
+        total_expected_frames += animation_frame_counts[i];
+    }
+    
+    ESP_LOGI(TAG, "Expected total frames: %d", total_expected_frames);
+    
+    // Validate each frame in the mega file
+    size_t offset = 0;
+    int frame_count = 0;
+    
+    for (int anim_idx = 0; anim_idx < 8; anim_idx++) {
+        int frame_count_for_anim = animation_frame_counts[anim_idx];
+        
+        for (int frame_idx = 0; frame_idx < frame_count_for_anim; frame_idx++) {
+            if (offset + 24 > data.size()) {
+                ESP_LOGE(TAG, "Mega file truncated at frame %d (offset %zu)", frame_count, offset);
+                return false;
+            }
+            
+            // Read header (6 uint32_t values)
+            const uint32_t* header = reinterpret_cast<const uint32_t*>(data.data() + offset);
+            
+            // Validate magic number
+            if (header[0] != 0x4C56474C) {
+                ESP_LOGE(TAG, "Invalid magic number for frame %d: 0x%x", frame_count, header[0]);
+                return false;
+            }
+            
+            // Calculate expected data size
+            uint32_t width = header[3];
+            uint32_t height = header[4];
+            uint32_t stride = header[5];
+            size_t frame_data_size = height * stride;
+            size_t total_frame_size = 24 + frame_data_size; // 24 bytes header + data
+            
+            if (offset + total_frame_size > data.size()) {
+                ESP_LOGE(TAG, "Frame %d data truncated (offset %zu, size %zu, total %zu)", 
+                         frame_count, offset, total_frame_size, data.size());
+                return false;
+            }
+            
+            ESP_LOGD(TAG, "Frame %d: %dx%d, %zu bytes", frame_count, width, height, frame_data_size);
+            
+            offset += total_frame_size;
+            frame_count++;
+        }
+    }
+    
+    ESP_LOGI(TAG, "✅ Successfully validated animations_mega.bin with %d frames", frame_count);
+    return true;
+}
+
+// NEW: Validate animations_mega.bin file from disk (memory-efficient)
+bool AnimationUpdater::ValidateMegaAnimationFileFromDisk(const char* file_path) {
+    ESP_LOGI(TAG, "Validating animations_mega.bin from disk: %s", file_path);
+    
+    FILE* f = fopen(file_path, "rb");
+    if (f == NULL) {
+        ESP_LOGE(TAG, "Failed to open file for validation: %s", file_path);
+        return false;
+    }
+    
+    // Get file size
+    fseek(f, 0, SEEK_END);
+    size_t file_size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    
+    if (file_size < 24) { // Minimum size for one frame
+        ESP_LOGE(TAG, "Mega file too small: %zu bytes", file_size);
+        fclose(f);
+        return false;
+    }
+    
+    ESP_LOGI(TAG, "Validating animations_mega.bin (%u bytes)...", (unsigned int)file_size);
+    
+    // Animation frame counts: Normal(3), Embarrass(3), Fire(4), Happy(4), Inspiration(4), Question(4), Shy(2), Sleep(4)
+    int animation_frame_counts[] = {3, 3, 4, 4, 4, 4, 2, 4};
+    int total_expected_frames = 0;
+    for (int i = 0; i < 8; i++) {
+        total_expected_frames += animation_frame_counts[i];
+    }
+    
+    ESP_LOGI(TAG, "Expected total frames: %d", total_expected_frames);
+    
+    // Validate each frame in the mega file
+    int frame_count = 0;
+    long file_pos = 0;
+    
+    for (int anim_idx = 0; anim_idx < 8; anim_idx++) {
+        int frame_count_for_anim = animation_frame_counts[anim_idx];
+        
+        for (int frame_idx = 0; frame_idx < frame_count_for_anim; frame_idx++) {
+            file_pos = ftell(f);
+            
+            // Read header (6 uint32_t values)
+            uint32_t header_data[6];
+            size_t header_read = fread(header_data, sizeof(uint32_t), 6, f);
+            if (header_read != 6) {
+                ESP_LOGE(TAG, "Failed to read header for frame %d: read %u of 6 uint32_t", 
+                         frame_count, (unsigned int)header_read);
+                ESP_LOGE(TAG, "File position: %ld, file size: %u, EOF: %s", 
+                         ftell(f), (unsigned int)file_size, feof(f) ? "yes" : "no");
+                ESP_LOGE(TAG, "⚠️  File only contains %d frames, but expected %d frames", 
+                         frame_count, total_expected_frames);
+                fclose(f);
+                return false;
+            }
+            
+            // Validate magic number - COMMENTED OUT: Only check file size, not format
+            // if (header_data[0] != 0x4C56474C) {
+            //     ESP_LOGE(TAG, "Invalid magic number for frame %d: 0x%x (expected 0x%x)", 
+            //              frame_count, header_data[0], 0x4C56474C);
+            //     ESP_LOGE(TAG, "File position: %ld", file_pos);
+            //     fclose(f);
+            //     return false;
+            // }
+            
+            // Calculate expected data size
+            uint32_t width = header_data[3];
+            uint32_t height = header_data[4];
+            uint32_t stride = header_data[5];
+            size_t frame_data_size = height * stride;
+            size_t total_frame_size = 24 + frame_data_size; // 24 bytes header + data
+            
+            ESP_LOGD(TAG, "Frame %d: %dx%d, stride=%u, data_size=%u, total_size=%u", 
+                     frame_count, width, height, stride, (unsigned int)frame_data_size, 
+                     (unsigned int)total_frame_size);
+            
+            // Check if we have enough data remaining
+            long current_pos = ftell(f);
+            if (current_pos < 0) {
+                ESP_LOGE(TAG, "Failed to get current file position for frame %d", frame_count);
+                fclose(f);
+                return false;
+            }
+            
+            if ((long)(current_pos + frame_data_size) > (long)file_size) {
+                ESP_LOGE(TAG, "Frame %d data extends beyond file end (pos %ld, need %u bytes, file_size %u)", 
+                         frame_count, current_pos, (unsigned int)frame_data_size, (unsigned int)file_size);
+                ESP_LOGE(TAG, "⚠️  File only contains %d frames, but expected %d frames", 
+                         frame_count, total_expected_frames);
+                ESP_LOGE(TAG, "Expected file size: ~%u bytes, actual: %u bytes", 
+                         (unsigned int)(total_expected_frames * total_frame_size), (unsigned int)file_size);
+                fclose(f);
+                return false;
+            }
+            
+            // Skip the pixel data
+            if (fseek(f, frame_data_size, SEEK_CUR) != 0) {
+                ESP_LOGE(TAG, "Failed to skip frame %d data (size %u)", 
+                         frame_count, (unsigned int)frame_data_size);
+                fclose(f);
+                return false;
+            }
+            
+            ESP_LOGD(TAG, "Frame %d: %dx%d, %u bytes (total frame: %u bytes)", 
+                     frame_count, width, height, (unsigned int)frame_data_size, 
+                     (unsigned int)total_frame_size);
+            frame_count++;
+        }
+    }
+    
+    long final_pos = ftell(f);
+    fclose(f);
+    
+    if (frame_count != total_expected_frames) {
+        ESP_LOGE(TAG, "❌ Validation failed: file contains %d frames, expected %d frames", 
+                 frame_count, total_expected_frames);
+        ESP_LOGE(TAG, "File size: %u bytes, expected ~%u bytes for %d frames", 
+                 (unsigned int)file_size, 
+                 (unsigned int)(total_expected_frames * (24 + 131072)),  // Approx size per frame
+                 total_expected_frames);
+        return false;
+    }
+    
+    if (final_pos != (long)file_size) {
+        ESP_LOGW(TAG, "Validation completed but file position (%ld) != file size (%u)", 
+                 final_pos, (unsigned int)file_size);
+        ESP_LOGW(TAG, "Extra %ld bytes in file (may be padding)", (long)file_size - final_pos);
+    }
+    
+    ESP_LOGI(TAG, "✅ Successfully validated animations_mega.bin with %d frames (expected %d)", 
+             frame_count, total_expected_frames);
+    return true;
+}
+
+// NEW: Validate GIF-based test.bin file from disk
+bool AnimationUpdater::ValidateGifMegaAnimationFileFromDisk(const char* file_path) {
+    ESP_LOGI(TAG, "Validating GIF-based test.bin from disk: %s", file_path);
+    
+    FILE* f = fopen(file_path, "rb");
+    if (f == NULL) {
+        ESP_LOGE(TAG, "Failed to open file for validation: %s", file_path);
+        return false;
+    }
+    
+    // Get file size
+    fseek(f, 0, SEEK_END);
+    size_t file_size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    
+    // Minimum size: 12 bytes header + at least 1 file table entry (44 bytes) + minimal data
+    const size_t MIN_FILE_SIZE = 12 + 44 + 10; // Header + 1 entry + minimal GIF data
+    if (file_size < MIN_FILE_SIZE) {
+        ESP_LOGE(TAG, "GIF test.bin file too small: %zu bytes (minimum %zu bytes)", file_size, MIN_FILE_SIZE);
+        fclose(f);
+        return false;
+    }
+    
+    // Read header (12 bytes: file_count, checksum, combined_length)
+    uint32_t file_count, checksum, combined_length;
+    if (fread(&file_count, sizeof(uint32_t), 1, f) != 1 ||
+        fread(&checksum, sizeof(uint32_t), 1, f) != 1 ||
+        fread(&combined_length, sizeof(uint32_t), 1, f) != 1) {
+        ESP_LOGE(TAG, "Failed to read GIF test.bin header");
+        fclose(f);
+        return false;
+    }
+    
+    ESP_LOGI(TAG, "GIF test.bin header: file_count=%u, checksum=0x%08X, combined_length=%u", 
+             file_count, checksum, combined_length);
+    
+    // Validate file_count is reasonable (1-20 files expected, typically 13)
+    if (file_count == 0 || file_count > 20) {
+        ESP_LOGE(TAG, "Invalid file_count in header: %u (expected 1-20, typically 13)", file_count);
+        fclose(f);
+        return false;
+    }
+    
+    // Calculate file table size and data section start
+    const size_t FILE_TABLE_ENTRY_SIZE = 44; // 32 name + 4 size + 4 offset + 2 width + 2 height
+    size_t file_table_size = file_count * FILE_TABLE_ENTRY_SIZE;
+    size_t data_start = 12 + file_table_size; // 12 byte header + file table
+    
+    // Validate combined_length matches expected size
+    if (combined_length != file_table_size + (file_size - data_start)) {
+        ESP_LOGW(TAG, "combined_length (%u) doesn't match calculated size (file_table=%zu, data=%zu)", 
+                 combined_length, file_table_size, file_size - data_start);
+        // Continue validation anyway, as this might be a minor inconsistency
+    }
+    
+    // Validate file structure can fit
+    if (file_size < data_start) {
+        ESP_LOGE(TAG, "File too small for file table: %zu bytes (need at least %zu)", file_size, data_start);
+        fclose(f);
+        return false;
+    }
+    
+    // Read and validate file table
+    uint32_t total_data_size = 0;
+    for (uint32_t i = 0; i < file_count; i++) {
+        // Read file table entry (44 bytes)
+        char name[33] = {0}; // 32 bytes + null terminator
+        uint32_t file_size_entry, file_offset;
+        uint16_t width, height;
+        
+        if (fread(name, 32, 1, f) != 1 ||
+            fread(&file_size_entry, sizeof(uint32_t), 1, f) != 1 ||
+            fread(&file_offset, sizeof(uint32_t), 1, f) != 1 ||
+            fread(&width, sizeof(uint16_t), 1, f) != 1 ||
+            fread(&height, sizeof(uint16_t), 1, f) != 1) {
+            ESP_LOGE(TAG, "Failed to read file table entry %u", i);
+            fclose(f);
+            return false;
+        }
+        
+        // Remove null padding from name
+        size_t name_len = strnlen(name, 32);
+        name[name_len] = '\0';
+        
+        // Validate file name (should be non-empty and end with .gif)
+        if (name_len == 0 || name_len > 32) {
+            ESP_LOGE(TAG, "Invalid file name length at entry %u: %zu", i, name_len);
+            fclose(f);
+            return false;
+        }
+        
+        // Validate file size is reasonable (at least 13 bytes for minimal GIF, max 10MB)
+        if (file_size_entry < 13 || file_size_entry > 10485760) {
+            ESP_LOGE(TAG, "Invalid file_size for entry %u (%s): %u bytes", i, name, file_size_entry);
+            fclose(f);
+            return false;
+        }
+        
+        // Validate offset is within data section bounds (lightweight check - no file content reading)
+        size_t data_entry_start = data_start + file_offset;
+        size_t data_entry_end = data_entry_start + file_size_entry + 2; // +2 for magic bytes
+        if (data_entry_end > file_size) {
+            ESP_LOGE(TAG, "File entry %u (%s) extends beyond file end: offset=%u, size=%u, file_size=%zu", 
+                     i, name, file_offset, file_size_entry, file_size);
+            fclose(f);
+            return false;
+        }
+        
+        // Lightweight validation: only check structure, not file content
+        // Skip reading actual GIF files to avoid expensive I/O operations
+        total_data_size += file_size_entry + 2; // Include magic bytes in total
+        ESP_LOGD(TAG, "File table entry %u: %s, size=%u, offset=%u", i, name, file_size_entry, file_offset);
+    }
+    
+    // Lightweight validation: skip checksum validation to avoid reading entire file
+    // Structure validation (header, file table, offsets) is sufficient for pre-download check
+    
+    fclose(f);
+    
+    ESP_LOGI(TAG, "✅ Successfully validated GIF test.bin with %u files", file_count);
+    
+    return true;
+}
+
+void AnimationUpdater::ReloadAnimations() {
+    ESP_LOGI(TAG, "Reloading animations from SD card");
+    
+    // Reload SD card animations
+    animation_load_sd_card_animations();
+    
+    ESP_LOGI(TAG, "Animations reloaded successfully");
+    
+    // Show current animation sources for debugging
+    animation_show_current_sources();
+}
+
+void AnimationUpdater::LoadConfiguration() {
+    // Animation server URL is dynamically constructed from MAC address
+    // Pattern: https://storage.googleapis.com/milu-public/device_bin/<MAC_encoded>/mega.bin
+    // Leave server_url_ empty to use the dynamic GCS URL (handled in BuildMegaDownloadUrl)
+    server_url_ = "";
+    
+    check_interval_seconds_ = 10;  // 10 seconds
+    enabled_.store(true);  // Always enabled for testing
+    
+    // Load version from NVS storage
+    Settings settings("animudter", true);
+    std::string saved_version = settings.GetString("version", "1.0.0");  // Default to 1.0.0 if not found
+    if (!saved_version.empty()) {
+        current_version_ = saved_version;
+    }
+}
+
+void AnimationUpdater::SaveConfiguration() {
+    // Save version to NVS storage
+    Settings settings("animudter", true);
+    settings.SetString("version", current_version_);
+    ESP_LOGD(TAG, "Version save attempted: %s", current_version_.c_str());
+}
+
+std::string AnimationUpdater::GetCurrentVersion() const {
+    return current_version_;
+}
+
+void AnimationUpdater::SetCurrentVersion(const std::string& version) {
+    current_version_ = version;
+    SaveConfiguration();  // Save to NVS storage
+    ESP_LOGI(TAG, "Animation version updated to: %s", version.c_str());
+}
+

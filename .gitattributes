@@ -1,0 +1,9 @@
+# Preserve line endings and file content for managed_components
+# This prevents git from modifying files and causing hash mismatches
+# Note: Even with this, hash mismatches may occur. Best to let ESP-IDF re-download.
+managed_components/** -text
+managed_components/** linguist-generated
+
+# Preserve dependencies.lock
+dependencies.lock text eol=lf
+
