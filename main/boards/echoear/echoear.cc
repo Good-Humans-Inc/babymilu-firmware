@@ -612,6 +612,13 @@ private:
         while (true) {
             vTaskDelay(pdMS_TO_TICKS(1000));  // Wait 1 second
             
+            // Skip logging when audio is active to avoid interference with audio streaming
+            auto device_state = Application::GetInstance().GetDeviceState();
+            if (device_state == kDeviceStateListening || device_state == kDeviceStateSpeaking) {
+                // Skip logging during audio activity
+                continue;
+            }
+            
             uint32_t current_count = EchoEar::touch_event_count_;
             if (current_count > last_count) {
                 ESP_LOGI(TAG, "[TOUCH] Touch sensor status: Events detected! Total events: %lu (GPIO7)", 
@@ -638,9 +645,24 @@ private:
         ESP_LOGI(TAG, "[TOUCH] touch_button_event_task entering main loop");
         while (true) {
             if (board->touch_button_handle_ != nullptr) {
-                touch_button_sensor_handle_events(board->touch_button_handle_);
+                // Check device state to adjust polling frequency
+                auto device_state = Application::GetInstance().GetDeviceState();
+                
+                // During audio activity (listening/speaking), reduce polling frequency
+                // to avoid interference with audio streaming
+                if (device_state == kDeviceStateListening || device_state == kDeviceStateSpeaking) {
+                    // Reduced frequency: 100ms instead of 10ms during audio activity
+                    // This reduces CPU usage and potential hardware interference
+                    touch_button_sensor_handle_events(board->touch_button_handle_);
+                    vTaskDelay(pdMS_TO_TICKS(100));  // Check every 100ms during audio
+                } else {
+                    // Normal frequency when audio is not active
+                    touch_button_sensor_handle_events(board->touch_button_handle_);
+                    vTaskDelay(pdMS_TO_TICKS(10));  // Check every 10ms normally
+                }
+            } else {
+                vTaskDelay(pdMS_TO_TICKS(100));  // If handle is null, wait longer
             }
-            vTaskDelay(pdMS_TO_TICKS(10));  // Check every 10ms
         }
     }
 

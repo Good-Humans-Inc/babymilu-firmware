@@ -1130,28 +1130,45 @@ void LcdDisplay::SetEmotion(const char *emotion)
     };
 
     static const std::vector<Emotion> emotions = {
+        // Neutral baseline (normal.gif)
         {ANIMATION_STATIC_NORMAL, "neutral"},
+
+        // Positive / happy styles (smirk.gif + smirk_start.gif)
         {ANIMATION_SMIRK, "happy"},
-        {ANIMATION_LAUGH, "laughing"},
+        {ANIMATION_SMIRK, "laughing"},
         {ANIMATION_SMIRK, "funny"},
-        {ANIMATION_SAD, "sad"},
-        {ANIMATION_FIRE, "angry"},
-        //{ANIMATION_EMBARRESSED, "crying"},
+        {ANIMATION_SMIRK, "cool"},
+
+        // Heart / affection (heart.gif + heart_start.gif)
         {ANIMATION_HAPPY, "loving"},
+        {ANIMATION_HAPPY, "kissy"},
+
+        // Blush / embarrassed (blush.gif mapped via ANIMATION_EMBARRESSED)
         {ANIMATION_EMBARRESSED, "embarrassed"},
+        {ANIMATION_EMBARRESSED, "confident"},
+
+        // Starry / surprised (starry.gif + starry_start.gif mapped via ANIMATION_INSPIRATION)
         {ANIMATION_INSPIRATION, "surprised"},
-        {ANIMATION_TALK, "shocked"},
-        {ANIMATION_NORMAL, "thinking"},
-        {ANIMATION_NORMAL, "winking"},
-        {ANIMATION_INSPIRATION, "cool"},
-        {ANIMATION_TALK, "relaxed"},
-        {ANIMATION_SHY, "delicious"},
-        {ANIMATION_INSPIRATION, "kissy"},
-        {ANIMATION_TALK, "confident"},
+        {ANIMATION_INSPIRATION, "shocked"},
+        {ANIMATION_INSPIRATION, "thinking"},
+
+        // Angry (angry.gif + angry_start.gif mapped via ANIMATION_FIRE)
+        {ANIMATION_FIRE, "angry"},
+
+        // Sad / crying (sad.gif + sad_start.gif, cry.gif)
+        {ANIMATION_SAD, "sad"},
+        {ANIMATION_TALK, "crying"},
+
+        // Sleepy / relaxed (sleep.gif)
         {ANIMATION_SLEEP, "sleepy"},
+        {ANIMATION_SLEEP, "relaxed"},
+
+        // Silly / shy-ish (blush / mixed)
         {ANIMATION_SHY, "silly"},
-        {ANIMATION_TALK, "confused"},
-        {ANIMATION_LISTENING, "listening"}};
+
+        // Listening state (listening.gif)
+        {ANIMATION_LISTENING, "listening"},
+    };
 
     // Check volume first - if volume is 0, lock to silence animation
     auto& board = Board::GetInstance();

@@ -2164,49 +2164,42 @@ bool animation_load_gifs_from_test_bin(void)
         return false;
     }
     
-    ESP_LOGI("animation", "Loading GIF animations from test.bin...");
+    ESP_LOGI("animation", "Loading GIF animations from test.bin (20 GIF system)...");
     
-    // Animation names in order (matching AnimationType_e)
-    const char* anim_names[] = {
-        "normal",      // ANIMATION_STATIC_NORMAL / ANIMATION_NORMAL
-        "embarrass",   // ANIMATION_EMBARRESSED
-        "fire",        // ANIMATION_FIRE
-        "inspiration", // ANIMATION_INSPIRATION
-        "shy",         // ANIMATION_SHY
-        "sleep",       // ANIMATION_SLEEP
-        "happy",       // ANIMATION_HAPPY
-        "laugh",       // ANIMATION_LAUGH
-        "sad",         // ANIMATION_SAD
-        "talk",        // ANIMATION_TALK
-        "silence",     // ANIMATION_SILENCE
+    // GIF-to-Animation mapping for 20 GIF system
+    struct GifAnimDef {
+        const char* anim_name;      // Animation name (for logging)
+        const char* loop_gif;       // Loop GIF filename (required)
+        const char* start_gif;      // Start GIF filename (optional, can be NULL)
+        Animation_t* anim_struct;   // Animation structure to load into
     };
     
-    // Animations that have _start variants
-    const char* anims_with_start[] = {"fire", "happy", "inspiration", "laugh"};
-    bool has_start[11] = {false};
-    for (int i = 0; i < 11; i++) {
-        for (int j = 0; j < 4; j++) {
-            if (strcmp(anim_names[i], anims_with_start[j]) == 0) {
-                has_start[i] = true;
-                break;
-            }
-        }
-    }
-    
-    Animation_t* animations[] = {
-        &sd_normal, &sd_embarrass, &sd_fire, &sd_inspiration,
-        &sd_shy, &sd_sleep, &sd_happy, &sd_laugh, &sd_sad, &sd_talk,
-        &sd_silence
+    const GifAnimDef gif_anims[] = {
+        // Main emotional animations
+        {"normal",   "normal.gif",      NULL,               &sd_normal},
+        {"smirk",    "smirk.gif",       "smirk_start.gif",  &sd_smirk},
+        {"heart",    "heart.gif",       "heart_start.gif",  &sd_happy},       // reuse sd_happy for heart
+        {"blush",    "blush.gif",       NULL,               &sd_embarrass},   // reuse sd_embarrass for blush
+        {"sad",      "sad.gif",         "sad_start.gif",    &sd_sad},
+        {"laugh",    "laugh.gif",       "laugh_start.gif",  &sd_laugh},
+        {"sleep",    "sleep.gif",       NULL,               &sd_sleep},
+        {"starry",   "starry.gif",      "starry_start.gif", &sd_inspiration}, // reuse sd_inspiration for starry
+        {"cry",      "cry.gif",         NULL,               &sd_talk},        // reuse sd_talk for cry
+        {"angry",    "angry.gif",       "angry_start.gif",  &sd_fire},        // reuse sd_fire for angry
+        {"silence",  "silence.gif",     NULL,               &sd_silence},
+
+        // Extra / status animations
+        {"listening","listening.gif",   NULL,               &sd_listening},
+        {"battery",  "battery.gif",     NULL,               &sd_battery},
+        {"wifi",     "wifi.gif",        NULL,               &sd_wifi},
     };
     
     int loaded_count = 0;
+    const int num_anims = sizeof(gif_anims) / sizeof(gif_anims[0]);
     
-    // Load each main animation (11 animations)
-    for (int i = 0; i < 11; i++) {
-        char loop_name[64];
-        char start_name[64];
-        snprintf(loop_name, sizeof(loop_name), "%s_loop.gif", anim_names[i]);
-        snprintf(start_name, sizeof(start_name), "%s_start.gif", anim_names[i]);
+    // Load each animation according to the mapping
+    for (int i = 0; i < num_anims; i++) {
+        const GifAnimDef* def = &gif_anims[i];
         
         uint8_t* gif_loop_data = NULL;
         size_t gif_loop_size = 0;
@@ -2214,15 +2207,15 @@ bool animation_load_gifs_from_test_bin(void)
         size_t gif_start_size = 0;
         
         // Try to load loop GIF (required)
-        if (!animation_extract_gif_from_test_bin(loop_name, &gif_loop_data, &gif_loop_size)) {
-            ESP_LOGW("animation", "⚠ Loop GIF not found in test.bin: %s", loop_name);
+        if (!animation_extract_gif_from_test_bin(def->loop_gif, &gif_loop_data, &gif_loop_size)) {
+            ESP_LOGW("animation", "⚠ Loop GIF not found in test.bin: %s", def->loop_gif);
             continue;
         }
         
         // Try to load start GIF if this animation has one
-        if (has_start[i]) {
-            if (!animation_extract_gif_from_test_bin(start_name, &gif_start_data, &gif_start_size)) {
-                ESP_LOGW("animation", "⚠ Start GIF not found in test.bin: %s (using loop only)", start_name);
+        if (def->start_gif != NULL) {
+            if (!animation_extract_gif_from_test_bin(def->start_gif, &gif_start_data, &gif_start_size)) {
+                ESP_LOGW("animation", "⚠ Start GIF not found in test.bin: %s (using loop only)", def->start_gif);
                 // Continue with loop only
             }
         }
@@ -2230,21 +2223,21 @@ bool animation_load_gifs_from_test_bin(void)
         // Load animation with start+loop or loop only
         if (gif_start_data && gif_start_size > 0) {
             if (animation_load_gif_animation_with_start_loop(
-                    animations[i], loop_name, gif_loop_data, gif_loop_size,
-                    start_name, gif_start_data, gif_start_size)) {
+                    def->anim_struct, def->loop_gif, gif_loop_data, gif_loop_size,
+                    def->start_gif, gif_start_data, gif_start_size)) {
                 loaded_count++;
-                ESP_LOGI("animation", "✅ Loaded GIF: %s + %s", start_name, loop_name);
+                ESP_LOGI("animation", "✅ Loaded %s: %s + %s", def->anim_name, def->start_gif, def->loop_gif);
             } else {
-                ESP_LOGE("animation", "❌ Failed to load GIF animation: %s + %s", start_name, loop_name);
+                ESP_LOGE("animation", "❌ Failed to load %s: %s + %s", def->anim_name, def->start_gif, def->loop_gif);
             }
         } else {
             if (animation_load_gif_animation_with_start_loop(
-                    animations[i], loop_name, gif_loop_data, gif_loop_size,
+                    def->anim_struct, def->loop_gif, gif_loop_data, gif_loop_size,
                     NULL, NULL, 0)) {
                 loaded_count++;
-                ESP_LOGI("animation", "✅ Loaded GIF: %s", loop_name);
+                ESP_LOGI("animation", "✅ Loaded %s: %s", def->anim_name, def->loop_gif);
             } else {
-                ESP_LOGE("animation", "❌ Failed to load GIF animation: %s", loop_name);
+                ESP_LOGE("animation", "❌ Failed to load %s: %s", def->anim_name, def->loop_gif);
             }
         }
         
@@ -2257,77 +2250,6 @@ bool animation_load_gifs_from_test_bin(void)
         }
     }
     
-    // Load listening animation (extra GIF)
-    char listening_name[64] = "listening_loop.gif";
-    uint8_t* listening_gif_data = NULL;
-    size_t listening_gif_size = 0;
-    
-    if (animation_extract_gif_from_test_bin(listening_name, &listening_gif_data, &listening_gif_size)) {
-        if (animation_load_gif_animation_with_start_loop(
-                &sd_listening, listening_name, listening_gif_data, listening_gif_size,
-                NULL, NULL, 0)) {
-            loaded_count++;
-            ESP_LOGI("animation", "✅ Loaded listening GIF: %s", listening_name);
-        } else {
-            ESP_LOGE("animation", "❌ Failed to load listening GIF: %s", listening_name);
-        }
-        
-        if (listening_gif_data) {
-            free(listening_gif_data);
-        }
-    } else {
-        ESP_LOGW("animation", "⚠ Listening GIF not found in test.bin: %s", listening_name);
-    }
-    
-    // Load smirk animation (extra GIF)
-    char smirk_name[64] = "smirk_loop.gif";
-    uint8_t* smirk_gif_data = NULL;
-    size_t smirk_gif_size = 0;
-    
-    if (animation_extract_gif_from_test_bin(smirk_name, &smirk_gif_data, &smirk_gif_size)) {
-        if (animation_load_gif_animation_with_start_loop(
-                &sd_smirk, smirk_name, smirk_gif_data, smirk_gif_size,
-                NULL, NULL, 0)) {
-            loaded_count++;
-            ESP_LOGI("animation", "✅ Loaded smirk GIF: %s", smirk_name);
-        } else {
-            ESP_LOGE("animation", "❌ Failed to load smirk GIF: %s", smirk_name);
-        }
-        
-        if (smirk_gif_data) {
-            free(smirk_gif_data);
-        }
-    } else {
-        ESP_LOGW("animation", "⚠ Smirk GIF not found in test.bin: %s", smirk_name);
-    }
-    
-    // Load system GIFs (wifi, battery)
-    const char* system_names[] = {"wifi", "battery"};
-    Animation_t* system_anims[] = {&sd_wifi, &sd_battery};
-    
-    for (int i = 0; i < 2; i++) {
-        char gif_name[64];
-        snprintf(gif_name, sizeof(gif_name), "%s.gif", system_names[i]);
-        
-        uint8_t* gif_data = NULL;
-        size_t gif_size = 0;
-        
-        if (animation_extract_gif_from_test_bin(gif_name, &gif_data, &gif_size)) {
-            if (animation_load_gif_animation(system_anims[i], gif_name, gif_data, gif_size)) {
-                loaded_count++;
-                ESP_LOGI("animation", "✅ Loaded system GIF: %s", gif_name);
-            } else {
-                ESP_LOGE("animation", "❌ Failed to load system GIF: %s", gif_name);
-            }
-            
-            if (gif_data) {
-                free(gif_data);
-            }
-        } else {
-            ESP_LOGW("animation", "⚠ System GIF not found in test.bin: %s", gif_name);
-        }
-    }
-    
     // Check if test.bin was deleted (header read failure)
     if (loaded_count == 0) {
         if (access("/sdcard/test.bin", F_OK) != 0 && access("/sdcard/TEST.BIN", F_OK) != 0) {
@@ -2337,7 +2259,7 @@ bool animation_load_gifs_from_test_bin(void)
     }
     
     if (loaded_count > 0) {
-        ESP_LOGI("animation", "🎉 Successfully loaded %d GIF animation(s) from test.bin", loaded_count);
+        ESP_LOGI("animation", "🎉 Successfully loaded %d/%d GIF animation(s) from test.bin", loaded_count, num_anims);
         return true;
     } else {
         ESP_LOGE("animation", "❌ No GIF animations loaded from test.bin");
