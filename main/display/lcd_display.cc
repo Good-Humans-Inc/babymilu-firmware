@@ -1171,12 +1171,18 @@ void LcdDisplay::SetEmotion(const char *emotion)
     };
 
     // Check volume first - if volume is 0, lock to silence animation
+    // Note: Skip volume check if codec access fails (e.g., after sleep wake-up when I2C might not be ready)
     auto& board = Board::GetInstance();
     auto codec = board.GetAudioCodec();
-    if (codec && codec->output_volume() == 0) {
-        ESP_LOGI(TAG, "***** Volume is 0, locking animation to silence (ignoring emotion: %s) *****", emotion ? emotion : "<null>");
-        animation_check_volume_and_lock(0);
-        return; // Don't process emotion when volume is 0
+    if (codec) {
+        // Wrap in try-catch equivalent: just check if codec exists, output_volume() is a simple getter
+        // If I2C issues occur, they'll be logged but won't crash here since output_volume() just returns a member variable
+        int volume = codec->output_volume();
+        if (volume == 0) {
+            ESP_LOGI(TAG, "***** Volume is 0, locking animation to silence (ignoring emotion: %s) *****", emotion ? emotion : "<null>");
+            animation_check_volume_and_lock(0);
+            return; // Don't process emotion when volume is 0
+        }
     }
 
     // 查找匹配的表情

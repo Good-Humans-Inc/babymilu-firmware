@@ -450,9 +450,19 @@ private:
                     board.ResetWifiConfiguration();
                 }
                 if (board.power_save_timer_) {
-                    board.power_save_timer_->WakeUp();
+                    // If in sleep mode, just wake up and return to idle state
+                    if (board.power_save_timer_->IsInSleepMode()) {
+                        ESP_LOGI(TAG, "Touch detected during sleep mode - waking up");
+                        board.power_save_timer_->WakeUp();
+                        // WakeUp() callback will set state to idle and show static_normal face
+                    } else {
+                        // Normal operation: wake up and toggle chat state
+                        board.power_save_timer_->WakeUp();
+                        app.ToggleChatState();
+                    }
+                } else {
+                    app.ToggleChatState();
                 }
-                app.ToggleChatState();
             }
         }
     }
@@ -477,9 +487,19 @@ private:
                     board.ResetWifiConfiguration();
                 }
                 if (board.power_save_timer_) {
-                    board.power_save_timer_->WakeUp();
+                    // If in sleep mode, just wake up and return to idle state
+                    if (board.power_save_timer_->IsInSleepMode()) {
+                        ESP_LOGI(TAG, "Touch detected during sleep mode - waking up");
+                        board.power_save_timer_->WakeUp();
+                        // WakeUp() callback will set state to idle and show static_normal face
+                    } else {
+                        // Normal operation: wake up and toggle chat state
+                        board.power_save_timer_->WakeUp();
+                        app.ToggleChatState();
+                    }
+                } else {
+                    app.ToggleChatState();
                 }
-                app.ToggleChatState();
             }
         }
     }
@@ -595,7 +615,15 @@ private:
                         if (!last_touch_state) {
                             ESP_LOGI(TAG, "[TOUCH] Touch pressed at (%d, %d)", x, y);
                             if (board->power_save_timer_) {
-                                board->power_save_timer_->WakeUp();
+                                // If in sleep mode, just wake up and return to idle state
+                                if (board->power_save_timer_->IsInSleepMode()) {
+                                    ESP_LOGI(TAG, "Touch detected during sleep mode - waking up");
+                                    board->power_save_timer_->WakeUp();
+                                    // WakeUp() callback will set state to idle and show static_normal face
+                                } else {
+                                    // Normal operation: wake up (ToggleChatState will be called on release if needed)
+                                    board->power_save_timer_->WakeUp();
+                                }
                             }
                         }
                         last_touch_state = true;
@@ -1199,9 +1227,19 @@ private:
         power_save_timer_->OnExitSleepMode([this]() {
             ESP_LOGI(TAG, "Exiting sleep mode - restoring brightness and animation");
             GetBacklight()->RestoreBrightness();
+            
+            // Small delay to allow I2C bus and other peripherals to stabilize after wake
+            vTaskDelay(pdMS_TO_TICKS(100));
+            
             auto display = GetDisplay();
             if (display) {
-                display->SetEmotion("neutral");  // Restore to neutral animation
+                display->SetEmotion("neutral");  // Restore to neutral animation (maps to ANIMATION_STATIC_NORMAL)
+            }
+            // Ensure application state is idle after waking from sleep
+            auto& app = Application::GetInstance();
+            if (app.GetDeviceState() != kDeviceStateIdle) {
+                ESP_LOGI(TAG, "Waking from sleep - setting device state to idle");
+                app.SetDeviceState(kDeviceStateIdle);
             }
         });
         power_save_timer_->SetEnabled(true);
@@ -1236,9 +1274,17 @@ private:
                 ResetWifiConfiguration();
             }
             if (power_save_timer_) {
-                power_save_timer_->WakeUp();
+                // If in sleep mode, just wake up and return to idle state
+                if (power_save_timer_->IsInSleepMode()) {
+                    power_save_timer_->WakeUp();
+                } else {
+                    // Normal operation: wake up and toggle chat state
+                    power_save_timer_->WakeUp();
+                    app.ToggleChatState();
+                }
+            } else {
+                app.ToggleChatState();
             }
-            app.ToggleChatState();
         });
          gpio_config_t power_gpio_config = {
             .pin_bit_mask = (BIT64(POWER_CTRL) ),

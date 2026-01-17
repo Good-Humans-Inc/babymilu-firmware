@@ -516,7 +516,13 @@ void Application::ToggleChatState()
     else if (device_state_ == kDeviceStateSpeaking)
     {
         Schedule([this]()
-                 { AbortSpeaking(kAbortReasonNone); });
+                 { 
+                     // Close audio channel directly to end conversation (same as listening state)
+                     auto* active_protocol = GetActiveProtocol();
+                     if (active_protocol) {
+                         active_protocol->CloseAudioChannel();
+                     }
+                 });
     }
     else if (device_state_ == kDeviceStateListening)
     {
@@ -981,7 +987,14 @@ void Application::Start()
             auto emotion = cJSON_GetObjectItem(root, "emotion");
             if (cJSON_IsString(emotion)) {
                 Schedule([this, display, emotion_str = std::string(emotion->valuestring)]() {
-                    display->SetEmotion(emotion_str.c_str());
+                    // Only apply emotion if device is still in an active conversation state
+                    // Ignore emotion updates if device is idle (e.g., after abort)
+                    if (device_state_ == kDeviceStateSpeaking || device_state_ == kDeviceStateListening) {
+                        display->SetEmotion(emotion_str.c_str());
+                    } else {
+                        ESP_LOGI(TAG, "Ignoring LLM emotion update '%s' - device is not in active conversation (state: %d)", 
+                                emotion_str.c_str(), device_state_);
+                    }
                 });
             }
 #if CONFIG_IOT_PROTOCOL_MCP
@@ -2056,7 +2069,14 @@ void Application::OpenWebSocketConnection() {
                 auto emotion = cJSON_GetObjectItem(root, "emotion");
                 if (cJSON_IsString(emotion)) {
                     Schedule([this, display, emotion_str = std::string(emotion->valuestring)]() {
-                        display->SetEmotion(emotion_str.c_str());
+                        // Only apply emotion if device is still in an active conversation state
+                        // Ignore emotion updates if device is idle (e.g., after abort)
+                        if (device_state_ == kDeviceStateSpeaking || device_state_ == kDeviceStateListening) {
+                            display->SetEmotion(emotion_str.c_str());
+                        } else {
+                            ESP_LOGI(TAG, "Ignoring LLM emotion update '%s' - device is not in active conversation (state: %d)", 
+                                    emotion_str.c_str(), device_state_);
+                        }
                     });
                 }
             } else if (strcmp(type->valuestring, "listen") == 0) {
