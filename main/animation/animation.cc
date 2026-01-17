@@ -1286,7 +1286,7 @@ bool animation_load_all_from_sd_card(void)
     ESP_LOGI("animation", "Loading %d total frames from SD card mega file", total_frames);
     
     // Clean up existing animations
-    for (int i = 0; i < 8; i++) {
+    for (int i = 0; i < 6; i++) {
         animation_cleanup_sd_card_animation(animations[i]);
     }
     
@@ -1323,7 +1323,7 @@ bool animation_load_all_from_sd_card(void)
     int current_frame = 0;
     bool success = true;
     
-    for (int anim_idx = 0; anim_idx < 8 && success; anim_idx++) {
+    for (int anim_idx = 0; anim_idx < 6 && success; anim_idx++) {
         int frame_count = animation_frame_counts[anim_idx];
         Animation_t* anim = animations[anim_idx];
         
@@ -1635,7 +1635,7 @@ bool animation_load_all_from_sd_card(void)
         // Reset animation pointers first to avoid double-free
         // Since anim->spiffs_imgs[i] points to all_sd_card_imgs[j], we must
         // clear these pointers before freeing all_sd_card_imgs
-        for (int i = 0; i < 8; i++) {
+        for (int i = 0; i < 6; i++) {
             if (animations[i] && animations[i]->spiffs_imgs) {
                 // Reset pointers to prevent double-free, but keep the array
                 // The array itself will be freed by animation_cleanup_sd_card_animation
@@ -1657,7 +1657,7 @@ bool animation_load_all_from_sd_card(void)
         free(all_sd_card_imgs);
         
         // Clean up partial animations (now safe since pointers are NULL)
-        for (int i = 0; i < 8; i++) {
+        for (int i = 0; i < 6; i++) {
             animation_cleanup_sd_card_animation(animations[i]);
         }
         

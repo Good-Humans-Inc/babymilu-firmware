@@ -128,7 +128,8 @@ void Display::UpdateStatusBar(bool update_all) {
     const char* icon = nullptr;
     if (board.GetBatteryLevel(battery_level, charging, discharging)) {
         // Play charge sound when USB charging is detected (transition from not charging to charging)
-        if (charging && !prev_charging) {
+        // Only play if battery level is 90% or below
+        if (charging && !prev_charging && battery_level <= 90) {
             auto& app = Application::GetInstance();
             app.PlaySound(Lang::Sounds::P3_CHARGE);
         }

@@ -287,6 +287,164 @@ size_t AnimationUpdater::GetLocalMegaFileSize(const char* file_path) {
     return size < 0 ? 0 : (size_t)size;
 }
 
+// Helper function to read local file header (first 12 bytes: file_count, checksum, combined_length)
+bool AnimationUpdater::GetLocalFileHeader(const char* file_path, uint32_t& file_count, uint32_t& checksum, uint32_t& combined_length) {
+    FILE* f = fopen(file_path, "rb");
+    if (!f) {
+        return false;
+    }
+    
+    bool success = (fread(&file_count, sizeof(uint32_t), 1, f) == 1 &&
+                    fread(&checksum, sizeof(uint32_t), 1, f) == 1 &&
+                    fread(&combined_length, sizeof(uint32_t), 1, f) == 1);
+    
+    fclose(f);
+    return success;
+}
+
+// Helper function to read remote file header (first 12 bytes using Range request)
+bool AnimationUpdater::GetRemoteFileHeader(const std::string& url, uint32_t& file_count, uint32_t& checksum, uint32_t& combined_length) {
+    try {
+        auto& board = Board::GetInstance();
+        auto http = std::unique_ptr<Http>(board.CreateHttp());
+        if (!http) {
+            ESP_LOGE(TAG, "Failed to create HTTP client for header request");
+            return false;
+        }
+
+        http->SetHeader("User-Agent", "Xiaozhi-Animation-Header/1.0");
+        http->SetHeader("Accept", "*/*");
+        http->SetHeader("Accept-Encoding", "identity");
+        http->SetHeader("Range", "bytes=0-11"); // Request first 12 bytes
+        http->SetTimeout(10000);
+
+        if (!http->Open("GET", url)) {
+            ESP_LOGE(TAG, "Failed to open connection for header query");
+            return false;
+        }
+
+        int status_code = http->GetStatusCode();
+        // Accept both 200 (full file) and 206 (partial content)
+        if (status_code != 200 && status_code != 206) {
+            ESP_LOGW(TAG, "GET returned status %d (expected 200 or 206)", status_code);
+            http->Close();
+            return false;
+        }
+
+        // Read the 12 bytes of header
+        char header_buffer[12];
+        int bytes_read = http->Read(header_buffer, 12);
+        http->Close();
+        
+        if (bytes_read != 12) {
+            ESP_LOGW(TAG, "Failed to read 12 bytes of header (got %d bytes)", bytes_read);
+            return false;
+        }
+
+        // Parse header fields
+        file_count = *reinterpret_cast<uint32_t*>(header_buffer);
+        checksum = *reinterpret_cast<uint32_t*>(header_buffer + 4);
+        combined_length = *reinterpret_cast<uint32_t*>(header_buffer + 8);
+        
+        return true;
+    } catch (...) {
+        ESP_LOGE(TAG, "Exception in GetRemoteFileHeader");
+        return false;
+    }
+}
+
+// Get remote file timestamp from GCS metadata (Last-Modified or x-goog-time-created header)
+bool AnimationUpdater::GetRemoteFileTimestamp(const std::string& url, std::string& timestamp) {
+    try {
+        auto& board = Board::GetInstance();
+        auto http = std::unique_ptr<Http>(board.CreateHttp());
+        if (!http) {
+            ESP_LOGE(TAG, "Failed to create HTTP client for timestamp query");
+            return false;
+        }
+
+        http->SetHeader("User-Agent", "Xiaozhi-Animation-Timestamp/1.0");
+        http->SetHeader("Accept", "*/*");
+        http->SetHeader("Accept-Encoding", "identity");
+        http->SetTimeout(10000);
+
+        // Use HEAD request to get metadata without downloading file
+        bool opened = http->Open("HEAD", url);
+        if (!opened) {
+            ESP_LOGW(TAG, "HEAD not supported; falling back to GET for timestamp");
+            // For GET, we can use Range: bytes=0-0 to minimize data transfer
+            http->SetHeader("Range", "bytes=0-0");
+            opened = http->Open("GET", url);
+        }
+        if (!opened) {
+            ESP_LOGE(TAG, "Failed to open connection for timestamp query");
+            return false;
+        }
+
+        int status_code = http->GetStatusCode();
+        ESP_LOGI(TAG, "Timestamp query returned status code: %d", status_code);
+        
+        // Accept 200 (full file), 206 (partial content), or 304 (not modified)
+        if (status_code != 200 && status_code != 206 && status_code != 304) {
+            ESP_LOGW(TAG, "HEAD/GET returned status %d (expected 200, 206, or 304)", status_code);
+            http->Close();
+            return false;
+        }
+
+        // Log available information for debugging
+        size_t content_length = http->GetBodyLength();
+        ESP_LOGI(TAG, "Response Content-Length: %zu", content_length);
+        
+        // TODO: The Http class needs a GetResponseHeader() method to access response headers
+        // For now, we'll need to check if such a method exists or add it to the Http interface
+        // GCS provides: Last-Modified, x-goog-time-created, ETag headers
+        
+        // Try to get Last-Modified header (if Http class supports it)
+        // This is a placeholder - actual implementation depends on Http class API
+        // If Http class doesn't have GetResponseHeader(), we need to add it
+        
+        // For now, return false to indicate we need header access capability
+        ESP_LOGW(TAG, "Http class needs GetResponseHeader() method to access Last-Modified header");
+        ESP_LOGI(TAG, "To check remote file timestamp manually, run:");
+        ESP_LOGI(TAG, "  curl -I \"%s\" | grep -i 'last-modified\\|x-goog-time-created'", url.c_str());
+        ESP_LOGI(TAG, "Or: curl -sI \"%s\" | grep -i 'last-modified'", url.c_str());
+        http->Close();
+        return false;
+        
+        // When GetResponseHeader() is available, use:
+        // std::string last_modified = http->GetResponseHeader("Last-Modified");
+        // if (!last_modified.empty()) {
+        //     ESP_LOGI(TAG, "Found Last-Modified header: %s", last_modified.c_str());
+        //     timestamp = last_modified;
+        //     return true;
+        // }
+        // // Fallback to x-goog-time-created if Last-Modified not available
+        // std::string time_created = http->GetResponseHeader("x-goog-time-created");
+        // if (!time_created.empty()) {
+        //     ESP_LOGI(TAG, "Found x-goog-time-created header: %s", time_created.c_str());
+        //     timestamp = time_created;
+        //     return true;
+        // }
+        
+    } catch (...) {
+        ESP_LOGE(TAG, "Exception in GetRemoteFileTimestamp");
+        return false;
+    }
+}
+
+// Get locally stored file timestamp
+std::string AnimationUpdater::GetLocalFileTimestamp() {
+    Settings settings("animudter", true);
+    return settings.GetString("file_timestamp", "");  // Empty string if not found
+}
+
+// Save file timestamp locally
+void AnimationUpdater::SaveLocalFileTimestamp(const std::string& timestamp) {
+    Settings settings("animudter", true);
+    settings.SetString("file_timestamp", timestamp);
+    ESP_LOGD(TAG, "Saved file timestamp: %s", timestamp.c_str());
+}
+
 void AnimationUpdater::ResetFirstDownloadSuccess() {
     first_download_success_.store(false);
     ESP_LOGI(TAG, "First download success flag reset");
@@ -349,7 +507,7 @@ void AnimationUpdater::UpdateLoop() {
     
     // Wait 10 seconds to ensure network is fully ready
     ESP_LOGI(TAG, "Waiting 10 seconds before starting download...");
-    vTaskDelay(pdMS_TO_TICKS(10000));
+    vTaskDelay(pdMS_TO_TICKS(1000));
     
     // Build download URL dynamically (uses configured server_url_ or constructs from MAC address)
     std::string url = BuildMegaDownloadUrl();
@@ -369,17 +527,54 @@ void AnimationUpdater::UpdateLoop() {
     
     const char* file_path = "/sdcard/test.bin";
     
-    // Check if remote file size matches local file size before downloading
-    ESP_LOGI(TAG, "Checking remote file size...");
-    size_t remote_size = 0;
-    if (GetRemoteContentLength(url, remote_size) && remote_size > 0) {
-        size_t local_size = GetLocalMegaFileSize(file_path);
-        ESP_LOGI(TAG, "Remote file size: %u bytes, Local file size: %u bytes", 
-                 (unsigned int)remote_size, (unsigned int)local_size);
+    // First, try timestamp-based comparison (more reliable than header bytes)
+    std::string remote_timestamp;
+    std::string local_timestamp = GetLocalFileTimestamp();
+    
+    bool has_remote_timestamp = GetRemoteFileTimestamp(url, remote_timestamp);
+    
+    if (has_remote_timestamp && !local_timestamp.empty()) {
+        ESP_LOGI(TAG, "Local timestamp: %s", local_timestamp.c_str());
+        ESP_LOGI(TAG, "Remote timestamp: %s", remote_timestamp.c_str());
         
-        if (local_size == remote_size && local_size > 0) {
-            // File sizes match, validate file structure before skipping download
-            ESP_LOGI(TAG, "Local file size matches remote (%u bytes). Validating file structure...", (unsigned int)remote_size);
+        if (local_timestamp == remote_timestamp) {
+            ESP_LOGI(TAG, "File timestamps match. Validating local file structure...");
+            if (ValidateGifMegaAnimationFileFromDisk(file_path)) {
+                ESP_LOGI(TAG, "Local file is valid and matches remote file (same timestamp). Skipping download.");
+                ESP_LOGI(TAG, "No download needed - file is already up to date.");
+                is_running_.store(false);
+                update_task_handle_ = nullptr;
+                vTaskDelete(NULL);
+                return;
+            } else {
+                ESP_LOGW(TAG, "Local file timestamp matches but validation failed. File may be corrupted. Will re-download.");
+            }
+        } else {
+            ESP_LOGI(TAG, "File timestamps differ. Remote file is newer. Will download new version.");
+        }
+    } else if (!has_remote_timestamp) {
+        ESP_LOGW(TAG, "Could not get remote file timestamp (Http class may need GetResponseHeader() method). Falling back to header comparison.");
+    }
+    
+    // Fallback to header-based comparison if timestamp comparison is not available
+    ESP_LOGI(TAG, "Checking remote file header...");
+    uint32_t remote_file_count = 0, remote_checksum = 0, remote_combined_length = 0;
+    uint32_t local_file_count = 0, local_checksum = 0, local_combined_length = 0;
+    
+    bool has_local_header = GetLocalFileHeader(file_path, local_file_count, local_checksum, local_combined_length);
+    bool has_remote_header = GetRemoteFileHeader(url, remote_file_count, remote_checksum, remote_combined_length);
+    
+    if (has_local_header && has_remote_header) {
+        ESP_LOGI(TAG, "Local header: file_count=%u, checksum=0x%08X, combined_length=%u", 
+                 local_file_count, local_checksum, local_combined_length);
+        ESP_LOGI(TAG, "Remote header: file_count=%u, checksum=0x%08X, combined_length=%u", 
+                 remote_file_count, remote_checksum, remote_combined_length);
+        
+        // Compare header fields - if all match, file content is the same
+        if (local_file_count == remote_file_count && 
+            local_checksum == remote_checksum && 
+            local_combined_length == remote_combined_length) {
+            ESP_LOGI(TAG, "Local file header matches remote header. Validating file structure...");
             if (ValidateGifMegaAnimationFileFromDisk(file_path)) {
                 ESP_LOGI(TAG, "Local file is valid and matches remote file. Skipping download.");
                 ESP_LOGI(TAG, "No download needed - file is already up to date.");
@@ -388,16 +583,56 @@ void AnimationUpdater::UpdateLoop() {
                 vTaskDelete(NULL);
                 return;
             } else {
-                ESP_LOGW(TAG, "Local file size matches but validation failed. File may be corrupted. Will re-download.");
+                ESP_LOGW(TAG, "Local file header matches but validation failed. File may be corrupted. Will re-download.");
             }
-        } else if (local_size > 0) {
-            ESP_LOGI(TAG, "Local file size differs from remote. Will download new version.");
         } else {
-            ESP_LOGI(TAG, "Local file not found. Will download from remote.");
+            ESP_LOGI(TAG, "Local file header differs from remote. Will download new version.");
         }
+    } else if (has_local_header && !has_remote_header) {
+        ESP_LOGW(TAG, "Could not get remote file header, but local file exists. Proceeding with download check.");
+    } else if (!has_local_header && has_remote_header) {
+        ESP_LOGI(TAG, "Local file not found. Will download from remote.");
     } else {
-        ESP_LOGW(TAG, "Could not get remote file size, proceeding with download check.");
+        ESP_LOGW(TAG, "Could not get local or remote file header, proceeding with download check.");
     }
+    
+    // COMMENTED OUT: Size comparison - replaced with header comparison above
+    // // Check if remote file size matches local file size before downloading
+    // ESP_LOGI(TAG, "Checking remote file size...");
+    // size_t remote_size = 0;
+    // if (GetRemoteContentLength(url, remote_size)) {
+    //     if (remote_size == 0) {
+    //         ESP_LOGW(TAG, "Remote file size is 0 bytes - invalid file, skipping download");
+    //         is_running_.store(false);
+    //         update_task_handle_ = nullptr;
+    //         vTaskDelete(NULL);
+    //         return;
+    //     }
+    //     size_t local_size = GetLocalMegaFileSize(file_path);
+    //     ESP_LOGI(TAG, "Remote file size: %u bytes, Local file size: %u bytes", 
+    //              (unsigned int)remote_size, (unsigned int)local_size);
+    //     
+    //     if (local_size == remote_size && local_size > 0) {
+    //         // File sizes match, validate file structure before skipping download
+    //         ESP_LOGI(TAG, "Local file size matches remote (%u bytes). Validating file structure...", (unsigned int)remote_size);
+    //         if (ValidateGifMegaAnimationFileFromDisk(file_path)) {
+    //             ESP_LOGI(TAG, "Local file is valid and matches remote file. Skipping download.");
+    //             ESP_LOGI(TAG, "No download needed - file is already up to date.");
+    //             is_running_.store(false);
+    //             update_task_handle_ = nullptr;
+    //             vTaskDelete(NULL);
+    //             return;
+    //         } else {
+    //             ESP_LOGW(TAG, "Local file size matches but validation failed. File may be corrupted. Will re-download.");
+    //         }
+    //     } else if (local_size > 0) {
+    //         ESP_LOGI(TAG, "Local file size differs from remote. Will download new version.");
+    //     } else {
+    //         ESP_LOGI(TAG, "Local file not found. Will download from remote.");
+    //     }
+    // } else {
+    //     ESP_LOGW(TAG, "Could not get remote file size, proceeding with download check.");
+    // }
     
     ESP_LOGI(TAG, "Downloading from: %s", url.c_str());
     
@@ -488,6 +723,19 @@ void AnimationUpdater::UpdateLoop() {
     }
     
     ESP_LOGI(TAG, "Download stream completed: %u bytes received", (unsigned int)total_read);
+    
+    // Check if downloaded file is 0 bytes (invalid)
+    if (total_read == 0) {
+        ESP_LOGE(TAG, "Downloaded file is 0 bytes - invalid file, removing");
+        fclose(file);
+        unlink(file_path);
+        http->Close();
+        is_running_.store(false);
+        update_task_handle_ = nullptr;
+        vTaskDelete(NULL);
+        return;
+    }
+    
     ESP_LOGI(TAG, "Flushing file buffer...");
     fflush(file);
     
@@ -504,6 +752,14 @@ void AnimationUpdater::UpdateLoop() {
     http->Close();
     
     ESP_LOGI(TAG, "✅ Download completed: %u bytes saved to %s", (unsigned int)total_read, file_path);
+    
+    // Try to get and save the remote file timestamp for future comparisons
+    if (GetRemoteFileTimestamp(url, remote_timestamp)) {
+        SaveLocalFileTimestamp(remote_timestamp);
+        ESP_LOGI(TAG, "Saved remote file timestamp: %s", remote_timestamp.c_str());
+    } else {
+        ESP_LOGW(TAG, "Could not get remote file timestamp to save (Http class may need GetResponseHeader() method)");
+    }
     
     // Reload animations from SD card before reboot
     ESP_LOGI(TAG, "Reloading animations from SD card before reboot...");
@@ -702,30 +958,99 @@ bool AnimationUpdater::TestHttpsDownload() {
     std::string download_url = BuildMegaDownloadUrl();
     ESP_LOGI(TAG, "Fetching: %s", download_url.c_str());
 
-    // Check if local file already matches remote file before downloading
-    size_t remote_len = 0;
-    if (GetRemoteMegaContentLength(remote_len) && remote_len > 0) {
-        const char* local_file = "/sdcard/test.bin";
-        size_t local_len = GetLocalMegaFileSize(local_file);
-        if (local_len == remote_len && local_len > 0) {
-            // File sizes match, validate file structure before skipping download
-            ESP_LOGI(TAG, "Local file size matches remote (%u bytes). Validating file structure...", (unsigned int)remote_len);
+    const char* local_file = "/sdcard/test.bin";
+    
+    // First, try timestamp-based comparison (more reliable than header bytes)
+    std::string remote_timestamp;
+    std::string local_timestamp = GetLocalFileTimestamp();
+    
+    bool has_remote_timestamp = GetRemoteFileTimestamp(download_url, remote_timestamp);
+    
+    if (has_remote_timestamp && !local_timestamp.empty()) {
+        ESP_LOGI(TAG, "Local timestamp: %s", local_timestamp.c_str());
+        ESP_LOGI(TAG, "Remote timestamp: %s", remote_timestamp.c_str());
+        
+        if (local_timestamp == remote_timestamp) {
+            ESP_LOGI(TAG, "File timestamps match. Validating local file structure...");
+            if (ValidateGifMegaAnimationFileFromDisk(local_file)) {
+                ESP_LOGI(TAG, "Local file is valid and matches remote file (same timestamp). Skipping download.");
+                first_download_success_.store(true);
+                return true;
+            } else {
+                ESP_LOGW(TAG, "Local file timestamp matches but validation failed. File may be corrupted. Will re-download.");
+            }
+        } else {
+            ESP_LOGI(TAG, "File timestamps differ. Remote file is newer. Will download new version.");
+        }
+    } else if (!has_remote_timestamp) {
+        ESP_LOGW(TAG, "Could not get remote file timestamp (Http class may need GetResponseHeader() method). Falling back to header comparison.");
+    }
+    
+    // Fallback to header-based comparison if timestamp comparison is not available
+    uint32_t remote_file_count = 0, remote_checksum = 0, remote_combined_length = 0;
+    uint32_t local_file_count = 0, local_checksum = 0, local_combined_length = 0;
+    
+    bool has_local_header = GetLocalFileHeader(local_file, local_file_count, local_checksum, local_combined_length);
+    bool has_remote_header = GetRemoteFileHeader(download_url, remote_file_count, remote_checksum, remote_combined_length);
+    
+    if (has_local_header && has_remote_header) {
+        ESP_LOGI(TAG, "Local header: file_count=%u, checksum=0x%08X, combined_length=%u", 
+                 local_file_count, local_checksum, local_combined_length);
+        ESP_LOGI(TAG, "Remote header: file_count=%u, checksum=0x%08X, combined_length=%u", 
+                 remote_file_count, remote_checksum, remote_combined_length);
+        
+        // Compare header fields - if all match, file content is the same
+        if (local_file_count == remote_file_count && 
+            local_checksum == remote_checksum && 
+            local_combined_length == remote_combined_length) {
+            ESP_LOGI(TAG, "Local file header matches remote header. Validating file structure...");
             if (ValidateGifMegaAnimationFileFromDisk(local_file)) {
                 ESP_LOGI(TAG, "Local file is valid and matches remote file. Skipping download.");
                 first_download_success_.store(true);
                 return true; // Return true since we have the correct file
             } else {
-                ESP_LOGW(TAG, "Local file size matches but validation failed. File may be corrupted. Will re-download.");
+                ESP_LOGW(TAG, "Local file header matches but validation failed. File may be corrupted. Will re-download.");
             }
-        } else if (local_len > 0) {
-            ESP_LOGI(TAG, "Local file size (%u) differs from remote (%u). Will download.", 
-                     (unsigned int)local_len, (unsigned int)remote_len);
         } else {
-            ESP_LOGI(TAG, "Local file not found. Will download from remote.");
+            ESP_LOGI(TAG, "Local file header differs from remote. Will download new version.");
         }
+    } else if (has_local_header && !has_remote_header) {
+        ESP_LOGW(TAG, "Could not get remote file header, but local file exists. Proceeding with download check.");
+    } else if (!has_local_header && has_remote_header) {
+        ESP_LOGI(TAG, "Local file not found. Will download from remote.");
     } else {
-        ESP_LOGW(TAG, "Could not get remote file size, proceeding with download check.");
+        ESP_LOGW(TAG, "Could not get local or remote file header, proceeding with download check.");
     }
+    
+    // COMMENTED OUT: Size comparison - replaced with header comparison above
+    // // Check if local file already matches remote file before downloading
+    // size_t remote_len = 0;
+    // if (GetRemoteMegaContentLength(remote_len)) {
+    //     if (remote_len == 0) {
+    //         ESP_LOGW(TAG, "Remote file size is 0 bytes - invalid file, skipping download");
+    //         return false;
+    //     }
+    //     const char* local_file = "/sdcard/test.bin";
+    //     size_t local_len = GetLocalMegaFileSize(local_file);
+    //     if (local_len == remote_len && local_len > 0) {
+    //         // File sizes match, validate file structure before skipping download
+    //         ESP_LOGI(TAG, "Local file size matches remote (%u bytes). Validating file structure...", (unsigned int)remote_len);
+    //         if (ValidateGifMegaAnimationFileFromDisk(local_file)) {
+    //             ESP_LOGI(TAG, "Local file is valid and matches remote file. Skipping download.");
+    //             first_download_success_.store(true);
+    //             return true; // Return true since we have the correct file
+    //         } else {
+    //             ESP_LOGW(TAG, "Local file size matches but validation failed. File may be corrupted. Will re-download.");
+    //         }
+    //     } else if (local_len > 0) {
+    //         ESP_LOGI(TAG, "Local file size (%u) differs from remote (%u). Will download.", 
+    //                  (unsigned int)local_len, (unsigned int)remote_len);
+    //     } else {
+    //         ESP_LOGI(TAG, "Local file not found. Will download from remote.");
+    //     }
+    // } else {
+    //     ESP_LOGW(TAG, "Could not get remote file size, proceeding with download check.");
+    // }
 
     // Download animations_mega.bin specifically
     bool success = DownloadMegaAnimationFile(download_url);
@@ -733,6 +1058,16 @@ bool AnimationUpdater::TestHttpsDownload() {
     if (success) {
         ESP_LOGI(TAG, "Successfully downloaded animations_mega.bin!");
         first_download_success_.store(true);
+        
+        // Try to get and save the remote file timestamp for future comparisons
+        std::string remote_timestamp;
+        if (GetRemoteFileTimestamp(download_url, remote_timestamp)) {
+            SaveLocalFileTimestamp(remote_timestamp);
+            ESP_LOGI(TAG, "Saved remote file timestamp: %s", remote_timestamp.c_str());
+        } else {
+            ESP_LOGW(TAG, "Could not get remote file timestamp to save (Http class may need GetResponseHeader() method)");
+        }
+        
         // Update version to server version after successful download
         SetCurrentVersion(SERVER_VERSION);  // Update to server version
         ReloadAnimations();
@@ -1021,32 +1356,72 @@ bool AnimationUpdater::DownloadMegaAnimationFile(const std::string& url) {
         
         ESP_LOGI(TAG, "SD card is mounted and ready for animations_mega.bin download");
         
-        // Check if local file already matches remote file before downloading
+        // Check if local file header matches remote file header before downloading
         const char* filename = "test.bin";
         char full_path[128];
         snprintf(full_path, sizeof(full_path), "/sdcard/%s", filename);
         
-        size_t remote_len = 0;
-        if (GetRemoteMegaContentLength(remote_len) && remote_len > 0) {
-            size_t local_len = GetLocalMegaFileSize(full_path);
-            if (local_len == remote_len && local_len > 0) {
-                // File sizes match, validate file structure before skipping download
-                ESP_LOGI(TAG, "Local file size matches remote (%u bytes). Validating file structure...", (unsigned int)remote_len);
+        uint32_t remote_file_count = 0, remote_checksum = 0, remote_combined_length = 0;
+        uint32_t local_file_count = 0, local_checksum = 0, local_combined_length = 0;
+        
+        bool has_local_header = GetLocalFileHeader(full_path, local_file_count, local_checksum, local_combined_length);
+        bool has_remote_header = GetRemoteFileHeader(url, remote_file_count, remote_checksum, remote_combined_length);
+        
+        if (has_local_header && has_remote_header) {
+            ESP_LOGI(TAG, "Local header: file_count=%u, checksum=0x%08X, combined_length=%u", 
+                     local_file_count, local_checksum, local_combined_length);
+            ESP_LOGI(TAG, "Remote header: file_count=%u, checksum=0x%08X, combined_length=%u", 
+                     remote_file_count, remote_checksum, remote_combined_length);
+            
+            // Compare header fields - if all match, file content is the same
+            if (local_file_count == remote_file_count && 
+                local_checksum == remote_checksum && 
+                local_combined_length == remote_combined_length) {
+                ESP_LOGI(TAG, "Local file header matches remote header. Validating file structure...");
                 if (ValidateGifMegaAnimationFileFromDisk(full_path)) {
                     ESP_LOGI(TAG, "Local file is valid and matches remote file. Skipping download.");
                     return true; // Return true since we have the correct file
                 } else {
-                    ESP_LOGW(TAG, "Local file size matches but validation failed. File may be corrupted. Will re-download.");
+                    ESP_LOGW(TAG, "Local file header matches but validation failed. File may be corrupted. Will re-download.");
                 }
-            } else if (local_len > 0) {
-                ESP_LOGI(TAG, "Local file size (%u) differs from remote (%u). Will download.", 
-                         (unsigned int)local_len, (unsigned int)remote_len);
             } else {
-                ESP_LOGI(TAG, "Local file not found. Will download from remote.");
+                ESP_LOGI(TAG, "Local file header differs from remote. Will download new version.");
             }
+        } else if (has_local_header && !has_remote_header) {
+            ESP_LOGW(TAG, "Could not get remote file header, but local file exists. Proceeding with download.");
+        } else if (!has_local_header && has_remote_header) {
+            ESP_LOGI(TAG, "Local file not found. Will download from remote.");
         } else {
-            ESP_LOGW(TAG, "Could not get remote file size, proceeding with download.");
+            ESP_LOGW(TAG, "Could not get local or remote file header, proceeding with download.");
         }
+        
+        // COMMENTED OUT: Size comparison - replaced with header comparison above
+        // // Check if local file already matches remote file before downloading
+        // size_t remote_len = 0;
+        // if (GetRemoteMegaContentLength(remote_len)) {
+        //     if (remote_len == 0) {
+        //         ESP_LOGW(TAG, "Remote file size is 0 bytes - invalid file, skipping download");
+        //         return false;
+        //     }
+        //     size_t local_len = GetLocalMegaFileSize(full_path);
+        //     if (local_len == remote_len && local_len > 0) {
+        //         // File sizes match, validate file structure before skipping download
+        //         ESP_LOGI(TAG, "Local file size matches remote (%u bytes). Validating file structure...", (unsigned int)remote_len);
+        //         if (ValidateGifMegaAnimationFileFromDisk(full_path)) {
+        //             ESP_LOGI(TAG, "Local file is valid and matches remote file. Skipping download.");
+        //             return true; // Return true since we have the correct file
+        //         } else {
+        //             ESP_LOGW(TAG, "Local file size matches but validation failed. File may be corrupted. Will re-download.");
+        //         }
+        //     } else if (local_len > 0) {
+        //         ESP_LOGI(TAG, "Local file size (%u) differs from remote (%u). Will download.", 
+        //                  (unsigned int)local_len, (unsigned int)remote_len);
+        //     } else {
+        //         ESP_LOGI(TAG, "Local file not found. Will download from remote.");
+        //     }
+        // } else {
+        //     ESP_LOGW(TAG, "Could not get remote file size, proceeding with download.");
+        // }
         
         // Debug: List SD card contents and test write access
         ESP_LOGI(TAG, "Listing SD card contents...");
@@ -1158,11 +1533,16 @@ bool AnimationUpdater::DownloadMegaAnimationFile(const std::string& url) {
         size_t content_length = http->GetBodyLength();
         ESP_LOGI(TAG, "Content-Length: %u", (unsigned int)content_length);
         
+        // Skip download if Content-Length is explicitly 0 (invalid file)
+        if (content_length == 0) {
+            ESP_LOGW(TAG, "Remote Content-Length is 0 - invalid file, skipping download");
+            http->Close();
+            return false;
+        }
+        
         // Handle case where server doesn't provide Content-Length
-        bool unknown_length = (content_length == 0);
-        if (unknown_length) {
-            ESP_LOGI(TAG, "Server did not provide Content-Length, will read until connection closes");
-        } else if (content_length < 1000000) {
+        bool unknown_length = false;
+        if (content_length < 1000000) {
             // Warn if Content-Length seems too small (less than 1MB for a 3.87MB file)
             ESP_LOGW(TAG, "⚠️  Server reported Content-Length (%u bytes) seems too small", 
                      (unsigned int)content_length);
@@ -1315,6 +1695,13 @@ bool AnimationUpdater::DownloadMegaAnimationFile(const std::string& url) {
             return false;
         }
         
+        // Check if downloaded file is 0 bytes (invalid)
+        if (total_read == 0) {
+            ESP_LOGE(TAG, "Downloaded file is 0 bytes - invalid file, removing");
+            unlink(full_path);
+            return false;
+        }
+        
         // Give filesystem time to sync, especially important for SD cards
         vTaskDelay(pdMS_TO_TICKS(500));
         
@@ -1331,6 +1718,13 @@ bool AnimationUpdater::DownloadMegaAnimationFile(const std::string& url) {
                 unlink(full_path);
                 return false;
             }
+            
+            if (actual_size == 0) {
+                ESP_LOGE(TAG, "Downloaded file is 0 bytes - invalid file, removing");
+                unlink(full_path);
+                return false;
+            }
+            
             ESP_LOGI(TAG, "File size verified: %u bytes", (unsigned int)actual_size);
         } else {
             ESP_LOGE(TAG, "Failed to verify file size - cannot open file for verification");
@@ -1342,6 +1736,15 @@ bool AnimationUpdater::DownloadMegaAnimationFile(const std::string& url) {
         vTaskDelay(pdMS_TO_TICKS(500));
         
         ESP_LOGI(TAG, "✅ File written and closed successfully: %s (%u bytes)", filename, (unsigned int)total_read);
+        
+        // Try to get and save the remote file timestamp for future comparisons
+        std::string remote_timestamp;
+        if (GetRemoteFileTimestamp(url, remote_timestamp)) {
+            SaveLocalFileTimestamp(remote_timestamp);
+            ESP_LOGI(TAG, "Saved remote file timestamp: %s", remote_timestamp.c_str());
+        } else {
+            ESP_LOGW(TAG, "Could not get remote file timestamp to save (Http class may need GetResponseHeader() method)");
+        }
         
         // Reload animations from SD card
         ESP_LOGI(TAG, "Reloading animations from SD card...");

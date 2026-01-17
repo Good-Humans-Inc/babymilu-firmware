@@ -93,6 +93,11 @@ private:
     bool GetRemoteContentLength(const std::string& url, size_t &out_length);
     bool GetRemoteMegaContentLength(size_t &out_length);
     size_t GetLocalMegaFileSize(const char* file_path);
+    bool GetLocalFileHeader(const char* file_path, uint32_t& file_count, uint32_t& checksum, uint32_t& combined_length);
+    bool GetRemoteFileHeader(const std::string& url, uint32_t& file_count, uint32_t& checksum, uint32_t& combined_length);
+    bool GetRemoteFileTimestamp(const std::string& url, std::string& timestamp);
+    std::string GetLocalFileTimestamp();
+    void SaveLocalFileTimestamp(const std::string& timestamp);
     std::string BuildMegaDownloadUrl();
     
     // Configuration management

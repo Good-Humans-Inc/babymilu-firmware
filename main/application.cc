@@ -517,11 +517,35 @@ void Application::ToggleChatState()
     {
         Schedule([this]()
                  { 
-                     // Close audio channel directly to end conversation (same as listening state)
+                     ESP_LOGI(TAG, "Boot button pressed during speaking - forcefully closing audio channel");
+                     
+                     // Immediately close the audio channel to stop all audio operations
                      auto* active_protocol = GetActiveProtocol();
-                     if (active_protocol) {
+                     if (active_protocol && active_protocol->IsAudioChannelOpened()) {
+                         ESP_LOGI(TAG, "Closing audio channel immediately");
                          active_protocol->CloseAudioChannel();
                      }
+                     
+                     // Clear all pending audio decode queue
+                     {
+                         std::lock_guard<std::mutex> lock(mutex_);
+                         audio_decode_queue_.clear();
+                         audio_decode_cv_.notify_all();
+                     }
+                     
+                     // Reset decoder state
+                     ResetDecoder();
+                     
+                     // Set abort flag and reset state
+                     aborted_ = true;
+                     state_before_tts_ = kDeviceStateUnknown;
+                     
+                     // Force immediate transition to idle - no waiting for server
+                     ESP_LOGI(TAG, "Forcefully transitioning to idle state");
+                     SetDeviceState(kDeviceStateIdle);
+                     
+                     // Reset abort flag after state change
+                     aborted_ = false;
                  });
     }
     else if (device_state_ == kDeviceStateListening)
@@ -771,6 +795,39 @@ void Application::Start()
     // Check for new firmware version or get the MQTT broker address
     CheckNewVersion();
 
+    // Check for animation updates after network is confirmed ready
+    // Only trigger once after startup when server connection is established
+    ESP_LOGI(TAG, "Checking if network is ready for animation update check...");
+    auto& board_instance = Board::GetInstance();
+    bool network_ready = false;
+    
+    if (board_instance.GetBoardType() != "ml307") {
+        // For WiFi boards, check WiFi connection
+        auto& wifi_station = WifiStation::GetInstance();
+        network_ready = wifi_station.IsConnected();
+        ESP_LOGI(TAG, "WiFi board - connection status: %s", network_ready ? "CONNECTED" : "NOT CONNECTED");
+    } else {
+        // For ML307 boards, network is ready after CheckNewVersion() succeeds
+        // (CheckNewVersion makes HTTP requests, so network must be working)
+        network_ready = true;
+        ESP_LOGI(TAG, "ML307 board - assuming network ready after CheckNewVersion()");
+    }
+    
+    if (network_ready) {
+        ESP_LOGI(TAG, "Network is ready, scheduling animation update check after 25 seconds...");
+        AnimationUpdater::GetInstance().Initialize();
+        
+        // Delay animation updater by 25 seconds after startup to ensure system initialization is complete
+        xTaskCreate([](void* parameter) {
+            vTaskDelay(pdMS_TO_TICKS(12000));
+            ESP_LOGI(TAG, "Triggering one-time animation update check after delay...");
+            AnimationUpdater::GetInstance().TriggerUpdateLoop();
+            vTaskDelete(NULL);
+        }, "delayed_anim_update", 4096, nullptr, 1, nullptr);
+    } else {
+        ESP_LOGW(TAG, "Network not ready yet, skipping animation update check");
+    }
+
     // Upload error log if available
     ESP_LOGI(TAG, "Attempting to upload error log...");
     esp_err_t upload_result = ErrorLogUploader::UploadErrorLog();
@@ -987,14 +1044,7 @@ void Application::Start()
             auto emotion = cJSON_GetObjectItem(root, "emotion");
             if (cJSON_IsString(emotion)) {
                 Schedule([this, display, emotion_str = std::string(emotion->valuestring)]() {
-                    // Only apply emotion if device is still in an active conversation state
-                    // Ignore emotion updates if device is idle (e.g., after abort)
-                    if (device_state_ == kDeviceStateSpeaking || device_state_ == kDeviceStateListening) {
-                        display->SetEmotion(emotion_str.c_str());
-                    } else {
-                        ESP_LOGI(TAG, "Ignoring LLM emotion update '%s' - device is not in active conversation (state: %d)", 
-                                emotion_str.c_str(), device_state_);
-                    }
+                    display->SetEmotion(emotion_str.c_str());
                 });
             }
 #if CONFIG_IOT_PROTOCOL_MCP
@@ -1523,15 +1573,6 @@ void Application::OnAudioInput()
                 wake_word_->Feed(data);
                 return;
             }
-            else
-            {
-                // Log periodically if audio read fails (likely input disabled)
-                static uint32_t read_fail_count = 0;
-                read_fail_count++;
-                if (read_fail_count % 100 == 0) {  // Log every ~5 seconds
-                    ESP_LOGW(TAG, "Wake word detection running but ReadAudio failed (input may be disabled)");
-                }
-            }
         }
     }
 
@@ -1661,7 +1702,7 @@ void Application::SetDeviceState(DeviceState state)
         break;
     case kDeviceStateListening:
         display->SetStatus(Lang::Strings::LISTENING);
-        // Use "listening" emotion which maps to ANIMATION_LISTENING (listening.gif from test.bin)
+        // Use "listening" emotion which maps to ANIMATION_LISTENING (listening_loop.gif)
         display->SetEmotion("listening");
         ESP_LOGI(TAG, "Listening state: showing listening animation");
         // Update the IoT states before sending the start listening command
@@ -2069,14 +2110,7 @@ void Application::OpenWebSocketConnection() {
                 auto emotion = cJSON_GetObjectItem(root, "emotion");
                 if (cJSON_IsString(emotion)) {
                     Schedule([this, display, emotion_str = std::string(emotion->valuestring)]() {
-                        // Only apply emotion if device is still in an active conversation state
-                        // Ignore emotion updates if device is idle (e.g., after abort)
-                        if (device_state_ == kDeviceStateSpeaking || device_state_ == kDeviceStateListening) {
-                            display->SetEmotion(emotion_str.c_str());
-                        } else {
-                            ESP_LOGI(TAG, "Ignoring LLM emotion update '%s' - device is not in active conversation (state: %d)", 
-                                    emotion_str.c_str(), device_state_);
-                        }
+                        display->SetEmotion(emotion_str.c_str());
                     });
                 }
             } else if (strcmp(type->valuestring, "listen") == 0) {
