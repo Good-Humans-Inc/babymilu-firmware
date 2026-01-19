@@ -378,6 +378,7 @@ private:
     PowerSaveTimer* power_save_timer_ = nullptr;
     esp_timer_handle_t emotion_reset_timer_ = nullptr;  // Timer to reset emotion to previous state after one animation cycle
     std::string previous_emotion_ = "neutral";  // Store previous emotion string to restore
+    int previous_volume_ = -1;  // Store volume before muting (for restore on unmute)
 
     void InitializeI2c() {
         ESP_LOGI(TAG, "[BMI270] Initializing I2C bus for BMI270 compatibility");
@@ -1286,6 +1287,26 @@ private:
                 app.ToggleChatState();
             }
         });
+
+        boot_button_.OnLongPress([this]() {
+            auto codec = GetAudioCodec();
+            if (!codec) return;
+
+            int current_volume = codec->output_volume();
+            if (current_volume == 0) {
+                // Already muted - restore previous volume
+                int restore_volume = (previous_volume_ > 0) ? previous_volume_ : 50;  // Default to 50 if no previous volume
+                codec->SetOutputVolume(restore_volume);
+                ESP_LOGI(TAG, "Volume restored from mute: %d", restore_volume);
+                previous_volume_ = -1;  // Reset
+            } else {
+                // Not muted - save current volume and mute
+                previous_volume_ = current_volume;
+                codec->SetOutputVolume(0);
+                ESP_LOGI(TAG, "Volume muted (saved: %d)", previous_volume_);
+            }
+        });
+
          gpio_config_t power_gpio_config = {
             .pin_bit_mask = (BIT64(POWER_CTRL) ),
             .mode = GPIO_MODE_OUTPUT,
@@ -1297,7 +1318,7 @@ private:
     }
 
 public:
-    EchoEar() : boot_button_(BOOT_BUTTON_GPIO) {
+    EchoEar() : boot_button_(BOOT_BUTTON_GPIO, false, 5000, 0) {  // 5-second long press time
         InitializeI2c();
         InitializeBmi270();  // Initialize BMI270 after I2C bus is ready
         InitializeCharge();

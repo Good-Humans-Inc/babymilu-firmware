@@ -44,7 +44,7 @@ void AfeAudioProcessor::Initialize(AudioCodec* codec) {
 
     afe_config->afe_perferred_core = 1;
     afe_config->afe_perferred_priority = 1;
-    afe_config->agc_init = false;
+    afe_config->agc_init = true;
     afe_config->memory_alloc_mode = AFE_MEMORY_ALLOC_MORE_PSRAM;
 
 #ifdef CONFIG_USE_DEVICE_AEC
