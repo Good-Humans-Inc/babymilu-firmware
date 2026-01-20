@@ -35,6 +35,9 @@ protected:
     lv_obj_t* side_bar_ = nullptr;
     lv_obj_t* preview_image_ = nullptr;
     lv_obj_t* emotion_gif_ = nullptr;  // GIF widget for animations
+    lv_img_dsc_t emotion_gif_desc_{};  // Persistent GIF descriptor for LVGL
+    const uint8_t* emotion_gif_data_ = nullptr;
+    size_t emotion_gif_size_ = 0;
 
     DisplayFonts fonts_;
     ThemeColors current_theme_;

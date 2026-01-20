@@ -1294,22 +1294,34 @@ void LcdDisplay::SetEmotionGif(const uint8_t* gif_data, size_t gif_size)
     // Show GIF widget
     lv_obj_clear_flag(emotion_gif_, LV_OBJ_FLAG_HIDDEN);
     
-    // Create an lv_img_dsc_t structure for the GIF data
-    // LVGL GIF expects lv_img_dsc_t* with GIF data in the data field
-    // Note: The data pointer must remain valid for the lifetime of the GIF widget
-    lv_img_dsc_t gif_img_dsc;
-    gif_img_dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
-    gif_img_dsc.header.cf = LV_COLOR_FORMAT_L8; // GIF uses its own format internally
-    gif_img_dsc.header.flags = 0;
-    gif_img_dsc.header.w = 0; // GIF has its own dimensions
-    gif_img_dsc.header.h = 0;
-    gif_img_dsc.header.stride = 0;
-    gif_img_dsc.data_size = gif_size;
-    gif_img_dsc.data = gif_data; // Point to our GIF data (must remain valid)
+    // Avoid resetting the GIF if the source is unchanged.
+    if (emotion_gif_data_ == gif_data && emotion_gif_size_ == gif_size) {
+        return;
+    }
+
+    // Pause any active GIF timer before swapping sources to avoid null deref
+    // if the new GIF fails to load.
+    lv_gif_pause(emotion_gif_);
+
+    // Use a persistent descriptor; LVGL keeps this pointer for async playback.
+    emotion_gif_desc_.header.magic = LV_IMAGE_HEADER_MAGIC;
+    emotion_gif_desc_.header.cf = LV_COLOR_FORMAT_L8; // GIF uses its own format internally
+    emotion_gif_desc_.header.flags = 0;
+    emotion_gif_desc_.header.w = 0; // GIF has its own dimensions
+    emotion_gif_desc_.header.h = 0;
+    emotion_gif_desc_.header.stride = 0;
+    emotion_gif_desc_.data_size = gif_size;
+    emotion_gif_desc_.data = gif_data; // Must remain valid for GIF lifetime
+
+    emotion_gif_data_ = gif_data;
+    emotion_gif_size_ = gif_size;
     
-    // Set GIF source from image descriptor
-    // LVGL will use the data pointer, so gif_data must remain valid
-    lv_gif_set_src(emotion_gif_, &gif_img_dsc);
+    // Set GIF source from persistent descriptor
+    lv_gif_set_src(emotion_gif_, &emotion_gif_desc_);
+    if (!lv_gif_is_loaded(emotion_gif_)) {
+        ESP_LOGW(TAG, "GIF source failed to load; keeping animation paused");
+        return;
+    }
     
     ESP_LOGD(TAG, "Set GIF animation (%d bytes)", gif_size);
 #else

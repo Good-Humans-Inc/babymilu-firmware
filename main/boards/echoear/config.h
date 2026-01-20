@@ -59,12 +59,11 @@
 #define TP_PIN_NUM_RST   (GPIO_NUM_NC)
 #define TP_PIN_NUM_INT   (GPIO_NUM_10)
 
-// GPIO7 touch sensor definitions completely disabled
 // Touch channel definition (GPIO7 = Touch Channel 7 on ESP32-S3)
-// #define TOUCH_CHANNEL_1        (7)
+#define TOUCH_CHANNEL_1        (7)
 
 // Touch threshold definitions
-// #define LIGHT_TOUCH_THRESHOLD  (0.05)  // 0.0 - 1.0 range (lower = more sensitive)
+#define LIGHT_TOUCH_THRESHOLD  (0.05)  // 0.0 - 1.0 range (lower = more sensitive)
 
 // BMI270 configuration
 #define BMI270_I2C_ADDR 0x68

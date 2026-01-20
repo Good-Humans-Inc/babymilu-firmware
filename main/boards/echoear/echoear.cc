@@ -22,16 +22,8 @@
 #include <esp_lcd_panel_ops.h>
 #include <esp_lcd_st77916.h>
 #include "touch.h"
-// ============================================================================
-// GPIO7 TOUCH SENSOR FUNCTIONALITY COMPLETELY DISABLED
-// ============================================================================
-// All GPIO7 touch sensor code has been commented out to prevent I2C interference
-// with audio codec communication. The touch sensor was causing issues with
-// audio listening and transmission via I2C bus.
-// ============================================================================
-// GPIO7 touch sensor includes disabled completely
-// #include <touch_sensor_lowlevel.h>
-// #include <touch_button_sensor.h>
+#include <touch_sensor_lowlevel.h>
+#include <touch_button_sensor.h>
 
 #include "driver/temperature_sensor.h"
 #include <freertos/FreeRTOS.h>
@@ -236,14 +228,13 @@ static const st77916_lcd_init_cmd_t vendor_specific_init_yysj[] = {
 };
 float tsens_value;
 
-// GPIO7 touch sensor event struct disabled completely
 // Application-level event generated from GPIO7 touch button events.
 // This is used to move heavy work (display/emotion changes) out of the
 // touch driver callback so it can't starve audio tasks.
-// typedef struct {
-//     touch_state_t state;
-//     uint32_t channel;
-// } TouchButtonAppEvent_t;
+typedef struct {
+    touch_state_t state;
+    uint32_t channel;
+} TouchButtonAppEvent_t;
 
 class Charge : public I2cDevice {
 public:
@@ -369,12 +360,11 @@ private:
     PwmBacklight* backlight_ = nullptr;
     esp_timer_handle_t touchpad_timer_;
     esp_lcd_touch_handle_t tp;   // LCD touch handle
-    // GPIO7 touch sensor member variables completely disabled
-    // touch_button_handle_t touch_button_handle_ = nullptr;  // Touch button sensor handle for GPIO7
-    // static volatile uint32_t touch_event_count_;  // Counter for touch events
+    touch_button_handle_t touch_button_handle_ = nullptr;  // Touch button sensor handle for GPIO7
+    static volatile uint32_t touch_event_count_;  // Counter for touch events
     QueueHandle_t touch_event_queue_;  // Queue for touch interrupt events (used by CST816S)
     TaskHandle_t touch_event_task_handle_;  // Task handle for processing touch events (used by CST816S)
-    // QueueHandle_t touch_button_app_queue_ = nullptr;  // Queue for app-level touch button events
+    QueueHandle_t touch_button_app_queue_ = nullptr;  // Queue for app-level touch button events
     PowerSaveTimer* power_save_timer_ = nullptr;
     esp_timer_handle_t emotion_reset_timer_ = nullptr;  // Timer to reset emotion to previous state after one animation cycle
     std::string previous_emotion_ = "neutral";  // Store previous emotion string to restore
@@ -645,9 +635,6 @@ private:
         }
     }
 
-    // GPIO7 touch sensor task functions disabled
-    // Touch sensor logging task disabled to avoid I2C contention during audio
-    /*
     static void touch_log_task(void* arg)
     {
         ESP_LOGI(TAG, "[TOUCH] touch_log_task started");
@@ -682,10 +669,6 @@ private:
             }
         }
     }
-    */
-
-    // GPIO7 touch sensor task functions completely disabled
-    /*
     static void touch_button_event_task(void* arg)
     {
         // Logging disabled to avoid I2C contention
@@ -797,10 +780,6 @@ private:
             }
         }
     }
-    */
-
-    // GPIO7 touch sensor initialization function completely disabled
-    /*
     void InitializeTouchButton()
     {
         ESP_LOGI(TAG, "[TOUCH] ===== Starting touch button initialization =====");
@@ -971,7 +950,6 @@ private:
         ESP_LOGI(TAG, "[TOUCH] Touch sensor is now active and monitoring GPIO7");
         ESP_LOGI(TAG, "[TOUCH] Touch events will be ignored during speaking/listening mode");
     }
-    */
 
     void InitializeBmi270() {
         ESP_LOGI(TAG, "[BMI270] ===== Starting BMI270 initialization =====");
@@ -1329,10 +1307,9 @@ public:
         InitializeButtons();
         InitializePowerSaveTimer();
         InitializeEmotionResetTimer();
-        // GPIO7 touch sensor initialization disabled
-        // ESP_LOGI(TAG, "[TOUCH] About to call InitializeTouchButton()");
-        // InitializeTouchButton();
-        // ESP_LOGI(TAG, "[TOUCH] InitializeTouchButton() returned");
+        ESP_LOGI(TAG, "[TOUCH] About to call InitializeTouchButton()");
+        InitializeTouchButton();
+        ESP_LOGI(TAG, "[TOUCH] InitializeTouchButton() returned");
         
         // Initialize SD card BEFORE animations to ensure it's available for animation loading
         ESP_LOGI(TAG, "Initializing SD card before animations...");
@@ -1447,9 +1424,8 @@ public:
     }
 };
 
-// GPIO7 touch sensor static member definition completely disabled
 // Static member definition
-// volatile uint32_t EchoEar::touch_event_count_ = 0;
+volatile uint32_t EchoEar::touch_event_count_ = 0;
 
 DECLARE_BOARD(EchoEar);
 
