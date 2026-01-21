@@ -1230,6 +1230,11 @@ void Application::Start()
                 led->OnStateChanged();
             });
         } else if (device_state_ == kDeviceStateSpeaking) {
+            // Reset debounce state immediately when VAD goes to silence
+            if (!speaking && vad_debounce_active_) {
+                vad_debounce_active_ = false;
+                ESP_LOGD(TAG, "VAD silence detected during speaking, resetting debounce state");
+            }
             // Set event bit for VAD interrupt handling during speaking state
             xEventGroupSetBits(event_group_, MAIN_EVENT_VAD_CHANGE);
         } });
@@ -1787,8 +1792,28 @@ void Application::SetDeviceState(DeviceState state)
         speaking_start_time_us_ = esp_timer_get_time();
         vad_debounce_active_ = false; // Reset debounce state when entering speaking state
 
-        if (listening_mode_ != kListeningModeRealtime)
+        // Keep audio processor running when device-side AEC is enabled to allow VAD interrupt detection
+        // This enables users to interrupt the AI assistant during speech playback
+        if (aec_mode_ == kAecOnDeviceSide)
         {
+            // Keep audio processor running for VAD interrupt capability
+            // VAD will detect user speech and trigger interrupt via MAIN_EVENT_VAD_CHANGE
+            if (!audio_processor_->IsRunning())
+            {
+                audio_processor_->Start();
+                ESP_LOGI(TAG, "Audio processor kept running for VAD interrupt (device-side AEC enabled)");
+            }
+            // Ensure listening mode is set to realtime for continuous listening
+            if (listening_mode_ != kListeningModeRealtime)
+            {
+                listening_mode_ = kListeningModeRealtime;
+                ESP_LOGI(TAG, "Listening mode set to realtime for VAD interrupt capability");
+            }
+            wake_word_->StopDetection();
+        }
+        else if (listening_mode_ != kListeningModeRealtime)
+        {
+            // Without device-side AEC, stop audio processor during speaking
             audio_processor_->Stop();
             // Only AFE wake word can be detected in speaking mode
 #if CONFIG_USE_AFE_WAKE_WORD
