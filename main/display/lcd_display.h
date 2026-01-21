@@ -35,9 +35,13 @@ protected:
     lv_obj_t* side_bar_ = nullptr;
     lv_obj_t* preview_image_ = nullptr;
     lv_obj_t* emotion_gif_ = nullptr;  // GIF widget for animations
+    lv_obj_t* debug_overlay_square_ = nullptr;  // Debug overlay drawn above animations
     lv_img_dsc_t emotion_gif_desc_{};  // Persistent GIF descriptor for LVGL
     const uint8_t* emotion_gif_data_ = nullptr;
     size_t emotion_gif_size_ = 0;
+    int debug_square_x_ = 0;  // Current X position of debug square (relative to screen center)
+    int debug_square_y_ = 10;  // Current Y position of debug square (relative to screen top)
+    bool debug_square_in_upper_zone_ = false;  // Track if square is in upper 100px zone
 
     DisplayFonts fonts_;
     ThemeColors current_theme_;
@@ -73,6 +77,9 @@ public:
     
     // Public method to clear all system messages created by CreateSystemMessage
     void ClearSystemMessages();
+    
+    // Update debug overlay square position based on tilt (for BMI270 control)
+    void UpdateDebugSquarePosition(int delta_x, int delta_y);
 };
 
 // RGB LCD显示器
