@@ -352,14 +352,7 @@ private:
     
     // BMI270 sensor handle
     bmi270_handle_t bmi270_handle_ = nullptr;
-
-    // BMI270 spawn-state reference origin (calibrated on first successful read)
-    // All movement is relative to this origin; absolute readings are never used for control.
-    int16_t bmi270_origin_accel_x_ = 0;
-    int16_t bmi270_origin_accel_y_ = 0;
-    int16_t bmi270_origin_accel_z_ = 0;
-    bool bmi270_spawn_calibrated_ = false;
-
+    
     Cst816s* cst816s_;
     Charge* charge_;
     Button boot_button_;
@@ -1077,8 +1070,12 @@ private:
         // For ±4G range, typical scale is ~8192 LSB/g, so threshold ~2000 LSB (~0.25g tilt)
         const int16_t tilt_threshold = 2000;
         
-        // Spawn-state reference origin: first successful read defines the calibrated reference.
-        // All subsequent movement is relative to this origin (never absolute readings).
+        // Calibration: when device is flat, Z should be ~+16384 (1g), X and Y should be ~0
+        // We'll use relative values from flat position
+        int16_t base_accel_x = 0;
+        int16_t base_accel_y = 0;
+        int16_t base_accel_z = 16384;  // Approximate 1g value for ±4G range
+        bool calibrated = false;
 
         while (true) {
             // Read sensor data
@@ -1086,31 +1083,29 @@ private:
             if (rslt == BMI2_OK) {
                 read_count++;
                 
-                // Access accelerometer data (absolute raw readings)
+                // Access accelerometer data
                 int16_t accel_x = sensor_data.acc.x;
                 int16_t accel_y = sensor_data.acc.y;
                 int16_t accel_z = sensor_data.acc.z;
                 
-                // Set spawn-state reference origin on first successful read
-                if (!board->bmi270_spawn_calibrated_) {
-                    board->bmi270_origin_accel_x_ = accel_x;
-                    board->bmi270_origin_accel_y_ = accel_y;
-                    board->bmi270_origin_accel_z_ = accel_z;
-                    board->bmi270_spawn_calibrated_ = true;
-                    ESP_LOGI(TAG, "[BMI270] Spawn-state reference origin set: X=%d, Y=%d, Z=%d",
-                             (int)board->bmi270_origin_accel_x_, (int)board->bmi270_origin_accel_y_,
-                             (int)board->bmi270_origin_accel_z_);
+                // Calibrate on first reading (assume device starts flat)
+                if (!calibrated && read_count == 1) {
+                    base_accel_x = accel_x;
+                    base_accel_y = accel_y;
+                    base_accel_z = accel_z;
+                    calibrated = true;
+                    ESP_LOGI(TAG, "[BMI270] Calibrated: base X=%d, Y=%d, Z=%d", base_accel_x, base_accel_y, base_accel_z);
                 }
                 
-                // All movement based on relative deltas from spawn origin (never absolute)
-                int16_t delta_x = accel_x - board->bmi270_origin_accel_x_;
-                int16_t delta_y = accel_y - board->bmi270_origin_accel_y_;
+                // Calculate tilt relative to calibrated base position
+                int16_t delta_x = accel_x - base_accel_x;
+                int16_t delta_y = accel_y - base_accel_y;
                 
-                // Determine movement direction based on tilt (relative to origin)
+                // Determine movement direction based on tilt
                 // Positive delta_x = tilt right → move square right
                 // Negative delta_x = tilt left → move square left
-                // Negative delta_y = tilt forward (pitch down) → move square down (Y-axis inverted on this board)
-                // Positive delta_y = tilt backward (pitch up) → move square up (Y-axis inverted on this board)
+                // Positive delta_y = tilt forward (pitch down) → move square down
+                // Negative delta_y = tilt backward (pitch up) → move square up
                 int move_x = 0;
                 int move_y = 0;
                 
@@ -1122,11 +1117,10 @@ private:
                     move_x = -(int)pixels_per_update;
                 }
                 
-                // Y-axis inverted: forward tilt (pitch down) gives negative delta_y, backward (pitch up) gives positive
-                if (delta_y < -tilt_threshold) {
+                if (delta_y > tilt_threshold) {
                     // Tilt forward (pitch down) → move down
                     move_y = (int)pixels_per_update;
-                } else if (delta_y > tilt_threshold) {
+                } else if (delta_y < -tilt_threshold) {
                     // Tilt backward (pitch up) → move up
                     move_y = -(int)pixels_per_update;
                 }
