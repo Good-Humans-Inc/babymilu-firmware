@@ -1056,26 +1056,6 @@ private:
         struct bmi2_sens_data sensor_data = {0};
         uint32_t read_count = 0;
         uint32_t error_count = 0;
-        
-        // Wait for display to be initialized before starting movement updates
-        // Give display initialization time (typically completes within 1-2 seconds)
-        vTaskDelay(pdMS_TO_TICKS(2000));
-        
-        // For smooth movement at 40 pixels/sec, update every 50ms (2 pixels per update)
-        const TickType_t update_interval_ms = 50;
-        const float pixels_per_second = 40.0f;
-        const float pixels_per_update = pixels_per_second * (update_interval_ms / 1000.0f);  // 2 pixels per update
-        
-        // Tilt threshold: accelerometer values above this will cause movement
-        // For ±4G range, typical scale is ~8192 LSB/g, so threshold ~2000 LSB (~0.25g tilt)
-        const int16_t tilt_threshold = 2000;
-        
-        // Calibration: when device is flat, Z should be ~+16384 (1g), X and Y should be ~0
-        // We'll use relative values from flat position
-        int16_t base_accel_x = 0;
-        int16_t base_accel_y = 0;
-        int16_t base_accel_z = 16384;  // Approximate 1g value for ±4G range
-        bool calibrated = false;
 
         while (true) {
             // Read sensor data
@@ -1088,62 +1068,29 @@ private:
                 int16_t accel_y = sensor_data.acc.y;
                 int16_t accel_z = sensor_data.acc.z;
                 
-                // Calibrate on first reading (assume device starts flat)
-                if (!calibrated && read_count == 1) {
-                    base_accel_x = accel_x;
-                    base_accel_y = accel_y;
-                    base_accel_z = accel_z;
-                    calibrated = true;
-                    ESP_LOGI(TAG, "[BMI270] Calibrated: base X=%d, Y=%d, Z=%d", base_accel_x, base_accel_y, base_accel_z);
-                }
+                // Access gyroscope data
+                int16_t gyro_x = sensor_data.gyr.x;
+                int16_t gyro_y = sensor_data.gyr.y;
+                int16_t gyro_z = sensor_data.gyr.z;
                 
-                // Calculate tilt relative to calibrated base position
-                int16_t delta_x = accel_x - base_accel_x;
-                int16_t delta_y = accel_y - base_accel_y;
-                
-                // Determine movement direction based on tilt
-                // Positive delta_x = tilt right → move square right
-                // Negative delta_x = tilt left → move square left
-                // Positive delta_y = tilt forward (pitch down) → move square down
-                // Negative delta_y = tilt backward (pitch up) → move square up
-                int move_x = 0;
-                int move_y = 0;
-                
-                if (delta_x > tilt_threshold) {
-                    // Tilt right → move right
-                    move_x = (int)pixels_per_update;
-                } else if (delta_x < -tilt_threshold) {
-                    // Tilt left → move left
-                    move_x = -(int)pixels_per_update;
-                }
-                
-                if (delta_y > tilt_threshold) {
-                    // Tilt forward (pitch down) → move down
-                    move_y = (int)pixels_per_update;
-                } else if (delta_y < -tilt_threshold) {
-                    // Tilt backward (pitch up) → move up
-                    move_y = -(int)pixels_per_update;
-                }
-                
-                // Update square position if there's movement
-                // Only update if display is initialized and ready
-                if ((move_x != 0 || move_y != 0) && board->display_ != nullptr) {
-                    board->display_->UpdateDebugSquarePosition(move_x, move_y);
-                }
-                
-                // Access gyroscope data (available but not used for movement)
-                (void)sensor_data.gyr.x;
-                (void)sensor_data.gyr.y;
-                (void)sensor_data.gyr.z;
-                
+                // Log sensor data every 10 readings (every 10 seconds)
+                /*if (read_count % 10 == 0) {
+                    ESP_LOGI(TAG, "[BMI270] Reading #%lu - Accel: X=%d, Y=%d, Z=%d | Gyro: X=%d, Y=%d, Z=%d",
+                             (unsigned long)read_count, accel_x, accel_y, accel_z,
+                             gyro_x, gyro_y, gyro_z);
+                } else {
+                    // Log at DEBUG level for other readings
+                    ESP_LOGD(TAG, "[BMI270] Accel: X=%d, Y=%d, Z=%d | Gyro: X=%d, Y=%d, Z=%d",
+                             accel_x, accel_y, accel_z, gyro_x, gyro_y, gyro_z);
+                }*/
             } else {
                 error_count++;
                 ESP_LOGW(TAG, "[BMI270] Failed to read BMI270 data: %d (error count: %lu)", 
                          rslt, (unsigned long)error_count);
             }
             
-            // Update every 50ms for smooth movement (20 pixels/sec = 1 pixel per update)
-            vTaskDelay(pdMS_TO_TICKS(update_interval_ms));
+            // Wait 1 second before next reading
+            vTaskDelay(pdMS_TO_TICKS(1000));
         }
     }
 

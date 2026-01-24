@@ -384,24 +384,6 @@ void LcdDisplay::SetupUI()
     // We'll create chat messages dynamically in SetChatMessage
     chat_message_label_ = nullptr;
 
-    // Debug overlay: 30x30 green square drawn above animations/UI
-    if (debug_overlay_square_ == nullptr) {
-        debug_overlay_square_ = lv_obj_create(screen);
-        lv_obj_remove_style_all(debug_overlay_square_);
-        lv_obj_clear_flag(debug_overlay_square_, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_set_size(debug_overlay_square_, 30, 30);
-        // Initialize position: centered horizontally (x=0), 10 pixels from top
-        debug_square_x_ = 0;
-        debug_square_y_ = 10;
-        int screen_width = lv_disp_get_hor_res(display_);
-        lv_obj_set_pos(debug_overlay_square_, (screen_width / 2) + debug_square_x_, debug_square_y_);
-        lv_obj_set_style_bg_color(debug_overlay_square_, lv_color_hex(0x00FF00), 0);
-        lv_obj_set_style_bg_opa(debug_overlay_square_, LV_OPA_COVER, 0);
-        lv_obj_set_style_border_width(debug_overlay_square_, 0, 0);
-        lv_obj_set_style_radius(debug_overlay_square_, 0, 0);
-        lv_obj_move_foreground(debug_overlay_square_);
-    }
-
     /* Status bar elements - COMMENTED OUT FOR FULL IMAGE SCALING */
     /*
     lv_obj_set_flex_flow(status_bar_, LV_FLEX_FLOW_ROW);
@@ -886,24 +868,6 @@ void LcdDisplay::SetupUI()
     lv_obj_set_flex_flow(content_, LV_FLEX_FLOW_COLUMN);                                                     // 垂直布局（从上到下）
     lv_obj_set_flex_align(content_, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER); // 子对象居中对齐，优先显示emotion
 
-    // Debug overlay: 30x30 green square drawn above animations/UI
-    if (debug_overlay_square_ == nullptr) {
-        debug_overlay_square_ = lv_obj_create(screen);
-        lv_obj_remove_style_all(debug_overlay_square_);
-        lv_obj_clear_flag(debug_overlay_square_, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_set_size(debug_overlay_square_, 30, 30);
-        // Initialize position: centered horizontally (x=0), 10 pixels from top
-        debug_square_x_ = 0;
-        debug_square_y_ = 10;
-        int screen_width = lv_disp_get_hor_res(display_);
-        lv_obj_set_pos(debug_overlay_square_, (screen_width / 2) + debug_square_x_, debug_square_y_);
-        lv_obj_set_style_bg_color(debug_overlay_square_, lv_color_hex(0x00FF00), 0);
-        lv_obj_set_style_bg_opa(debug_overlay_square_, LV_OPA_COVER, 0);
-        lv_obj_set_style_border_width(debug_overlay_square_, 0, 0);
-        lv_obj_set_style_radius(debug_overlay_square_, 0, 0);
-        lv_obj_move_foreground(debug_overlay_square_);
-    }
-
     // UI elements commented out for full screen display
     /*
     emotion_label_ = lv_img_create(content_);
@@ -1287,11 +1251,6 @@ void LcdDisplay::SetEmotionImg(const lv_image_dsc_t *img)
     
     // Show image widget
     lv_obj_clear_flag(emotion_label_, LV_OBJ_FLAG_HIDDEN);
-
-    // Keep debug overlay on top of anything we show
-    if (debug_overlay_square_ != nullptr) {
-        lv_obj_move_foreground(debug_overlay_square_);
-    }
     
     // Additional safety check for image data validity
     if (img != nullptr && img->data == nullptr) {
@@ -1334,11 +1293,6 @@ void LcdDisplay::SetEmotionGif(const uint8_t* gif_data, size_t gif_size)
     
     // Show GIF widget
     lv_obj_clear_flag(emotion_gif_, LV_OBJ_FLAG_HIDDEN);
-
-    // Keep debug overlay on top of anything we show
-    if (debug_overlay_square_ != nullptr) {
-        lv_obj_move_foreground(debug_overlay_square_);
-    }
     
     // Avoid resetting the GIF if the source is unchanged.
     if (emotion_gif_data_ == gif_data && emotion_gif_size_ == gif_size) {
@@ -1666,68 +1620,4 @@ void LcdDisplay::SetDisplayRotation180(bool upside_down)
     lv_display_rotation_t rotation = upside_down ? LV_DISPLAY_ROTATION_180 : LV_DISPLAY_ROTATION_0;
     lv_display_set_rotation(display_, rotation);
     ESP_LOGI(TAG, "Display rotation set to %s", upside_down ? "180° (upside down)" : "0° (normal)");
-}
-
-void LcdDisplay::UpdateDebugSquarePosition(int delta_x, int delta_y)
-{
-    DisplayLockGuard lock(this);
-    if (debug_overlay_square_ == nullptr || display_ == nullptr) {
-        return;
-    }
-    
-    // Update position
-    debug_square_x_ += delta_x;
-    debug_square_y_ += delta_y;
-    
-    // Clamp to screen boundaries (accounting for 30x30 square size)
-    int screen_width = lv_disp_get_hor_res(display_);
-    int screen_height = lv_disp_get_ver_res(display_);
-    int square_size = 30;
-    
-    // Clamp X: keep square within screen bounds
-    if (debug_square_x_ < -(screen_width / 2)) {
-        debug_square_x_ = -(screen_width / 2);
-    } else if (debug_square_x_ > (screen_width / 2 - square_size)) {
-        debug_square_x_ = (screen_width / 2 - square_size);
-    }
-    
-    // Clamp Y: keep square within screen bounds (starting from top)
-    if (debug_square_y_ < 0) {
-        debug_square_y_ = 0;
-    } else if (debug_square_y_ > (screen_height - square_size)) {
-        debug_square_y_ = (screen_height - square_size);
-    }
-    
-    // Check if square is in lower zone (within 100 pixels from bottom)
-    const int lower_zone_threshold = 100;
-    bool is_in_lower_zone = (debug_square_y_ > (screen_height - lower_zone_threshold));
-    
-    // Check if square is within central range of 30 pixels (x between -30 and +30)
-    const int central_range = 30;
-    bool is_in_central_range = (abs(debug_square_x_) <= central_range);
-    
-    // Switch animation to blush.gif when square is in lower zone AND central range
-    bool should_be_blush = is_in_lower_zone && is_in_central_range;
-    
-    if (should_be_blush && !debug_square_in_upper_zone_) {
-        // Square just entered lower zone and central range - switch to blush animation
-        SetEmotion("embarrassed");
-        debug_square_in_upper_zone_ = true;
-        ESP_LOGI(TAG, "Square entered lower zone (Y=%d) and central range (X=%d) - switching to blush animation", 
-                 debug_square_y_, debug_square_x_);
-    } else if (!should_be_blush && debug_square_in_upper_zone_) {
-        // Square just left lower zone or central range - restore neutral animation
-        SetEmotion("neutral");
-        debug_square_in_upper_zone_ = false;
-        ESP_LOGI(TAG, "Square left lower zone or central range (Y=%d, X=%d) - restoring neutral animation", 
-                 debug_square_y_, debug_square_x_);
-    }
-    
-    // Update LVGL object position (using absolute coordinates from screen center)
-    lv_obj_set_pos(debug_overlay_square_, 
-                   (screen_width / 2) + debug_square_x_, 
-                   debug_square_y_);
-    
-    // Keep it on top
-    lv_obj_move_foreground(debug_overlay_square_);
 }
