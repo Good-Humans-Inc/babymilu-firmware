@@ -2,6 +2,7 @@
 #define I2C_DEVICE_H
 
 #include <driver/i2c_master.h>
+#include <esp_err.h>
 
 class I2cDevice {
 public:
@@ -13,6 +14,10 @@ protected:
     void WriteReg(uint8_t reg, uint8_t value);
     uint8_t ReadReg(uint8_t reg);
     void ReadRegs(uint8_t reg, uint8_t* buffer, size_t length);
+
+    esp_err_t TryWriteReg(uint8_t reg, uint8_t value);
+    esp_err_t TryReadReg(uint8_t reg, uint8_t* value);
+    esp_err_t TryReadRegs(uint8_t reg, uint8_t* buffer, size_t length);
 };
 
 #endif // I2C_DEVICE_H

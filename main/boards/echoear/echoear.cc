@@ -245,8 +245,14 @@ public:
         delete[] read_buffer_;
     }
     void Printcharge() {
-        ReadRegs(0x08, read_buffer_, 2);        
-        ReadRegs(0x0c, read_buffer_ + 2, 2);
+        if (TryReadRegs(0x08, read_buffer_, 2) != ESP_OK) {
+            ESP_LOGW(TAG, "[BATTERY] Read voltage failed");
+            return;
+        }
+        if (TryReadRegs(0x0c, read_buffer_ + 2, 2) != ESP_OK) {
+            ESP_LOGW(TAG, "[BATTERY] Read current failed");
+            return;
+        }
         ESP_ERROR_CHECK(temperature_sensor_get_celsius(temp_sensor, &tsens_value));
 
         // Read voltage and current values (currently unused but available for future use)
@@ -256,7 +262,9 @@ public:
     
     // Get battery voltage in millivolts
     uint16_t GetVoltage() {
-        ReadRegs(0x08, read_buffer_, 2);
+        if (TryReadRegs(0x08, read_buffer_, 2) != ESP_OK) {
+            return 0;
+        }
         uint16_t voltage_raw = (read_buffer_[1] << 8) | read_buffer_[0];
         // Voltage register format: typically in units of 0.1mV or similar
         // Assuming raw value needs scaling - adjust based on actual chip specifications
@@ -266,7 +274,9 @@ public:
     
     // Get battery current in milliamps (positive = charging, negative = discharging)
     int16_t GetCurrent() {
-        ReadRegs(0x0c, read_buffer_ + 2, 2);
+        if (TryReadRegs(0x0c, read_buffer_ + 2, 2) != ESP_OK) {
+            return 0;
+        }
         int16_t current_raw = (int16_t)((read_buffer_[3] << 8) | read_buffer_[2]);
         // Current register format: typically in units of 0.1mA or similar
         // Adjust scaling based on actual chip specifications
@@ -323,7 +333,10 @@ public:
     }
 
     void UpdateTouchPoint() {
-        ReadRegs(0x02, read_buffer_, 6);
+        if (TryReadRegs(0x02, read_buffer_, 6) != ESP_OK) {
+            tp_.num = 0;
+            return;
+        }
         tp_.num = read_buffer_[0] & 0x0F;
         tp_.x = ((read_buffer_[1] & 0x0F) << 8) | read_buffer_[2];
         tp_.y = ((read_buffer_[3] & 0x0F) << 8) | read_buffer_[4];
@@ -331,7 +344,9 @@ public:
 
     GestureType ReadGesture() {
         // Read gesture register (0x01)
-        ReadRegs(0x01, gesture_buffer_, 1);
+        if (TryReadRegs(0x01, gesture_buffer_, 1) != ESP_OK) {
+            return GESTURE_NONE;
+        }
         return static_cast<GestureType>(gesture_buffer_[0]);
     }
 
@@ -414,6 +429,20 @@ private:
         ESP_ERROR_CHECK(temperature_sensor_enable(temp_sensor));
         
         ESP_LOGI(TAG, "[BMI270] I2C bus initialization complete");
+    }
+
+    bool ProbeI2cDevice(uint8_t address, const char* name) {
+        if (!i2c_bus_) {
+            ESP_LOGE(TAG, "[I2C] Probe failed for %s: bus not ready", name);
+            return false;
+        }
+        esp_err_t ret = i2c_master_probe(i2c_bus_, address, pdMS_TO_TICKS(200));
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "[I2C] %s not detected at 0x%02X: %s", name, address, esp_err_to_name(ret));
+            return false;
+        }
+        ESP_LOGI(TAG, "[I2C] %s detected at 0x%02X", name, address);
+        return true;
     }
 
     static void touchpad_timer_callback(void* arg) {
@@ -1095,11 +1124,21 @@ private:
     }
 
     void InitializeCharge() {
+        if (!ProbeI2cDevice(0x55, "Charge IC")) {
+            ESP_LOGW(TAG, "[BATTERY] Charge IC not detected, battery reporting disabled");
+            charge_ = nullptr;
+            return;
+        }
         charge_ = new Charge(i2c_bus_, 0x55);
         xTaskCreatePinnedToCore(Charge::TaskFunction, "batterydecTask", 3 * 1024, charge_, 6, NULL, 0);
     }
 
     void InitializeCst816sTouchPad() {
+        if (!ProbeI2cDevice(0x15, "CST816S")) {
+            ESP_LOGW(TAG, "[TOUCH] CST816S not detected, touch disabled");
+            cst816s_ = nullptr;
+            return;
+        }
         cst816s_ = new Cst816s(i2c_bus_, 0x15);
         
         // Create queue for touch events (ISR -> task communication)
