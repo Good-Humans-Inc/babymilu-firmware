@@ -1235,20 +1235,98 @@ private:
         // Create power save timer: -1 (no CPU freq limit), 30 seconds to sleep, -1 (no shutdown)
         power_save_timer_ = new PowerSaveTimer(-1, 30, -1);
         power_save_timer_->OnEnterSleepMode([this]() {
-            ESP_LOGI(TAG, "Enabling sleep mode - setting brightness to 20 and switching to sleep animation");
-            GetBacklight()->SetBrightness(20, false);  // false = temporary, don't save to settings
-            auto display = GetDisplay();
-            if (display) {
-                display->SetEmotion("sleepy");  // Switch to sleep.gif animation
+            // Check battery level to determine sleep behavior
+            int battery_level = 0;
+            bool charging = false;
+            bool discharging = false;
+
+            if (GetBatteryLevel(battery_level, charging, discharging)) {
+                if (battery_level < 25 && !charging) {
+                    // < 25%, not charging: shutdown
+                    ESP_LOGW(TAG, "Battery level %d%% < 25%% and not charging - shutting down", battery_level);
+                    gpio_set_level(POWER_CTRL, 1);
+                    return;
+                } else if (battery_level < 25 && charging) {
+                    // < 25%, charging: always powersaving mode + sleepy.gif
+                    ESP_LOGI(TAG, "Always power saving mode - battery %d%% < 25%% and charging, setting brightness to 20 and switching to sleepy animation", battery_level);
+                    GetBacklight()->SetBrightness(20, false);
+                    auto display = GetDisplay();
+                    if (display) {
+                        display->SetEmotion("sleepy");
+                    }
+                } else if (battery_level >= 25 && battery_level <= 40 && !charging) {
+                    // 25-40%, not charging: always powersaving mode + battery.gif
+                    ESP_LOGI(TAG, "Always power saving mode - battery %d%% (25-40%% range) and not charging, setting brightness to 20 and switching to battery animation", battery_level);
+                    GetBacklight()->SetBrightness(20, false);
+                    auto display = GetDisplay();
+                    if (display) {
+                        display->SetEmotion("battery");
+                    }
+                } else if (battery_level >= 25 && battery_level <= 40 && charging) {
+                    // 25-40%, charging: 30-sec powersaving mode + sleepy.gif
+                    ESP_LOGI(TAG, "30-sec power saving mode - battery %d%% (25-40%% range) and charging, setting brightness to 20 and switching to sleepy animation", battery_level);
+                    GetBacklight()->SetBrightness(20, false);
+                    auto display = GetDisplay();
+                    if (display) {
+                        display->SetEmotion("sleepy");
+                    }
+                } else {
+                    // > 40%: 30-sec powersaving mode + sleepy.gif (regardless of charging)
+                    ESP_LOGI(TAG, "30-sec power saving mode - battery %d%% (>40%%), setting brightness to 20 and switching to sleepy animation", battery_level);
+                    GetBacklight()->SetBrightness(20, false);
+                    auto display = GetDisplay();
+                    if (display) {
+                        display->SetEmotion("sleepy");
+                    }
+                }
+            } else {
+                // Can't read battery - use default behavior (30-sec mode with sleepy)
+                ESP_LOGI(TAG, "30-sec power saving mode - battery level unknown, setting brightness to 20 and switching to sleepy animation");
+                GetBacklight()->SetBrightness(20, false);
+                auto display = GetDisplay();
+                if (display) {
+                    display->SetEmotion("sleepy");
+                }
             }
         });
         power_save_timer_->OnExitSleepMode([this]() {
+            // Check if we're in "always powersaving" mode - if so, immediately put back to sleep
+            int battery_level = 0;
+            bool charging = false;
+            bool discharging = false;
+
+            if (GetBatteryLevel(battery_level, charging, discharging)) {
+                bool always_powersaving = false;
+                if (battery_level < 25 && charging) {
+                    // < 25%, charging: always powersaving
+                    always_powersaving = true;
+                } else if (battery_level >= 25 && battery_level <= 40 && !charging) {
+                    // 25-40%, not charging: always powersaving
+                    always_powersaving = true;
+                }
+
+                if (always_powersaving) {
+                    ESP_LOGI(TAG, "Always power saving mode active - immediately re-entering sleep mode");
+                    // Immediately re-apply sleep settings
+                    GetBacklight()->SetBrightness(20, false);
+                    auto display = GetDisplay();
+                    if (display) {
+                        if (battery_level < 25 && charging) {
+                            display->SetEmotion("sleepy");
+                        } else if (battery_level >= 25 && battery_level <= 40 && !charging) {
+                            display->SetEmotion("battery");
+                        }
+                    }
+                    return;  // Don't restore brightness/animation for always powersaving mode
+                }
+            }
+
             ESP_LOGI(TAG, "Exiting sleep mode - restoring brightness and animation");
             GetBacklight()->RestoreBrightness();
-            
+
             // Small delay to allow I2C bus and other peripherals to stabilize after wake
             vTaskDelay(pdMS_TO_TICKS(100));
-            
+
             auto display = GetDisplay();
             if (display) {
                 display->SetEmotion("neutral");  // Restore to neutral animation (maps to ANIMATION_STATIC_NORMAL)
@@ -1261,6 +1339,75 @@ private:
             }
         });
         power_save_timer_->SetEnabled(true);
+
+        // Start battery monitoring task for "always powersaving" mode
+        InitializeBatteryMonitor();
+    }
+
+    void InitializeBatteryMonitor() {
+        // Create battery monitoring task to check for "always powersaving" mode
+        xTaskCreate([](void* arg) {
+            EchoEar* board = static_cast<EchoEar*>(arg);
+            bool was_always_powersaving = false;
+            
+            while (true) {
+                int battery_level = 0;
+                bool charging = false;
+                bool discharging = false;
+
+                if (board->GetBatteryLevel(battery_level, charging, discharging)) {
+                    bool always_powersaving = false;
+                    if (battery_level < 25 && charging) {
+                        // < 25%, charging: always powersaving
+                        always_powersaving = true;
+                    } else if (battery_level >= 25 && battery_level <= 40 && !charging) {
+                        // 25-40%, not charging: always powersaving
+                        always_powersaving = true;
+                    }
+
+                    if (always_powersaving) {
+                        // If just entered always powersaving mode, immediately apply sleep settings
+                        if (!was_always_powersaving) {
+                            ESP_LOGI(TAG, "[BATTERY] Entered always power saving mode - applying sleep settings immediately");
+                            board->GetBacklight()->SetBrightness(20, false);
+                            auto display = board->GetDisplay();
+                            if (display) {
+                                if (battery_level < 25 && charging) {
+                                    display->SetEmotion("sleepy");
+                                } else if (battery_level >= 25 && battery_level <= 40 && !charging) {
+                                    display->SetEmotion("battery");
+                                }
+                            }
+                        }
+                        // If in always powersaving mode and not in sleep mode, force it
+                        if (board->power_save_timer_ && !board->power_save_timer_->IsInSleepMode()) {
+                            ESP_LOGI(TAG, "[BATTERY] Always power saving mode - ensuring sleep settings applied");
+                            board->GetBacklight()->SetBrightness(20, false);
+                            auto display = board->GetDisplay();
+                            if (display) {
+                                if (battery_level < 25 && charging) {
+                                    display->SetEmotion("sleepy");
+                                } else if (battery_level >= 25 && battery_level <= 40 && !charging) {
+                                    display->SetEmotion("battery");
+                                }
+                            }
+                        }
+                    } else if (was_always_powersaving) {
+                        // Exited always powersaving mode - restore normal brightness if not in timer-based sleep mode
+                        if (board->power_save_timer_ && !board->power_save_timer_->IsInSleepMode()) {
+                            ESP_LOGI(TAG, "[BATTERY] Exited always power saving mode - restoring brightness");
+                            board->GetBacklight()->RestoreBrightness();
+                        }
+                    }
+                    
+                    was_always_powersaving = always_powersaving;
+                }
+
+                // Check every 5 seconds
+                vTaskDelay(pdMS_TO_TICKS(5000));
+            }
+        }, "battery_monitor", 4096, this, 5, NULL);
+        ESP_LOGI(TAG, "[BATTERY] Battery monitoring task started for always power saving mode");
     }
 
     void InitializeEmotionResetTimer() {
@@ -1292,9 +1439,10 @@ private:
                 ResetWifiConfiguration();
             }
             if (power_save_timer_) {
-                // If in sleep mode, just wake up and return to idle state
+                // If in sleep mode, wake up and directly start talking
                 if (power_save_timer_->IsInSleepMode()) {
                     power_save_timer_->WakeUp();
+                    app.ToggleChatState();
                 } else {
                     // Normal operation: wake up and toggle chat state
                     power_save_timer_->WakeUp();

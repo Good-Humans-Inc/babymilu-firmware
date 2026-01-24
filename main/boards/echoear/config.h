@@ -63,7 +63,7 @@
 #define TOUCH_CHANNEL_1        (7)
 
 // Touch threshold definitions
-#define LIGHT_TOUCH_THRESHOLD  (0.05)  // 0.0 - 1.0 range (lower = more sensitive)
+#define LIGHT_TOUCH_THRESHOLD  (0.01)  // 0.0 - 1.0 range (lower = more sensitive)
 
 // BMI270 configuration
 #define BMI270_I2C_ADDR 0x68
