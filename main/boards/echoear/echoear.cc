@@ -382,8 +382,44 @@ private:
     QueueHandle_t touch_button_app_queue_ = nullptr;  // Queue for app-level touch button events
     PowerSaveTimer* power_save_timer_ = nullptr;
     esp_timer_handle_t emotion_reset_timer_ = nullptr;  // Timer to reset emotion to previous state after one animation cycle
+    esp_timer_handle_t volume_message_timer_ = nullptr;  // Timer to clear volume message
     std::string previous_emotion_ = "neutral";  // Store previous emotion string to restore
     int previous_volume_ = -1;  // Store volume before muting (for restore on unmute)
+
+    void InitializeVolumeMessageTimer() {
+        if (volume_message_timer_ != nullptr) {
+            return;
+        }
+        esp_timer_create_args_t timer_args = {
+            .callback = [](void* arg) {
+                auto self = static_cast<EchoEar*>(arg);
+                if (self == nullptr || self->display_ == nullptr) {
+                    return;
+                }
+                self->display_->ClearOverlayMessage();
+            },
+            .arg = this,
+            .dispatch_method = ESP_TIMER_TASK,
+            .name = "volume_msg_timer",
+            .skip_unhandled_events = true,
+        };
+        ESP_ERROR_CHECK(esp_timer_create(&timer_args, &volume_message_timer_));
+    }
+
+    void ShowVolumeMessage(int volume) {
+        if (display_ == nullptr) {
+            return;
+        }
+        InitializeVolumeMessageTimer();
+        std::string message = "volume: " + std::to_string(volume) + "%";
+        display_->CreateOverlayMessage(message.c_str());
+        if (volume == 0) {
+            esp_timer_stop(volume_message_timer_);
+            return;
+        }
+        esp_timer_stop(volume_message_timer_);
+        ESP_ERROR_CHECK(esp_timer_start_once(volume_message_timer_, 1000 * 1000));
+    }
 
     void InitializeI2c() {
         ESP_LOGI(TAG, "[BMI270] Initializing I2C bus for BMI270 compatibility");
@@ -571,30 +607,28 @@ private:
                         if (codec != nullptr) {
                             int current_volume = codec->output_volume();
                             int new_volume = current_volume;
+                            auto show_volume = [board](int volume) {
+                                if (board == nullptr) {
+                                    return;
+                                }
+                                board->ShowVolumeMessage(volume);
+                            };
                             
                             switch (gesture) {
                                 case Cst816s::GESTURE_SWIPE_UP:
-                                    new_volume = current_volume - 5;  // Decrease by 5
+                                    new_volume = current_volume - 10;  // Decrease by 10
                                     if (new_volume < 0) new_volume = 0;
                                     codec->SetOutputVolume(new_volume);
                                     ESP_LOGI(TAG, "[TOUCH] Swipe UP detected - Volume: %d -> %d", current_volume, new_volume);
-                                    
-                                    // Show volume notification on display
-                                    if (board->display_ != nullptr) {
-                                        board->display_->ShowNotification("Volume: " + std::to_string(new_volume));
-                                    }
+                                    show_volume(new_volume);
                                     break;
                                     
                                 case Cst816s::GESTURE_SWIPE_DOWN:
-                                    new_volume = current_volume + 5;  // Increase by 5
+                                    new_volume = current_volume + 10;  // Increase by 10
                                     if (new_volume > 100) new_volume = 100;
                                     codec->SetOutputVolume(new_volume);
                                     ESP_LOGI(TAG, "[TOUCH] Swipe DOWN detected - Volume: %d -> %d", current_volume, new_volume);
-                                    
-                                    // Show volume notification on display
-                                    if (board->display_ != nullptr) {
-                                        board->display_->ShowNotification("Volume: " + std::to_string(new_volume));
-                                    }
+                                    show_volume(new_volume);
                                     break;
                                     
                                 case Cst816s::GESTURE_SWIPE_LEFT:
@@ -1464,11 +1498,13 @@ private:
                 codec->SetOutputVolume(restore_volume);
                 ESP_LOGI(TAG, "Volume restored from mute: %d", restore_volume);
                 previous_volume_ = -1;  // Reset
+                ShowVolumeMessage(restore_volume);
             } else {
                 // Not muted - save current volume and mute
                 previous_volume_ = current_volume;
                 codec->SetOutputVolume(0);
                 ESP_LOGI(TAG, "Volume muted (saved: %d)", previous_volume_);
+                ShowVolumeMessage(0);
             }
         });
 

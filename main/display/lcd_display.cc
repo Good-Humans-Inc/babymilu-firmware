@@ -372,6 +372,21 @@ void LcdDisplay::SetupUI()
     lv_obj_set_style_bg_color(content_, current_theme_.chat_background, 0); // Background for chat area
     lv_obj_set_style_border_color(content_, current_theme_.border, 0);      // Border color for chat area
 
+    // Minimal overlay labels while status bar is disabled
+    notification_label_ = lv_label_create(screen);
+    lv_obj_set_width(notification_label_, LV_HOR_RES);
+    lv_obj_set_style_text_align(notification_label_, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(notification_label_, current_theme_.text, 0);
+    lv_label_set_text(notification_label_, "");
+    lv_obj_add_flag(notification_label_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_align(notification_label_, LV_ALIGN_TOP_MID, 0, 2);
+
+    mute_label_ = lv_label_create(screen);
+    lv_label_set_text(mute_label_, "");
+    lv_obj_set_style_text_font(mute_label_, fonts_.icon_font, 0);
+    lv_obj_set_style_text_color(mute_label_, current_theme_.text, 0);
+    lv_obj_align(mute_label_, LV_ALIGN_TOP_RIGHT, -2, 2);
+
     // Enable scrolling for chat content
     lv_obj_set_scrollbar_mode(content_, LV_SCROLLBAR_MODE_OFF);
     lv_obj_set_scroll_dir(content_, LV_DIR_VER);
@@ -865,6 +880,21 @@ void LcdDisplay::SetupUI()
     lv_obj_set_style_bg_color(content_, current_theme_.chat_background, 0);
     lv_obj_set_style_border_color(content_, current_theme_.border, 0); // Border color for content
 
+    // Minimal overlay labels while status bar is disabled
+    notification_label_ = lv_label_create(screen);
+    lv_obj_set_width(notification_label_, LV_HOR_RES);
+    lv_obj_set_style_text_align(notification_label_, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(notification_label_, current_theme_.text, 0);
+    lv_label_set_text(notification_label_, "");
+    lv_obj_add_flag(notification_label_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_align(notification_label_, LV_ALIGN_TOP_MID, 0, 2);
+
+    mute_label_ = lv_label_create(screen);
+    lv_label_set_text(mute_label_, "");
+    lv_obj_set_style_text_font(mute_label_, fonts_.icon_font, 0);
+    lv_obj_set_style_text_color(mute_label_, current_theme_.text, 0);
+    lv_obj_align(mute_label_, LV_ALIGN_TOP_RIGHT, -2, 2);
+
     lv_obj_set_flex_flow(content_, LV_FLEX_FLOW_COLUMN);                                                     // 垂直布局（从上到下）
     lv_obj_set_flex_align(content_, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER); // 子对象居中对齐，优先显示emotion
 
@@ -1009,6 +1039,8 @@ void LcdDisplay::SetPreviewImage(const lv_img_dsc_t *img_dsc)
 void LcdDisplay::CreateSystemMessage(const char* message)
 {
     ESP_LOGI("LcdDisplay", "CreateSystemMessage called: message='%s'", message ? message : "NULL");
+    // Disabled: use overlay bubble only for volume.
+    return;
     DisplayLockGuard lock(this);
     if (content_ == nullptr)
     {
@@ -1074,7 +1106,7 @@ void LcdDisplay::CreateSystemMessage(const char* message)
     
     // Calculate and set appropriate width
     lv_coord_t text_width = lv_txt_get_width(message, strlen(message), fonts_.text_font, 0);
-    lv_coord_t max_width = LV_HOR_RES * 85 / 100 - 16;
+    lv_coord_t max_width = LV_HOR_RES - 16;
     lv_coord_t bubble_width = (text_width < max_width) ? text_width : max_width;
     if (bubble_width < 20) bubble_width = 20;
     lv_obj_set_width(msg_text, bubble_width);
@@ -1119,6 +1151,70 @@ void LcdDisplay::ClearSystemMessages()
         }
     }
     ESP_LOGI("LcdDisplay", "ClearSystemMessages: Removed %d system message(s)", removed_count);
+}
+
+void LcdDisplay::CreateOverlayMessage(const char* message)
+{
+    ESP_LOGI("LcdDisplay", "CreateOverlayMessage called: message='%s'", message ? message : "NULL");
+    DisplayLockGuard lock(this);
+    if (message == nullptr || strlen(message) == 0) {
+        ESP_LOGW("LcdDisplay", "CreateOverlayMessage: message is empty, skipping");
+        return;
+    }
+
+    if (overlay_container_ != nullptr) {
+        lv_obj_del(overlay_container_);
+        overlay_container_ = nullptr;
+        overlay_bubble_ = nullptr;
+        overlay_text_ = nullptr;
+    }
+
+    auto screen = lv_screen_active();
+    overlay_container_ = lv_obj_create(screen);
+    lv_obj_set_width(overlay_container_, LV_HOR_RES);
+    lv_obj_set_height(overlay_container_, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(overlay_container_, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(overlay_container_, 0, 0);
+    lv_obj_set_style_pad_all(overlay_container_, 0, 0);
+    lv_obj_align(overlay_container_, LV_ALIGN_TOP_MID, 0, 2);
+    lv_obj_move_foreground(overlay_container_);
+
+    overlay_bubble_ = lv_obj_create(overlay_container_);
+    lv_obj_set_style_radius(overlay_bubble_, 8, 0);
+    lv_obj_set_scrollbar_mode(overlay_bubble_, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_set_style_border_width(overlay_bubble_, 1, 0);
+    lv_obj_set_style_border_color(overlay_bubble_, current_theme_.border, 0);
+    lv_obj_set_style_pad_all(overlay_bubble_, 8, 0);
+    lv_obj_set_style_bg_color(overlay_bubble_, current_theme_.system_bubble, 0);
+    lv_obj_set_width(overlay_bubble_, LV_SIZE_CONTENT);
+    lv_obj_set_height(overlay_bubble_, LV_SIZE_CONTENT);
+
+    overlay_text_ = lv_label_create(overlay_bubble_);
+    lv_label_set_text(overlay_text_, message);
+    lv_label_set_long_mode(overlay_text_, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_font(overlay_text_, fonts_.text_font, 0);
+    lv_obj_set_style_text_color(overlay_text_, current_theme_.system_text, 0);
+
+    lv_coord_t text_width = lv_txt_get_width(message, strlen(message), fonts_.text_font, 0);
+    lv_coord_t max_width = LV_HOR_RES * 85 / 100 - 16;
+    lv_coord_t bubble_width = (text_width < max_width) ? text_width : max_width;
+    if (bubble_width < 20) bubble_width = 20;
+    lv_obj_set_width(overlay_text_, bubble_width);
+    lv_obj_set_width(overlay_bubble_, bubble_width);
+
+    lv_obj_align(overlay_bubble_, LV_ALIGN_TOP_MID, 0, 0);
+}
+
+void LcdDisplay::ClearOverlayMessage()
+{
+    ESP_LOGI("LcdDisplay", "ClearOverlayMessage called");
+    DisplayLockGuard lock(this);
+    if (overlay_container_ != nullptr) {
+        lv_obj_del(overlay_container_);
+        overlay_container_ = nullptr;
+        overlay_bubble_ = nullptr;
+        overlay_text_ = nullptr;
+    }
 }
 
 void LcdDisplay::SetEmotion(const char *emotion)

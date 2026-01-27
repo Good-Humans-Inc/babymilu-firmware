@@ -26,8 +26,12 @@ Display::Display() {
         .callback = [](void *arg) {
             Display *display = static_cast<Display*>(arg);
             DisplayLockGuard lock(display);
-            lv_obj_add_flag(display->notification_label_, LV_OBJ_FLAG_HIDDEN);
-            lv_obj_clear_flag(display->status_label_, LV_OBJ_FLAG_HIDDEN);
+            if (display->notification_label_ != nullptr) {
+                lv_obj_add_flag(display->notification_label_, LV_OBJ_FLAG_HIDDEN);
+            }
+            if (display->status_label_ != nullptr) {
+                lv_obj_clear_flag(display->status_label_, LV_OBJ_FLAG_HIDDEN);
+            }
         },
         .arg = this,
         .dispatch_method = ESP_TIMER_TASK,
@@ -74,7 +78,9 @@ void Display::SetStatus(const char* status) {
     }
     lv_label_set_text(status_label_, status);
     lv_obj_clear_flag(status_label_, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_add_flag(notification_label_, LV_OBJ_FLAG_HIDDEN);
+    if (notification_label_ != nullptr) {
+        lv_obj_add_flag(notification_label_, LV_OBJ_FLAG_HIDDEN);
+    }
 }
 
 void Display::ShowNotification(const std::string &notification, int duration_ms) {
@@ -83,6 +89,10 @@ void Display::ShowNotification(const std::string &notification, int duration_ms)
 
 void Display::ShowNotification(const char* notification, int duration_ms) {
     ESP_LOGI("Display", "ShowNotification called: notification='%s', duration_ms=%d", notification ? notification : "NULL", duration_ms);
+    // Disabled: notifications are suppressed in favor of volume overlay.
+    (void)duration_ms;
+    (void)notification;
+    return;
     DisplayLockGuard lock(this);
     if (notification_label_ == nullptr) {
         ESP_LOGW("Display", "ShowNotification: notification_label_ is nullptr, cannot display notification");
@@ -91,7 +101,9 @@ void Display::ShowNotification(const char* notification, int duration_ms) {
     ESP_LOGI("Display", "ShowNotification: notification_label_ is valid, setting text");
     lv_label_set_text(notification_label_, notification);
     lv_obj_clear_flag(notification_label_, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_add_flag(status_label_, LV_OBJ_FLAG_HIDDEN);
+    if (status_label_ != nullptr) {
+        lv_obj_add_flag(status_label_, LV_OBJ_FLAG_HIDDEN);
+    }
     ESP_LOGI("Display", "ShowNotification: notification displayed, duration_ms=%d", duration_ms);
 
     esp_timer_stop(notification_timer_);

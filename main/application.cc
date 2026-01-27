@@ -1308,8 +1308,9 @@ void Application::Start()
 
     if (protocol_started)
     {
-        std::string message = std::string(Lang::Strings::VERSION) + ota_.GetCurrentVersion();
-        display->ShowNotification(message.c_str());
+        // Version display disabled on startup
+        // std::string message = std::string(Lang::Strings::VERSION) + ota_.GetCurrentVersion();
+        // display->ShowNotification(message.c_str());
         // DISABLED: Comment out transcript display to reduce memory usage
         // display->SetChatMessage("system", "");
         // Play the success sound to indicate the device is ready

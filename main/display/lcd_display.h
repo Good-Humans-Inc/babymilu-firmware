@@ -38,6 +38,9 @@ protected:
     lv_img_dsc_t emotion_gif_desc_{};  // Persistent GIF descriptor for LVGL
     const uint8_t* emotion_gif_data_ = nullptr;
     size_t emotion_gif_size_ = 0;
+    lv_obj_t* overlay_container_ = nullptr;
+    lv_obj_t* overlay_bubble_ = nullptr;
+    lv_obj_t* overlay_text_ = nullptr;
 
     DisplayFonts fonts_;
     ThemeColors current_theme_;
@@ -73,6 +76,10 @@ public:
     
     // Public method to clear all system messages created by CreateSystemMessage
     void ClearSystemMessages();
+
+    // Overlay message (top, does not affect layout)
+    void CreateOverlayMessage(const char* message);
+    void ClearOverlayMessage();
 };
 
 // RGB LCD显示器
