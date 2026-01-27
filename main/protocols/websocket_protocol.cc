@@ -117,6 +117,11 @@ static bool IsValidWebSocketUrl(const std::string& url) {
         return false;
     }
     
+    // Check for placeholders (e.g., <VM_EXTERNAL_IP>)
+    if (url.find('<') != std::string::npos || url.find('>') != std::string::npos) {
+        return false;
+    }
+    
     // Basic validation: should start with ws:// or wss://
     if (url.find("ws://") != 0 && url.find("wss://") != 0) {
         return false;

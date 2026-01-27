@@ -1480,6 +1480,25 @@ void Application::AudioLoop()
     }
 }
 
+void Application::StartExternalAudioPlayback()
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    external_audio_playback_ = true;
+    last_output_time_ = std::chrono::steady_clock::now();
+}
+
+void Application::StopExternalAudioPlayback()
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    external_audio_playback_ = false;
+    last_output_time_ = std::chrono::steady_clock::now();
+}
+
+bool Application::IsExternalAudioPlayback() const
+{
+    return external_audio_playback_;
+}
+
 void Application::OnAudioOutput()
 {
     if (busy_decoding_audio_)
@@ -1494,6 +1513,12 @@ void Application::OnAudioOutput()
     std::unique_lock<std::mutex> lock(mutex_);
     if (audio_decode_queue_.empty())
     {
+        if (external_audio_playback_)
+        {
+            // External playback is active; keep output enabled.
+            last_output_time_ = now;
+            return;
+        }
         // Disable the output if there is no audio data for a long time
         if (device_state_ == kDeviceStateIdle)
         {

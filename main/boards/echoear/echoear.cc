@@ -9,6 +9,7 @@
 #include "animation/animation.h"
 #include "sd_card.h"
 #include "power_save_timer.h"
+#include "wav_player.h"
 
 #include <wifi_station.h>
 #include <ssid_manager.h>
@@ -1434,22 +1435,32 @@ private:
 
     void InitializeButtons() {
         boot_button_.OnClick([this]() {
-            auto& app = Application::GetInstance();
-            if (app.GetDeviceState() == kDeviceStateStarting && !WifiStation::GetInstance().IsConnected()) {
-                ResetWifiConfiguration();
-            }
-            if (power_save_timer_) {
-                // If in sleep mode, wake up and directly start talking
-                if (power_save_timer_->IsInSleepMode()) {
-                    power_save_timer_->WakeUp();
-                    app.ToggleChatState();
+            ESP_LOGI(TAG, "Boot button pressed - attempting to play sequential WAV from SD card");
+            
+            // Play sequential WAV files (1.wav, 2.wav, 3.wav, etc.) with matching animations
+            esp_err_t ret = WavPlayer::PlaySequentialWav();
+            if (ret != ESP_OK) {
+                ESP_LOGW(TAG, "Failed to play WAV, falling back to normal behavior");
+                // Fall back to normal behavior if WAV playback fails
+                auto& app = Application::GetInstance();
+                if (app.GetDeviceState() == kDeviceStateStarting && !WifiStation::GetInstance().IsConnected()) {
+                    ResetWifiConfiguration();
+                }
+                if (power_save_timer_) {
+                    // If in sleep mode, wake up and directly start talking
+                    if (power_save_timer_->IsInSleepMode()) {
+                        power_save_timer_->WakeUp();
+                        app.ToggleChatState();
+                    } else {
+                        // Normal operation: wake up and toggle chat state
+                        power_save_timer_->WakeUp();
+                        app.ToggleChatState();
+                    }
                 } else {
-                    // Normal operation: wake up and toggle chat state
-                    power_save_timer_->WakeUp();
                     app.ToggleChatState();
                 }
             } else {
-                app.ToggleChatState();
+                ESP_LOGI(TAG, "Sequential WAV playback started successfully");
             }
         });
 

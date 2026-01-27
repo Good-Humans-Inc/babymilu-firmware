@@ -182,12 +182,36 @@ bool Ota::CheckVersion() {
         cJSON *item = NULL;
         cJSON_ArrayForEach(item, websocket) {
             if (cJSON_IsString(item)) {
-                if (settings.GetString(item->string) != item->valuestring) {
-                    settings.SetString(item->string, item->valuestring);
+                std::string value = item->valuestring;
+                // Validate WebSocket URL if this is the "url" field
+                if (strcmp(item->string, "url") == 0) {
+                    // Check for placeholders (e.g., <VM_EXTERNAL_IP>)
+                    if (value.find('<') != std::string::npos || value.find('>') != std::string::npos) {
+                        ESP_LOGW(TAG, "OTA server sent invalid WebSocket URL with placeholder: %s, ignoring", value.c_str());
+                        continue; // Skip saving this invalid URL
+                    }
+                    // Check for localhost or loopback addresses
+                    if (value.find("127.0.0.1") != std::string::npos ||
+                        value.find("localhost") != std::string::npos ||
+                        value.find("::1") != std::string::npos ||
+                        value.find("0.0.0.0") != std::string::npos) {
+                        ESP_LOGW(TAG, "OTA server sent invalid WebSocket URL (localhost): %s, ignoring", value.c_str());
+                        continue; // Skip saving this invalid URL
+                    }
+                    // Basic validation: should start with ws:// or wss://
+                    if (value.find("ws://") != 0 && value.find("wss://") != 0) {
+                        ESP_LOGW(TAG, "OTA server sent invalid WebSocket URL format: %s, ignoring", value.c_str());
+                        continue; // Skip saving this invalid URL
+                    }
+                }
+                if (settings.GetString(item->string) != value) {
+                    settings.SetString(item->string, value);
+                    ESP_LOGI(TAG, "Updated WebSocket setting: %s = %s", item->string, value.c_str());
                 }
             } else if (cJSON_IsNumber(item)) {
                 if (settings.GetInt(item->string) != item->valueint) {
                     settings.SetInt(item->string, item->valueint);
+                    ESP_LOGI(TAG, "Updated WebSocket setting: %s = %d", item->string, item->valueint);
                 }
             }
         }

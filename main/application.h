@@ -89,6 +89,9 @@ public:
     Protocol* GetActiveProtocol();  // Returns the protocol to use for audio (WebSocket if available, else primary)
     void OpenWebSocketConnection();  // Opens WebSocket connection for conversations
     bool IsWebSocketConnected() const;  // Check if WebSocket is already connected
+    void StartExternalAudioPlayback();
+    void StopExternalAudioPlayback();
+    bool IsExternalAudioPlayback() const;
 
 private:
     Application();
@@ -129,6 +132,7 @@ private:
     std::list<AudioStreamPacket> audio_decode_queue_;
     std::condition_variable audio_decode_cv_;
     std::list<AudioStreamPacket> audio_testing_queue_;
+    bool external_audio_playback_ = false;
 
     // 新增：用于维护音频包的timestamp队列
     std::list<uint32_t> timestamp_queue_;

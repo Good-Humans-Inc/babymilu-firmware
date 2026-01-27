@@ -38,9 +38,10 @@ void AudioCodec::Start() {
     ESP_ERROR_CHECK(i2s_channel_enable(tx_handle_));
     ESP_ERROR_CHECK(i2s_channel_enable(rx_handle_));
 
-    EnableInput(true);
+    // Disable input to save latency (input is for ASR which is not needed for WAV playback)
+    EnableInput(false);
     EnableOutput(true);
-    ESP_LOGI(TAG, "Audio codec started");
+    ESP_LOGI(TAG, "Audio codec started (input disabled to save latency)");
 }
 
 void AudioCodec::SetOutputVolume(int volume) {
