@@ -5,6 +5,7 @@
 #include "audio_codecs/audio_codec.h"
 #include "animation/animation.h"
 #include <esp_log.h>
+#include <esp_timer.h>
 #include <dirent.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -12,6 +13,7 @@
 #include <cctype>
 #include <vector>
 #include <memory>
+#include <mutex>
 #include <esp_random.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -23,6 +25,46 @@
 int WavPlayer::current_sequential_index_ = 0;
 std::vector<std::string> WavPlayer::numbered_wav_files_;
 bool WavPlayer::is_playing_ = false;
+
+namespace {
+    constexpr int kAnimationResetDelayMs = 2000;
+    esp_timer_handle_t animation_reset_timer = nullptr;
+    TaskHandle_t playback_task_handle = nullptr;
+    std::mutex playback_mutex;
+    std::string pending_filename;
+    float pending_gain = 1.0f;
+    bool pending_start = false;
+    bool stop_requested = false;
+
+    void ResetAnimationTimerCallback(void* arg) {
+        (void)arg;
+        animation_set_now_animation(ANIMATION_STATIC_NORMAL);
+    }
+
+    void StartAnimationResetTimer() {
+        if (animation_reset_timer == nullptr) {
+            esp_timer_create_args_t timer_args = {};
+            timer_args.callback = &ResetAnimationTimerCallback;
+            timer_args.name = "wav_anim_reset";
+            if (esp_timer_create(&timer_args, &animation_reset_timer) != ESP_OK) {
+                return;
+            }
+        }
+
+        esp_timer_stop(animation_reset_timer);
+        esp_timer_start_once(animation_reset_timer, static_cast<uint64_t>(kAnimationResetDelayMs) * 1000ULL);
+    }
+
+    bool ShouldStopPlayback() {
+        std::lock_guard<std::mutex> lock(playback_mutex);
+        return stop_requested;
+    }
+
+    void ClearStopRequest() {
+        std::lock_guard<std::mutex> lock(playback_mutex);
+        stop_requested = false;
+    }
+}
 
 // Based on PlayWavFromUrl from application.cc
 // Adapted to read from SD card file instead of HTTP stream
@@ -201,6 +243,10 @@ esp_err_t WavPlayer::PlayWavFile(const std::string& filename, float gain) {
         }
 
         if (!samples.empty()) {
+            if (ShouldStopPlayback()) {
+                ESP_LOGI(TAG, "Playback interrupted by new request");
+                break;
+            }
             // Application::OnAudioOutput() may disable output if decode queue is empty
             // Keep re-enabling it during WAV playback
             if (!codec->output_enabled()) {
@@ -231,6 +277,7 @@ esp_err_t WavPlayer::PlayWavFile(const std::string& filename, float gain) {
     // Input will be re-enabled by the system when needed (e.g., for ASR)
 
     Application::GetInstance().StopExternalAudioPlayback();
+    ClearStopRequest();
 
     fclose(file);
     ESP_LOGI(TAG, "WAV playback completed");
@@ -410,11 +457,6 @@ void WavPlayer::ResetSequentialIndex() {
 }
 
 esp_err_t WavPlayer::PlaySequentialWav(float gain) {
-    // Check if already playing - if so, skip this call to prevent animation freezing
-    if (is_playing_) {
-        ESP_LOGW(TAG, "Playback already in progress, skipping duplicate call");
-        return ESP_ERR_INVALID_STATE;
-    }
 
     // If we don't have the numbered files list yet, or it's empty, find them
     if (numbered_wav_files_.empty()) {
@@ -446,24 +488,60 @@ esp_err_t WavPlayer::PlaySequentialWav(float gain) {
     int animation_index = GetAnimationForWavNumber(wav_number);
     ESP_LOGI(TAG, "Setting animation %d for wav number %d", animation_index, wav_number);
     animation_set_now_animation(animation_index);
+    StartAnimationResetTimer();
 
-    // Mark as playing
-    is_playing_ = true;
+    {
+        std::lock_guard<std::mutex> lock(playback_mutex);
+        if (is_playing_) {
+            // Queue the new request and interrupt current playback
+            pending_start = true;
+            pending_filename = filename;
+            pending_gain = gain;
+            stop_requested = true;
+            return ESP_OK;
+        }
 
-    // Play the wav file
-    esp_err_t ret = PlayWavFile(filename, gain);
-    
-    // Mark as not playing
-    is_playing_ = false;
-    
-    if (ret == ESP_OK) {
-        // Move to next file for next call
-        current_sequential_index_++;
-        ESP_LOGI(TAG, "Sequential playback completed, next index: %d", current_sequential_index_);
-    } else {
-        ESP_LOGE(TAG, "Failed to play sequential WAV file: %s", filename.c_str());
+        // No playback in progress; start now
+        is_playing_ = true;
+        pending_filename = filename;
+        pending_gain = gain;
+        pending_start = true;
     }
 
-    return ret;
+    auto playback_task = [](void* arg) {
+        (void)arg;
+        while (true) {
+            std::string next_file;
+            float next_gain = 1.0f;
+            {
+                std::lock_guard<std::mutex> lock(playback_mutex);
+                if (!pending_start) {
+                    is_playing_ = false;
+                    playback_task_handle = nullptr;
+                    break;
+                }
+                next_file = pending_filename;
+                next_gain = pending_gain;
+                pending_start = false;
+                stop_requested = false;
+            }
+
+            esp_err_t ret = PlayWavFile(next_file, next_gain);
+            if (ret == ESP_OK) {
+                current_sequential_index_++;
+                ESP_LOGI(TAG, "Sequential playback completed, next index: %d", current_sequential_index_);
+            } else {
+                ESP_LOGE(TAG, "Failed to play sequential WAV file: %s", next_file.c_str());
+            }
+        }
+
+        vTaskDelete(nullptr);
+    };
+
+    if (playback_task_handle == nullptr) {
+        xTaskCreate(playback_task, "wav_playback_task", 4096, nullptr, 5, &playback_task_handle);
+    }
+
+    return ESP_OK;
 }
 

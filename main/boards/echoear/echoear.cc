@@ -1436,6 +1436,11 @@ private:
     void InitializeButtons() {
         boot_button_.OnClick([this]() {
             ESP_LOGI(TAG, "Boot button pressed - attempting to play sequential WAV from SD card");
+
+            if (power_save_timer_) {
+                power_save_timer_->WakeUp();
+                power_save_timer_->InhibitSleepFor(30);
+            }
             
             // Play sequential WAV files (1.wav, 2.wav, 3.wav, etc.) with matching animations
             esp_err_t ret = WavPlayer::PlaySequentialWav();

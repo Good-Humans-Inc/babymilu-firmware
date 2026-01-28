@@ -15,6 +15,7 @@ public:
     void OnExitSleepMode(std::function<void()> callback);
     void OnShutdownRequest(std::function<void()> callback);
     void WakeUp();
+    void InhibitSleepFor(int seconds);
     bool IsInSleepMode() const { return in_sleep_mode_; }
 
 private:
@@ -27,6 +28,7 @@ private:
     int cpu_max_freq_;
     int seconds_to_sleep_;
     int seconds_to_shutdown_;
+    int64_t sleep_inhibit_until_us_ = 0;
 
     std::function<void()> on_enter_sleep_mode_;
     std::function<void()> on_exit_sleep_mode_;

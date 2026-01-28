@@ -54,6 +54,14 @@ void PowerSaveTimer::OnShutdownRequest(std::function<void()> callback) {
 
 void PowerSaveTimer::PowerSaveCheck() {
     auto& app = Application::GetInstance();
+    if (sleep_inhibit_until_us_ > 0) {
+        int64_t now_us = esp_timer_get_time();
+        if (now_us < sleep_inhibit_until_us_) {
+            ticks_ = 0;
+            return;
+        }
+        sleep_inhibit_until_us_ = 0;
+    }
     if (!in_sleep_mode_ && !app.CanEnterSleepMode()) {
         ticks_ = 0;
         return;
@@ -100,4 +108,12 @@ void PowerSaveTimer::WakeUp() {
             on_exit_sleep_mode_();
         }
     }
+}
+
+void PowerSaveTimer::InhibitSleepFor(int seconds) {
+    if (seconds <= 0) {
+        return;
+    }
+    sleep_inhibit_until_us_ = esp_timer_get_time() + static_cast<int64_t>(seconds) * 1000000LL;
+    ticks_ = 0;
 }
