@@ -8,6 +8,7 @@
 #include <esp_log.h>
 #include <esp_timer.h>
 #include <esp_system.h>
+#include <esp_heap_caps.h>
 #include <cJSON.h>
 #include <cstring>
 #include <algorithm>
@@ -485,20 +486,65 @@ void AnimationUpdater::RemoteUpdateTask(void* parameter) {
 void AnimationUpdater::TriggerUpdateLoop() {
     ESP_LOGI(TAG, "Triggering update loop from remote request");
     
-    // Create a task to run UpdateLoop (since it calls vTaskDelete at the end)
-    BaseType_t ret = xTaskCreate(
-        RemoteUpdateTask,
-        "remote_anim_update",
-        16384,  // 16KB stack to accommodate HTTP/TLS and validation
-        this,
-        1,      // Low priority
-        nullptr // Don't need to track the handle since task will delete itself
-    );
+    // Check available heap memory before creating task
+    size_t free_heap = esp_get_free_heap_size();
+    size_t min_free_heap = esp_get_minimum_free_heap_size();
+    size_t largest_free_block = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+    ESP_LOGI(TAG, "Free heap: %u bytes, Min free heap: %u bytes, Largest free block: %u bytes", 
+             (uint32_t)free_heap, (uint32_t)min_free_heap, (uint32_t)largest_free_block);
+    
+    // Task creation requires contiguous memory, so check largest free block
+    // Try different stack sizes if the first attempt fails
+    const size_t stack_sizes[] = {16384, 12288, 8192, 6144};
+    const char* stack_size_names[] = {"16KB", "12KB", "8KB", "6KB"};
+    BaseType_t ret = pdFAIL;
+    size_t used_stack_size = 0;
+    
+    for (int i = 0; i < sizeof(stack_sizes) / sizeof(stack_sizes[0]); i++) {
+        size_t required_memory = stack_sizes[i] + 1024; // Stack + overhead
+        
+        // Check if we have a large enough contiguous block
+        if (largest_free_block < required_memory) {
+            ESP_LOGW(TAG, "Largest free block (%u bytes) too small for %s stack, trying smaller...", 
+                     (uint32_t)largest_free_block, stack_size_names[i]);
+            continue;
+        }
+        
+        ESP_LOGI(TAG, "Attempting to create remote update task with %s stack...", stack_size_names[i]);
+        
+        // Create a task to run UpdateLoop (since it calls vTaskDelete at the end)
+        ret = xTaskCreate(
+            RemoteUpdateTask,
+            "remote_anim_update",
+            stack_sizes[i],
+            this,
+            1,      // Low priority
+            nullptr // Don't need to track the handle since task will delete itself
+        );
+        
+        if (ret == pdPASS) {
+            used_stack_size = stack_sizes[i];
+            ESP_LOGI(TAG, "Remote update task created successfully with %s stack", stack_size_names[i]);
+            break;
+        } else {
+            // Update largest free block after failed attempt (might have changed)
+            largest_free_block = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+            ESP_LOGW(TAG, "Failed to create task with %s stack, largest free block now: %u bytes", 
+                     stack_size_names[i], (uint32_t)largest_free_block);
+        }
+    }
     
     if (ret != pdPASS) {
-        ESP_LOGE(TAG, "Failed to create remote update task");
-    } else {
-        ESP_LOGI(TAG, "Remote update task created successfully");
+        // Log detailed error information
+        free_heap = esp_get_free_heap_size();
+        largest_free_block = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+        UBaseType_t num_tasks = uxTaskGetNumberOfTasks();
+        ESP_LOGE(TAG, "Failed to create remote update task after trying all stack sizes");
+        ESP_LOGE(TAG, "Free heap: %u bytes, Largest free block: %u bytes, Active tasks: %u", 
+                 (uint32_t)free_heap, (uint32_t)largest_free_block, (unsigned int)num_tasks);
+        ESP_LOGE(TAG, "Memory fragmentation detected - largest contiguous block (%u bytes) is insufficient", 
+                 (uint32_t)largest_free_block);
+        ESP_LOGE(TAG, "Possible solutions: free memory, reduce stack usage, or wait for memory to defragment");
     }
 }
 
