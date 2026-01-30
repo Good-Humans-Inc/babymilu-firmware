@@ -167,6 +167,10 @@ Animation_t* get_animation(int index) {
             return animation_get_listening_animation();
         case 13: // ANIMATION_SMIRK
             return animation_get_smirk_animation();
+        case 14: // ANIMATION_WIFI
+            return animation_get_wifi_animation();
+        case 15: // ANIMATION_BATTERY
+            return animation_get_battery_animation();
         default:
             return animation_get_normal_animation();
     }
@@ -184,7 +188,13 @@ Animation_t *animations[] = {
     NULL,  // ANIMATION_HAPPY
     NULL,  // ANIMATION_LAUGH
     NULL,  // ANIMATION_SAD
-    NULL}; // ANIMATION_TALK
+    NULL,  // ANIMATION_TALK
+    NULL,  // ANIMATION_SILENCE
+    NULL,  // ANIMATION_LISTENING
+    NULL,  // ANIMATION_SMIRK
+    NULL,  // ANIMATION_WIFI
+    NULL   // ANIMATION_BATTERY
+};
 
 static int now_animation = 0;
 int pos = 0;
@@ -196,7 +206,8 @@ static bool animation_locked_by_silence = false;  // Lock animation when volume 
 static const char* get_animation_name(int animation_index) {
     const char* anim_names[] = {
         "STATIC_NORMAL", "EMBARRESSED", "FIRE", "INSPIRATION", "NORMAL",
-        "SHY", "SLEEP", "HAPPY", "LAUGH", "SAD", "TALK", "SILENCE"
+        "SHY", "SLEEP", "HAPPY", "LAUGH", "SAD", "TALK", "SILENCE",
+        "LISTENING", "SMIRK", "WIFI", "BATTERY"
     };
     
     if (animation_index >= 0 && animation_index < ANIMATION_NUM) {

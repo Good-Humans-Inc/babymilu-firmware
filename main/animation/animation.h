@@ -37,6 +37,8 @@ typedef enum _AnimationType_e {
     ANIMATION_SILENCE,
     ANIMATION_LISTENING,
     ANIMATION_SMIRK,
+    ANIMATION_WIFI,
+    ANIMATION_BATTERY,
     ANIMATION_NUM
 }AnimationType_e;
 

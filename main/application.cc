@@ -814,12 +814,12 @@ void Application::Start()
     }
     
     if (network_ready) {
-        ESP_LOGI(TAG, "Network is ready, scheduling animation update check after 25 seconds...");
+        ESP_LOGI(TAG, "Network is ready, scheduling animation update check after 5 seconds...");
         AnimationUpdater::GetInstance().Initialize();
         
-        // Delay animation updater by 25 seconds after startup to ensure system initialization is complete
+        // Delay animation updater by 5 seconds after startup to ensure system initialization is complete
         xTaskCreate([](void* parameter) {
-            vTaskDelay(pdMS_TO_TICKS(12000));
+            vTaskDelay(pdMS_TO_TICKS(3000));
             ESP_LOGI(TAG, "Triggering one-time animation update check after delay...");
             AnimationUpdater::GetInstance().TriggerUpdateLoop();
             vTaskDelete(NULL);

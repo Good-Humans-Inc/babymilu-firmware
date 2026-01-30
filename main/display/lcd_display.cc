@@ -1225,45 +1225,23 @@ void LcdDisplay::SetEmotion(const char *emotion)
         const char *text;
     };
 
+    // LLM emotion mapping plus app/utility animations; all others map to normal (still).
     static const std::vector<Emotion> emotions = {
-        // Neutral baseline (normal.gif)
-        {ANIMATION_STATIC_NORMAL, "neutral"},
-
-        // Positive / happy styles (smirk.gif + smirk_start.gif)
-        {ANIMATION_SMIRK, "happy"},
-        {ANIMATION_SMIRK, "laughing"},
-        {ANIMATION_SMIRK, "funny"},
-        {ANIMATION_SMIRK, "cool"},
-
-        // Heart / affection (heart.gif + heart_start.gif)
-        {ANIMATION_HAPPY, "loving"},
-        {ANIMATION_HAPPY, "kissy"},
-
-        // Blush / embarrassed (blush.gif mapped via ANIMATION_EMBARRESSED)
-        {ANIMATION_EMBARRESSED, "embarrassed"},
-        {ANIMATION_EMBARRESSED, "confident"},
-
-        // Starry / surprised (starry.gif + starry_start.gif mapped via ANIMATION_INSPIRATION)
-        {ANIMATION_INSPIRATION, "surprised"},
-        {ANIMATION_INSPIRATION, "shocked"},
-        {ANIMATION_INSPIRATION, "thinking"},
-
-        // Angry (angry.gif + angry_start.gif mapped via ANIMATION_FIRE)
-        {ANIMATION_FIRE, "angry"},
-
-        // Sad / crying (sad.gif + sad_start.gif, cry.gif)
+        {ANIMATION_SMIRK, "smirk"},
+        {ANIMATION_HAPPY, "heart"},
+        {ANIMATION_EMBARRESSED, "blush"},
         {ANIMATION_SAD, "sad"},
-        {ANIMATION_TALK, "crying"},
-
-        // Sleepy / relaxed (sleep.gif)
+        {ANIMATION_LAUGH, "laugh"},
+        {ANIMATION_SLEEP, "sleep"},
         {ANIMATION_SLEEP, "sleepy"},
         {ANIMATION_SLEEP, "relaxed"},
-
-        // Silly / shy-ish (blush / mixed)
-        {ANIMATION_SHY, "silly"},
-
-        // Listening state (listening.gif)
+        {ANIMATION_INSPIRATION, "starry"},
+        {ANIMATION_SAD, "cry"},
+        {ANIMATION_FIRE, "angry"},
         {ANIMATION_LISTENING, "listening"},
+        {ANIMATION_SILENCE, "silence"},
+        {ANIMATION_WIFI, "wifi"},
+        {ANIMATION_BATTERY, "battery"},
     };
 
     // Check volume first - if volume is 0, lock to silence animation
@@ -1298,7 +1276,7 @@ void LcdDisplay::SetEmotion(const char *emotion)
     
     // Even if the label can't be created yet, proceed to update the animation
 
-    // 如果找到匹配的表情就显示对应图标，否则显示默认的talk表情
+    // If matched, show the corresponding animation; otherwise show normal (still).
     if (it != emotions.end())
     {
         ESP_LOGI(TAG, "***** Emotion matched: %s -> animation %d *****", emotion, (int)it->animation_num);
@@ -1306,8 +1284,8 @@ void LcdDisplay::SetEmotion(const char *emotion)
     }
     else
     {
-        ESP_LOGW(TAG, "***** Emotion unknown: %s -> default animation %d (ANIMATION_TALK) *****", emotion, (int)ANIMATION_TALK);
-        animation_set_now_animation(ANIMATION_TALK);
+        ESP_LOGW(TAG, "***** Emotion unknown: %s -> default animation %d (ANIMATION_STATIC_NORMAL) *****", emotion, (int)ANIMATION_STATIC_NORMAL);
+        animation_set_now_animation(ANIMATION_STATIC_NORMAL);
     }
 
 #if !CONFIG_USE_WECHAT_MESSAGE_STYLE
