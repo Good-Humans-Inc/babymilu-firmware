@@ -1629,19 +1629,6 @@ public:
     }
 
     virtual void StartNetwork() override {
-        // Initialize default WiFi credentials if none exist (to skip WiFi config mode)
-        // Check using Settings directly to avoid vector allocation issues
-        {
-            Settings settings("wifi", true);
-            std::string existing_ssid = settings.GetString("ssid", "");
-            if (existing_ssid.empty()) {
-                ESP_LOGI(TAG, "No WiFi credentials found, setting default credentials");
-                settings.SetString("ssid", "mimo");
-                settings.SetString("password", "dogdogfish");
-                ESP_LOGI(TAG, "Default WiFi credentials set: SSID='mimo'");
-            }
-        }
-        
         // Call parent's StartNetwork to proceed with normal WiFi initialization
         WifiBoard::StartNetwork();
     }

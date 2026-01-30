@@ -36,6 +36,13 @@ AnimationUpdater::~AnimationUpdater() {
     Stop();
 }
 
+static std::string AppendCacheBuster(const std::string& url) {
+    std::string out = url;
+    out += (url.find('?') == std::string::npos) ? "?" : "&";
+    out += "cb=" + std::to_string(static_cast<unsigned long long>(esp_timer_get_time()));
+    return out;
+}
+
 void AnimationUpdater::Initialize() {
     ESP_LOGI(TAG, "Initializing Animation Updater");
     
@@ -557,6 +564,7 @@ void AnimationUpdater::UpdateLoop() {
     
     // Build download URL dynamically (uses configured server_url_ or constructs from MAC address)
     std::string url = BuildMegaDownloadUrl();
+    url = AppendCacheBuster(url);
     ESP_LOGI(TAG, "Checking for updates from: %s", url.c_str());
     
     // Ensure SD card is available

@@ -1555,6 +1555,20 @@ void Application::OnAudioInput()
         int samples = OPUS_FRAME_DURATION_MS * 16000 / 1000;
         if (ReadAudio(data, 16000, samples))
         {
+            // For audio testing, extract mono (mic channel) from 2-channel input
+            // This matches the official firmware behavior and ensures clear audio quality
+            auto codec = Board::GetInstance().GetAudioCodec();
+            if (codec->input_channels() == 2)
+            {
+                // Extract left channel (mic) only for mono encoding
+                auto mono_data = std::vector<int16_t>(data.size() / 2);
+                for (size_t i = 0, j = 0; i < mono_data.size(); ++i, j += 2)
+                {
+                    mono_data[i] = data[j];
+                }
+                data = std::move(mono_data);
+            }
+            
             background_task_->Schedule([this, data = std::move(data)]() mutable
                                        { opus_encoder_->Encode(std::move(data), [this](std::vector<uint8_t> &&opus)
                                                                {
@@ -1643,7 +1657,8 @@ bool Application::ReadAudio(std::vector<int16_t> &data, int sample_rate, int sam
     }
     else
     {
-        data.resize(samples);
+        // Resize to accommodate all input channels (mono or stereo)
+        data.resize(samples * codec->input_channels());
         if (!codec->InputData(data))
         {
             return false;
