@@ -72,7 +72,7 @@ void AnimationUpdater::Start() {
     BaseType_t ret = xTaskCreate(
         UpdateTask,
         "animation_updater",
-        16384,  // 16KB stack to accommodate HTTP/TLS and validation
+        12288,  // 12KB stack to accommodate HTTP/TLS and validation
         this,
         1,     // Very low priority to avoid interfering with audio processing
         &update_task_handle_
@@ -361,98 +361,6 @@ bool AnimationUpdater::GetRemoteFileHeader(const std::string& url, uint32_t& fil
     }
 }
 
-// Get remote file timestamp from GCS metadata (Last-Modified or x-goog-time-created header)
-bool AnimationUpdater::GetRemoteFileTimestamp(const std::string& url, std::string& timestamp) {
-    try {
-        auto& board = Board::GetInstance();
-        auto http = std::unique_ptr<Http>(board.CreateHttp());
-        if (!http) {
-            ESP_LOGE(TAG, "Failed to create HTTP client for timestamp query");
-            return false;
-        }
-
-        http->SetHeader("User-Agent", "Xiaozhi-Animation-Timestamp/1.0");
-        http->SetHeader("Accept", "*/*");
-        http->SetHeader("Accept-Encoding", "identity");
-        http->SetTimeout(10000);
-
-        // Use HEAD request to get metadata without downloading file
-        bool opened = http->Open("HEAD", url);
-        if (!opened) {
-            ESP_LOGW(TAG, "HEAD not supported; falling back to GET for timestamp");
-            // For GET, we can use Range: bytes=0-0 to minimize data transfer
-            http->SetHeader("Range", "bytes=0-0");
-            opened = http->Open("GET", url);
-        }
-        if (!opened) {
-            ESP_LOGE(TAG, "Failed to open connection for timestamp query");
-            return false;
-        }
-
-        int status_code = http->GetStatusCode();
-        ESP_LOGI(TAG, "Timestamp query returned status code: %d", status_code);
-        
-        // Accept 200 (full file), 206 (partial content), or 304 (not modified)
-        if (status_code != 200 && status_code != 206 && status_code != 304) {
-            ESP_LOGW(TAG, "HEAD/GET returned status %d (expected 200, 206, or 304)", status_code);
-            http->Close();
-            return false;
-        }
-
-        // Log available information for debugging
-        size_t content_length = http->GetBodyLength();
-        ESP_LOGI(TAG, "Response Content-Length: %zu", content_length);
-        
-        // TODO: The Http class needs a GetResponseHeader() method to access response headers
-        // For now, we'll need to check if such a method exists or add it to the Http interface
-        // GCS provides: Last-Modified, x-goog-time-created, ETag headers
-        
-        // Try to get Last-Modified header (if Http class supports it)
-        // This is a placeholder - actual implementation depends on Http class API
-        // If Http class doesn't have GetResponseHeader(), we need to add it
-        
-        // For now, return false to indicate we need header access capability
-        ESP_LOGW(TAG, "Http class needs GetResponseHeader() method to access Last-Modified header");
-        ESP_LOGI(TAG, "To check remote file timestamp manually, run:");
-        ESP_LOGI(TAG, "  curl -I \"%s\" | grep -i 'last-modified\\|x-goog-time-created'", url.c_str());
-        ESP_LOGI(TAG, "Or: curl -sI \"%s\" | grep -i 'last-modified'", url.c_str());
-        http->Close();
-        return false;
-        
-        // When GetResponseHeader() is available, use:
-        // std::string last_modified = http->GetResponseHeader("Last-Modified");
-        // if (!last_modified.empty()) {
-        //     ESP_LOGI(TAG, "Found Last-Modified header: %s", last_modified.c_str());
-        //     timestamp = last_modified;
-        //     return true;
-        // }
-        // // Fallback to x-goog-time-created if Last-Modified not available
-        // std::string time_created = http->GetResponseHeader("x-goog-time-created");
-        // if (!time_created.empty()) {
-        //     ESP_LOGI(TAG, "Found x-goog-time-created header: %s", time_created.c_str());
-        //     timestamp = time_created;
-        //     return true;
-        // }
-        
-    } catch (...) {
-        ESP_LOGE(TAG, "Exception in GetRemoteFileTimestamp");
-        return false;
-    }
-}
-
-// Get locally stored file timestamp
-std::string AnimationUpdater::GetLocalFileTimestamp() {
-    Settings settings("animudter", true);
-    return settings.GetString("file_timestamp", "");  // Empty string if not found
-}
-
-// Save file timestamp locally
-void AnimationUpdater::SaveLocalFileTimestamp(const std::string& timestamp) {
-    Settings settings("animudter", true);
-    settings.SetString("file_timestamp", timestamp);
-    ESP_LOGD(TAG, "Saved file timestamp: %s", timestamp.c_str());
-}
-
 void AnimationUpdater::ResetFirstDownloadSuccess() {
     first_download_success_.store(false);
     ESP_LOGI(TAG, "First download success flag reset");
@@ -501,57 +409,37 @@ void AnimationUpdater::TriggerUpdateLoop() {
              (uint32_t)free_heap, (uint32_t)min_free_heap, (uint32_t)largest_free_block);
     
     // Task creation requires contiguous memory, so check largest free block
-    // Try different stack sizes if the first attempt fails
-    const size_t stack_sizes[] = {16384, 12288, 8192, 6144};
-    const char* stack_size_names[] = {"16KB", "12KB", "8KB", "6KB"};
-    BaseType_t ret = pdFAIL;
-    size_t used_stack_size = 0;
-    
-    for (int i = 0; i < sizeof(stack_sizes) / sizeof(stack_sizes[0]); i++) {
-        size_t required_memory = stack_sizes[i] + 1024; // Stack + overhead
-        
-        // Check if we have a large enough contiguous block
-        if (largest_free_block < required_memory) {
-            ESP_LOGW(TAG, "Largest free block (%u bytes) too small for %s stack, trying smaller...", 
-                     (uint32_t)largest_free_block, stack_size_names[i]);
-            continue;
-        }
-        
-        ESP_LOGI(TAG, "Attempting to create remote update task with %s stack...", stack_size_names[i]);
-        
-        // Create a task to run UpdateLoop (since it calls vTaskDelete at the end)
-        ret = xTaskCreate(
-            RemoteUpdateTask,
-            "remote_anim_update",
-            stack_sizes[i],
-            this,
-            1,      // Low priority
-            nullptr // Don't need to track the handle since task will delete itself
-        );
-        
-        if (ret == pdPASS) {
-            used_stack_size = stack_sizes[i];
-            ESP_LOGI(TAG, "Remote update task created successfully with %s stack", stack_size_names[i]);
-            break;
-        } else {
-            // Update largest free block after failed attempt (might have changed)
-            largest_free_block = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
-            ESP_LOGW(TAG, "Failed to create task with %s stack, largest free block now: %u bytes", 
-                     stack_size_names[i], (uint32_t)largest_free_block);
-        }
+    size_t required_memory = 12288 + 1024; // Stack + overhead
+    if (largest_free_block < required_memory) {
+        ESP_LOGW(TAG, "Largest free block (%u bytes) too small for 12KB stack", 
+                 (uint32_t)largest_free_block);
     }
     
-    if (ret != pdPASS) {
+    ESP_LOGI(TAG, "Attempting to create remote update task with 12KB stack...");
+    
+    // Create a task to run UpdateLoop (since it calls vTaskDelete at the end)
+    BaseType_t ret = xTaskCreate(
+        RemoteUpdateTask,
+        "remote_anim_update",
+        12288,
+        this,
+        1,      // Low priority
+        nullptr // Don't need to track the handle since task will delete itself
+    );
+    
+    if (ret == pdPASS) {
+        ESP_LOGI(TAG, "Remote update task created successfully with 12KB stack");
+    } else {
         // Log detailed error information
         free_heap = esp_get_free_heap_size();
         largest_free_block = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
         UBaseType_t num_tasks = uxTaskGetNumberOfTasks();
-        ESP_LOGE(TAG, "Failed to create remote update task after trying all stack sizes");
+        ESP_LOGE(TAG, "Failed to create remote update task");
         ESP_LOGE(TAG, "Free heap: %u bytes, Largest free block: %u bytes, Active tasks: %u", 
                  (uint32_t)free_heap, (uint32_t)largest_free_block, (unsigned int)num_tasks);
         ESP_LOGE(TAG, "Memory fragmentation detected - largest contiguous block (%u bytes) is insufficient", 
                  (uint32_t)largest_free_block);
-        ESP_LOGE(TAG, "Possible solutions: free memory, reduce stack usage, or wait for memory to defragment");
+        ESP_LOGE(TAG, "Possible solutions: free memory or wait for memory to defragment");
     }
 }
 
@@ -581,36 +469,6 @@ void AnimationUpdater::UpdateLoop() {
     
     const char* file_path = "/sdcard/test.bin";
     
-    // First, try timestamp-based comparison (more reliable than header bytes)
-    std::string remote_timestamp;
-    std::string local_timestamp = GetLocalFileTimestamp();
-    
-    bool has_remote_timestamp = GetRemoteFileTimestamp(url, remote_timestamp);
-    
-    if (has_remote_timestamp && !local_timestamp.empty()) {
-        ESP_LOGI(TAG, "Local timestamp: %s", local_timestamp.c_str());
-        ESP_LOGI(TAG, "Remote timestamp: %s", remote_timestamp.c_str());
-        
-        if (local_timestamp == remote_timestamp) {
-            ESP_LOGI(TAG, "File timestamps match. Validating local file structure...");
-            if (ValidateGifMegaAnimationFileFromDisk(file_path)) {
-                ESP_LOGI(TAG, "Local file is valid and matches remote file (same timestamp). Skipping download.");
-                ESP_LOGI(TAG, "No download needed - file is already up to date.");
-                is_running_.store(false);
-                update_task_handle_ = nullptr;
-                vTaskDelete(NULL);
-                return;
-            } else {
-                ESP_LOGW(TAG, "Local file timestamp matches but validation failed. File may be corrupted. Will re-download.");
-            }
-        } else {
-            ESP_LOGI(TAG, "File timestamps differ. Remote file is newer. Will download new version.");
-        }
-    } else if (!has_remote_timestamp) {
-        ESP_LOGW(TAG, "Could not get remote file timestamp (Http class may need GetResponseHeader() method). Falling back to header comparison.");
-    }
-    
-    // Fallback to header-based comparison if timestamp comparison is not available
     ESP_LOGI(TAG, "Checking remote file header...");
     uint32_t remote_file_count = 0, remote_checksum = 0, remote_combined_length = 0;
     uint32_t local_file_count = 0, local_checksum = 0, local_combined_length = 0;
@@ -806,14 +664,6 @@ void AnimationUpdater::UpdateLoop() {
     http->Close();
     
     ESP_LOGI(TAG, "✅ Download completed: %u bytes saved to %s", (unsigned int)total_read, file_path);
-    
-    // Try to get and save the remote file timestamp for future comparisons
-    if (GetRemoteFileTimestamp(url, remote_timestamp)) {
-        SaveLocalFileTimestamp(remote_timestamp);
-        ESP_LOGI(TAG, "Saved remote file timestamp: %s", remote_timestamp.c_str());
-    } else {
-        ESP_LOGW(TAG, "Could not get remote file timestamp to save (Http class may need GetResponseHeader() method)");
-    }
     
     // Reload animations from SD card before reboot
     ESP_LOGI(TAG, "Reloading animations from SD card before reboot...");
@@ -1014,33 +864,6 @@ bool AnimationUpdater::TestHttpsDownload() {
 
     const char* local_file = "/sdcard/test.bin";
     
-    // First, try timestamp-based comparison (more reliable than header bytes)
-    std::string remote_timestamp;
-    std::string local_timestamp = GetLocalFileTimestamp();
-    
-    bool has_remote_timestamp = GetRemoteFileTimestamp(download_url, remote_timestamp);
-    
-    if (has_remote_timestamp && !local_timestamp.empty()) {
-        ESP_LOGI(TAG, "Local timestamp: %s", local_timestamp.c_str());
-        ESP_LOGI(TAG, "Remote timestamp: %s", remote_timestamp.c_str());
-        
-        if (local_timestamp == remote_timestamp) {
-            ESP_LOGI(TAG, "File timestamps match. Validating local file structure...");
-            if (ValidateGifMegaAnimationFileFromDisk(local_file)) {
-                ESP_LOGI(TAG, "Local file is valid and matches remote file (same timestamp). Skipping download.");
-                first_download_success_.store(true);
-                return true;
-            } else {
-                ESP_LOGW(TAG, "Local file timestamp matches but validation failed. File may be corrupted. Will re-download.");
-            }
-        } else {
-            ESP_LOGI(TAG, "File timestamps differ. Remote file is newer. Will download new version.");
-        }
-    } else if (!has_remote_timestamp) {
-        ESP_LOGW(TAG, "Could not get remote file timestamp (Http class may need GetResponseHeader() method). Falling back to header comparison.");
-    }
-    
-    // Fallback to header-based comparison if timestamp comparison is not available
     uint32_t remote_file_count = 0, remote_checksum = 0, remote_combined_length = 0;
     uint32_t local_file_count = 0, local_checksum = 0, local_combined_length = 0;
     
@@ -1112,15 +935,6 @@ bool AnimationUpdater::TestHttpsDownload() {
     if (success) {
         ESP_LOGI(TAG, "Successfully downloaded animations_mega.bin!");
         first_download_success_.store(true);
-        
-        // Try to get and save the remote file timestamp for future comparisons
-        std::string remote_timestamp;
-        if (GetRemoteFileTimestamp(download_url, remote_timestamp)) {
-            SaveLocalFileTimestamp(remote_timestamp);
-            ESP_LOGI(TAG, "Saved remote file timestamp: %s", remote_timestamp.c_str());
-        } else {
-            ESP_LOGW(TAG, "Could not get remote file timestamp to save (Http class may need GetResponseHeader() method)");
-        }
         
         // Update version to server version after successful download
         SetCurrentVersion(SERVER_VERSION);  // Update to server version
@@ -1790,15 +1604,6 @@ bool AnimationUpdater::DownloadMegaAnimationFile(const std::string& url) {
         vTaskDelay(pdMS_TO_TICKS(500));
         
         ESP_LOGI(TAG, "✅ File written and closed successfully: %s (%u bytes)", filename, (unsigned int)total_read);
-        
-        // Try to get and save the remote file timestamp for future comparisons
-        std::string remote_timestamp;
-        if (GetRemoteFileTimestamp(url, remote_timestamp)) {
-            SaveLocalFileTimestamp(remote_timestamp);
-            ESP_LOGI(TAG, "Saved remote file timestamp: %s", remote_timestamp.c_str());
-        } else {
-            ESP_LOGW(TAG, "Could not get remote file timestamp to save (Http class may need GetResponseHeader() method)");
-        }
         
         // Reload animations from SD card
         ESP_LOGI(TAG, "Reloading animations from SD card...");
