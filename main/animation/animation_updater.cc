@@ -664,11 +664,6 @@ void AnimationUpdater::UpdateLoop() {
     http->Close();
     
     ESP_LOGI(TAG, "✅ Download completed: %u bytes saved to %s", (unsigned int)total_read, file_path);
-    
-    // Reload animations from SD card before reboot
-    ESP_LOGI(TAG, "Reloading animations from SD card before reboot...");
-    animation_load_sd_card_animations();
-    
     ESP_LOGI(TAG, "Animation update completed successfully. Rebooting device in 2 seconds...");
     vTaskDelay(pdMS_TO_TICKS(2000)); // Give time for logs to flush
     
