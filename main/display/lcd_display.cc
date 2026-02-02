@@ -1000,31 +1000,54 @@ void LcdDisplay::SetEmotion(const char *emotion)
     static const std::vector<Emotion> emotions = {
         {ANIMATION_STATIC_NORMAL, "neutral"},
         {ANIMATION_NORMAL, "normal"},  // Direct mapping to normal animation
+
+        // Positive / happy styles
+        {ANIMATION_HAPPY, "smirk"},
         {ANIMATION_HAPPY, "happy"},
         {ANIMATION_HAPPY, "laughing"},
+        {ANIMATION_HAPPY, "laugh"},
         {ANIMATION_HAPPY, "funny"},
-        {ANIMATION_SHY, "sad"},
-        {ANIMATION_FIRE, "angry"},
-        {ANIMATION_FIRE, "fire"},  // Direct mapping to fire animation
-        {ANIMATION_EMBARRESSED, "crying"},
-        {ANIMATION_EMBARRESSED, "embarrass"},  // Direct mapping to embarrass animation
+        {ANIMATION_INSPIRATION, "cool"},
+        {ANIMATION_HAPPY, "relaxed"},
+        {ANIMATION_HAPPY, "delicious"},
+
+        // Heart / affection
+        {ANIMATION_INSPIRATION, "heart"},
         {ANIMATION_INSPIRATION, "loving"},
-        {ANIMATION_INSPIRATION, "inspiration"},  // Direct mapping to inspiration animation
-        {ANIMATION_SHY, "embarrassed"},
+        {ANIMATION_INSPIRATION, "kissy"},
+        {ANIMATION_HAPPY, "confident"},
+
+        // Blush / embarrassed
+        {ANIMATION_EMBARRESSED, "blush"},
+        {ANIMATION_EMBARRESSED, "embarrassed"},
+        {ANIMATION_EMBARRESSED, "embarrass"},  // Direct mapping to embarrass animation
+
+        // Starry / surprised / thinking
+        {ANIMATION_INSPIRATION, "starry"},
         {ANIMATION_INSPIRATION, "surprised"},
         {ANIMATION_INSPIRATION, "shocked"},
         {ANIMATION_QUESTION, "thinking"},
         {ANIMATION_QUESTION, "question"},  // Direct mapping to question animation
-        {ANIMATION_NORMAL, "winking"},
-        {ANIMATION_INSPIRATION, "cool"},
-        {ANIMATION_HAPPY, "relaxed"},
-        {ANIMATION_HAPPY, "delicious"},
-        {ANIMATION_INSPIRATION, "kissy"},
-        {ANIMATION_HAPPY, "confident"},
+        {ANIMATION_QUESTION, "listening"},
+
+        // Angry / fire
+        {ANIMATION_FIRE, "angry"},
+        {ANIMATION_FIRE, "fire"},  // Direct mapping to fire animation
+
+        // Sad / crying
+        {ANIMATION_SHY, "sad"},
+        {ANIMATION_EMBARRESSED, "cry"},
+        {ANIMATION_EMBARRESSED, "crying"},
+
+        // Sleepy / relaxed
         {ANIMATION_SLEEP, "sleepy"},
         {ANIMATION_SLEEP, "sleep"},  // Direct mapping to sleep animation
-        {ANIMATION_HAPPY, "silly"},
+
+        // Other
+        {ANIMATION_NORMAL, "winking"},
+        {ANIMATION_SHY, "silly"},
         {ANIMATION_QUESTION, "confused"},
+
         // Talk animations - all map to ANIMATION_TALK which cycles through talk1-talk4 frames
         {ANIMATION_TALK, "talk"},
         {ANIMATION_TALK, "talk1"},

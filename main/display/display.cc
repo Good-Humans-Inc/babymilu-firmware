@@ -189,26 +189,35 @@ void Display::SetEmotion(const char* emotion) {
 
     static const std::vector<Emotion> emotions = {
         {FONT_AWESOME_EMOJI_NEUTRAL, "neutral"},
+        {FONT_AWESOME_EMOJI_NEUTRAL, "normal"},
         {FONT_AWESOME_EMOJI_HAPPY, "happy"},
         {FONT_AWESOME_EMOJI_LAUGHING, "laughing"},
+        {FONT_AWESOME_EMOJI_LAUGHING, "laugh"},
         {FONT_AWESOME_EMOJI_FUNNY, "funny"},
         {FONT_AWESOME_EMOJI_SAD, "sad"},
         {FONT_AWESOME_EMOJI_ANGRY, "angry"},
         {FONT_AWESOME_EMOJI_CRYING, "crying"},
+        {FONT_AWESOME_EMOJI_CRYING, "cry"},
         {FONT_AWESOME_EMOJI_LOVING, "loving"},
+        {FONT_AWESOME_EMOJI_LOVING, "heart"},
         {FONT_AWESOME_EMOJI_EMBARRASSED, "embarrassed"},
+        {FONT_AWESOME_EMOJI_EMBARRASSED, "blush"},
         {FONT_AWESOME_EMOJI_SURPRISED, "surprised"},
+        {FONT_AWESOME_EMOJI_SURPRISED, "starry"},
         {FONT_AWESOME_EMOJI_SHOCKED, "shocked"},
         {FONT_AWESOME_EMOJI_THINKING, "thinking"},
         {FONT_AWESOME_EMOJI_WINKING, "winking"},
         {FONT_AWESOME_EMOJI_COOL, "cool"},
+        {FONT_AWESOME_EMOJI_COOL, "smirk"},
         {FONT_AWESOME_EMOJI_RELAXED, "relaxed"},
+        {FONT_AWESOME_EMOJI_SLEEPY, "sleep"},
         {FONT_AWESOME_EMOJI_DELICIOUS, "delicious"},
         {FONT_AWESOME_EMOJI_KISSY, "kissy"},
         {FONT_AWESOME_EMOJI_CONFIDENT, "confident"},
         {FONT_AWESOME_EMOJI_SLEEPY, "sleepy"},
         {FONT_AWESOME_EMOJI_SILLY, "silly"},
-        {FONT_AWESOME_EMOJI_CONFUSED, "confused"}
+        {FONT_AWESOME_EMOJI_CONFUSED, "confused"},
+        {FONT_AWESOME_EMOJI_THINKING, "listening"}
     };
     
     // 查找匹配的表情
