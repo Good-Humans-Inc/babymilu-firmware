@@ -2,6 +2,7 @@
 #include "board.h"
 #include "application.h"
 #include "settings.h"
+#include "animation/animation_updater.h"
 
 #include <esp_log.h>
 #include <ml307_mqtt.h>
@@ -156,6 +157,13 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
                     CloseAudioChannel();
                 });
             }
+        } else if (strcmp(type->valuestring, "remote_anim_update") == 0) {
+            ESP_LOGI(TAG, "Received remote_anim_update message, triggering animation update loop");
+            Application::GetInstance().Schedule([]() {
+                auto& anim_updater = AnimationUpdater::GetInstance();
+                ESP_LOGI(TAG, "Calling AnimationUpdater::TriggerUpdateLoop()");
+                anim_updater.TriggerUpdateLoop();
+            });
         } else if (on_incoming_json_ != nullptr) {
             on_incoming_json_(root);
         }

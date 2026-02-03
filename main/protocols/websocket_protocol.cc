@@ -87,28 +87,6 @@ void WebsocketProtocol::CloseAudioChannel() {
     }
 }
 
-static bool IsValidWebSocketUrl(const std::string& url) {
-    // Check for empty URL
-    if (url.empty()) {
-        return false;
-    }
-    
-    // Check for localhost or loopback addresses
-    if (url.find("127.0.0.1") != std::string::npos ||
-        url.find("localhost") != std::string::npos ||
-        url.find("::1") != std::string::npos ||
-        url.find("0.0.0.0") != std::string::npos) {
-        return false;
-    }
-    
-    // Basic validation: should start with ws:// or wss://
-    if (url.find("ws://") != 0 && url.find("wss://") != 0) {
-        return false;
-    }
-    
-    return true;
-}
-
 bool WebsocketProtocol::OpenAudioChannel() {
     if (websocket_ != nullptr) {
         delete websocket_;

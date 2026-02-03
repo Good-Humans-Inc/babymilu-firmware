@@ -6,6 +6,7 @@
 #include "settings.h"
 #include <esp_log.h>
 #include <esp_timer.h>
+#include <esp_heap_caps.h>
 #include <cJSON.h>
 #include <cstring>
 #include <algorithm>
@@ -16,6 +17,18 @@
 #include <dirent.h>
 
 #define TAG "AnimationUpdater"
+
+namespace {
+constexpr uint32_t kUpdateTaskStackBytes = 16 * 1024;
+constexpr uint32_t kUpdateTaskStackWords = kUpdateTaskStackBytes / sizeof(StackType_t);
+
+void LogHeapState(const char* reason) {
+    size_t free_heap = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+    size_t largest_block = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+    ESP_LOGW(TAG, "%s free_heap=%u largest_block=%u",
+             reason, static_cast<unsigned>(free_heap), static_cast<unsigned>(largest_block));
+}
+} // namespace
 
 // Default server URL - change this to your test server
 // #define DEFAULT_SERVER_URL "http://192.168.5.15:8081/api/animations"
@@ -74,7 +87,7 @@ void AnimationUpdater::Start() {
     BaseType_t ret = xTaskCreate(
         UpdateTask,
         "animation_updater",
-        16384,  // 16KB stack to accommodate HTTP/TLS and validation
+        kUpdateTaskStackWords,  // 16KB stack to accommodate HTTP/TLS and validation
         this,
         2,     // Low priority
         &update_task_handle_
@@ -82,6 +95,7 @@ void AnimationUpdater::Start() {
     
     if (ret != pdPASS) {
         ESP_LOGE(TAG, "Failed to create animation updater task");
+        LogHeapState("Start() task create failed:");
         return;
     }
     
@@ -145,13 +159,13 @@ void AnimationUpdater::CheckForUpdates() {
     
     ESP_LOGI(TAG, "Manual check for animation updates");
     
-    // Always attempt to download animations_mega.bin for updates
-    ESP_LOGI(TAG, "Attempting to download animations_mega.bin...");
+    // Always attempt to download test.bin for updates
+    ESP_LOGI(TAG, "Attempting to download test.bin...");
     TestHttpsDownload();
 }
 
 bool AnimationUpdater::DownloadMegaFileNow() {
-    ESP_LOGI(TAG, "Manual download of animations_mega.bin requested");
+    ESP_LOGI(TAG, "Manual download of test.bin requested");
     
     if (!enabled_.load()) {
         ESP_LOGW(TAG, "Animation updater is disabled, cannot download");
@@ -162,7 +176,7 @@ bool AnimationUpdater::DownloadMegaFileNow() {
     bool previous_success = first_download_success_.load();
     first_download_success_.store(false);
     
-    ESP_LOGI(TAG, "Starting manual download of animations_mega.bin...");
+    ESP_LOGI(TAG, "Starting manual download of test.bin...");
     bool success = TestHttpsDownload();
     
     if (!success) {
@@ -202,7 +216,7 @@ bool AnimationUpdater::ForceUpdateCheck() {
 }
 
 std::string AnimationUpdater::BuildMegaDownloadUrl() {
-    // Direct GCS URL for mega.bin scoped by device MAC (uppercase + URL-encoded ':')
+    // Direct GCS URL for test.bin scoped by device MAC (uppercase + URL-encoded ':')
     std::string mac = SystemInfo::GetMacAddress();
     std::string mac_upper = mac;
     std::transform(mac_upper.begin(), mac_upper.end(), mac_upper.begin(), [](unsigned char c){ return (unsigned char)std::toupper(c); });
@@ -211,7 +225,7 @@ std::string AnimationUpdater::BuildMegaDownloadUrl() {
     for (char c : mac_upper) {
         if (c == ':') mac_encoded += "%3A"; else mac_encoded += c;
     }
-    return std::string("https://storage.googleapis.com/milu-public/device_bin/") + mac_encoded + "/mega.bin";
+    return std::string("https://storage.googleapis.com/milu-public/device_bin/") + mac_encoded + "/test.bin";
 }
 
 bool AnimationUpdater::GetRemoteMegaContentLength(size_t &out_length) {
@@ -301,6 +315,28 @@ void AnimationUpdater::UpdateTask(void* parameter) {
     updater->UpdateLoop();
 }
 
+void AnimationUpdater::TriggerUpdateLoop() {
+    ESP_LOGI(TAG, "Triggering update loop from remote request");
+
+    if (!enabled_.load()) {
+        ESP_LOGW(TAG, "Animation updater is disabled, ignoring remote update trigger");
+        return;
+    }
+
+    if (!is_running_.load() || update_task_handle_ == nullptr) {
+        ESP_LOGW(TAG, "Animation updater task not running, starting it first");
+        Start();
+    }
+
+    if (update_task_handle_ != nullptr) {
+        xTaskNotifyGive(update_task_handle_);
+        ESP_LOGI(TAG, "Remote update notification sent");
+    } else {
+        ESP_LOGE(TAG, "Failed to trigger update loop: task handle is null");
+        LogHeapState("TriggerUpdateLoop() failed:");
+    }
+}
+
 void AnimationUpdater::UpdateLoop() {
     ESP_LOGI(TAG, "Animation updater task started");
     
@@ -315,9 +351,17 @@ void AnimationUpdater::UpdateLoop() {
     }
     
     while (is_running_.load()) {
-        // HTTPS DOWNLOAD: Only download if not already successful
-        if (enabled_.load() && !first_download_success_.load()) {
-            ESP_LOGI(TAG, "Attempting to download animations_mega.bin from GCS bucket...");
+        TickType_t wait_ticks = pdMS_TO_TICKS(check_interval_seconds_ * 1000);
+        bool force_now = (ulTaskNotifyTake(pdTRUE, wait_ticks) > 0);
+
+        if (force_now) {
+            ESP_LOGI(TAG, "Remote update requested, forcing download now");
+            first_download_success_.store(false);
+        }
+
+        bool should_download = force_now || (enabled_.load() && !first_download_success_.load());
+        if (should_download) {
+            ESP_LOGI(TAG, "Attempting to download test.bin from GCS bucket...");
             bool success = TestHttpsDownload();
             if (success) {
                 ESP_LOGI(TAG, "Successfully downloaded animations from GCS bucket");
@@ -328,9 +372,6 @@ void AnimationUpdater::UpdateLoop() {
             // Download already successful, skip further attempts
             ESP_LOGD(TAG, "Download already successful, skipping further downloads");
         }
-        
-        // Wait for the specified interval before next check
-        vTaskDelay(pdMS_TO_TICKS(check_interval_seconds_ * 1000));
     }
     
     ESP_LOGI(TAG, "Animation updater task ended");
@@ -519,24 +560,24 @@ bool AnimationUpdater::CheckServerForUpdates() {
 }
 */
 
-// NEW: HTTPS download method for animations_mega.bin
+// NEW: HTTPS download method for test.bin
 bool AnimationUpdater::TestHttpsDownload() {
-    ESP_LOGI(TAG, "Downloading animations_mega.bin directly from GCS...");
+    ESP_LOGI(TAG, "Downloading test.bin directly from GCS...");
 
     std::string download_url = BuildMegaDownloadUrl();
     ESP_LOGI(TAG, "Fetching: %s", download_url.c_str());
 
-    // Download animations_mega.bin specifically
+    // Download test.bin specifically
     bool success = DownloadMegaAnimationFile(download_url);
     
     if (success) {
-        ESP_LOGI(TAG, "Successfully downloaded animations_mega.bin!");
+        ESP_LOGI(TAG, "Successfully downloaded test.bin!");
         first_download_success_.store(true);
         // Update version to server version after successful download
         SetCurrentVersion(SERVER_VERSION);  // Update to server version
         ReloadAnimations();
     } else {
-        ESP_LOGE(TAG, "Failed to download animations_mega.bin!");
+        ESP_LOGE(TAG, "Failed to download test.bin!");
     }
     
     return success;
@@ -784,7 +825,7 @@ bool AnimationUpdater::DownloadAnimationFile(const std::string& url, const std::
     }
 }
 
-// NEW: Download animations_mega.bin specifically
+// NEW: Download test.bin specifically
 bool AnimationUpdater::DownloadMegaAnimationFile(const std::string& url) {
     ESP_LOGI(TAG, "=== DownloadMegaAnimationFile() called ===");
     ESP_LOGI(TAG, "URL: %s", url.c_str());
@@ -813,89 +854,14 @@ bool AnimationUpdater::DownloadMegaAnimationFile(const std::string& url) {
                 use_sd_card = false;
             }
         }
-        
-        // SD card only - no SPIFFS fallback
+
         if (!use_sd_card) {
             ESP_LOGE(TAG, "SD card is required for animation downloads");
             ESP_LOGE(TAG, "Please ensure SD card is properly inserted and formatted");
             return false;
         }
-        
-        ESP_LOGI(TAG, "SD card is mounted and ready for animations_mega.bin download");
-        
-        // Debug: List SD card contents and test write access
-        ESP_LOGI(TAG, "Listing SD card contents...");
-        DIR* dir = opendir("/sdcard");
-        if (dir) {
-            struct dirent* entry;
-            int file_count = 0;
-            while ((entry = readdir(dir)) != NULL) {
-                if (entry->d_type == DT_REG) {
-                    ESP_LOGI(TAG, "  Found file: %s", entry->d_name);
-                    file_count++;
-                }
-            }
-            closedir(dir);
-            ESP_LOGI(TAG, "Total files in SD card: %d", file_count);
-        } else {
-            ESP_LOGW(TAG, "Failed to open SD card directory for listing");
-        }
-        
-        // Test write access by creating a small test file (use 8.3 format for FAT32 compatibility)
-        ESP_LOGI(TAG, "Testing SD card write access...");
-        FILE* test_file = fopen("/sdcard/TEST.BIN", "wb");
-        if (test_file) {
-            const char* test_data = "TEST";
-            size_t written = fwrite(test_data, 1, 4, test_file);
-            fflush(test_file);
-            fclose(test_file);
-            if (written == 4) {
-                ESP_LOGI(TAG, "SD card write test successful");
-                // Clean up test file
-                unlink("/sdcard/TEST.BIN");
-            } else {
-                ESP_LOGE(TAG, "SD card write test failed: incomplete write");
-                unlink("/sdcard/TEST.BIN");
-                return false;
-            }
-        } else {
-            ESP_LOGE(TAG, "SD card write test failed: %s", strerror(errno));
-            ESP_LOGE(TAG, "SD card may need to be reformatted or remounted");
-            ESP_LOGE(TAG, "Error code: %d (EINVAL=%d, EACCES=%d, ENOENT=%d)", errno, EINVAL, EACCES, ENOENT);
-            
-            // Try to remount SD card
-            ESP_LOGW(TAG, "Attempting to remount SD card...");
-            SdCard::Eject();
-            vTaskDelay(pdMS_TO_TICKS(1000)); // Wait 1 second
-            esp_err_t remount_ret = SdCard::Initialize();
-            if (remount_ret != ESP_OK) {
-                ESP_LOGE(TAG, "Failed to remount SD card: %s", esp_err_to_name(remount_ret));
-                return false;
-            }
-            ESP_LOGI(TAG, "SD card remounted successfully, retrying write test...");
-            
-            // Retry write test with 8.3 format
-            test_file = fopen("/sdcard/TEST.BIN", "wb");
-            if (test_file) {
-                const char* test_data = "TEST";
-                size_t written = fwrite(test_data, 1, 4, test_file);
-                fflush(test_file);
-                fclose(test_file);
-                if (written == 4) {
-                    ESP_LOGI(TAG, "SD card write test successful after remount");
-                    unlink("/sdcard/TEST.BIN");
-                } else {
-                    ESP_LOGE(TAG, "SD card write test still failing after remount: incomplete write");
-                    unlink("/sdcard/TEST.BIN");
-                    return false;
-                }
-            } else {
-                ESP_LOGE(TAG, "SD card write test still failing after remount: %s", strerror(errno));
-                ESP_LOGE(TAG, "All SD card write attempts failed. SD card may be corrupted or write-protected.");
-                ESP_LOGE(TAG, "Please check: 1) SD card is not write-protected, 2) SD card is properly formatted as FAT32, 3) SD card is not corrupted");
-                return false;
-            }
-        }
+
+        ESP_LOGI(TAG, "SD card is mounted and ready for test.bin download");
         
         auto& board = Board::GetInstance();
         auto http = std::unique_ptr<Http>(board.CreateHttp());
@@ -912,7 +878,7 @@ bool AnimationUpdater::DownloadMegaAnimationFile(const std::string& url) {
         // Don't request Connection: close - let server decide, or use keep-alive for large files
         http->SetTimeout(600000); // 10 minute timeout for large file downloads (increased from 5 min)
         
-        ESP_LOGI(TAG, "Downloading animations_mega.bin from: %s", url.c_str());
+        ESP_LOGI(TAG, "Downloading test.bin from: %s", url.c_str());
         ESP_LOGI(TAG, "HTTP client created, attempting connection...");
         
         if (!http->Open("GET", url)) {
@@ -946,11 +912,10 @@ bool AnimationUpdater::DownloadMegaAnimationFile(const std::string& url) {
             unknown_length = true;
         }
         
-        ESP_LOGI(TAG, "Downloading animations_mega.bin (%u bytes reported, streaming to SD card)", 
+        ESP_LOGI(TAG, "Downloading test.bin (%u bytes reported, streaming to SD card)",
                  (unsigned int)content_length);
-        
+
         // Stream download directly to file (no RAM buffering)
-        // Use shorter filename to avoid FAT32 long filename issues
         const char* filename = "test.bin";
         char full_path[128];
         snprintf(full_path, sizeof(full_path), "/sdcard/%s", filename);
@@ -1150,7 +1115,6 @@ bool AnimationUpdater::DownloadMegaAnimationFile(const std::string& url) {
             ESP_LOGI(TAG, "Progress: %.1f%% complete", percent);
         }
         
-        // Reload animations from SD card
         ESP_LOGI(TAG, "Reloading animations from SD card...");
         animation_load_sd_card_animations();
         

@@ -1042,6 +1042,7 @@ bool animation_load_all_from_sd_card(void)
     }
 }
 
+
 // Individual animation loading functions for SD card
 bool animation_load_normal_from_sd_card(void)
 {

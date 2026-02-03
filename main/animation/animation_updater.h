@@ -48,6 +48,9 @@ public:
     
     // Get status information
     std::string GetStatusJson() const;
+
+    // Trigger the update loop from a remote request
+    void TriggerUpdateLoop();
     
     // Version management
     std::string GetCurrentVersion() const;

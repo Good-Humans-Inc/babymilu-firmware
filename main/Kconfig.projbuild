@@ -151,6 +151,9 @@ choice BOARD_TYPE
     config BOARD_TYPE_ESP32S3_Touch_LCD_1_46
         bool "Waveshare ESP32-S3-Touch-LCD-1.46"
         depends on IDF_TARGET_ESP32S3
+    config BOARD_TYPE_ECHOEAR
+        bool "EchoEar"
+        depends on IDF_TARGET_ESP32S3
     config BOARD_TYPE_ESP32C6_LCD_1_69
         bool "Waveshare ESP32-C6-LCD-1.69"
         depends on IDF_TARGET_ESP32C6

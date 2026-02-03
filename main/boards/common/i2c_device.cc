@@ -46,3 +46,11 @@ void I2cDevice::ReadRegs(uint8_t reg, uint8_t* buffer, size_t length) {
         memset(buffer, 0, length);
     }
 }
+
+esp_err_t I2cDevice::TryReadRegs(uint8_t reg, uint8_t* buffer, size_t length) {
+    esp_err_t ret = i2c_master_transmit_receive(i2c_device_, &reg, 1, buffer, length, 100);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "TryReadRegs(0x%02x, len=%zu) failed: %s (0x%x)", reg, length, esp_err_to_name(ret), ret);
+    }
+    return ret;
+}
