@@ -8,6 +8,7 @@
 #include <font_emoji.h>
 
 #include <atomic>
+#include <cstddef>
 
 // Theme color structure
 struct ThemeColors {
@@ -34,6 +35,10 @@ protected:
     lv_obj_t* container_ = nullptr;
     lv_obj_t* side_bar_ = nullptr;
     lv_obj_t* preview_image_ = nullptr;
+    lv_obj_t* emotion_gif_ = nullptr;
+    lv_img_dsc_t emotion_gif_desc_{};
+    const uint8_t* emotion_gif_data_ = nullptr;
+    size_t emotion_gif_size_ = 0;
 
     DisplayFonts fonts_;
     ThemeColors current_theme_;
@@ -55,6 +60,7 @@ public:
     virtual void SetChatMessage(const char* role, const char* content) override; 
 #endif  
     virtual void SetEmotionImg(const lv_image_dsc_t *img) override;
+    void SetEmotionGif(const uint8_t* gif_data, size_t gif_size);
     // Add theme switching function
     virtual void SetTheme(const std::string& theme_name) override;
 };

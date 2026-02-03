@@ -7,6 +7,7 @@
 #include <esp_err.h>
 #include <esp_lvgl_port.h>
 #include <esp_heap_caps.h>
+#include <libs/gif/lv_gif.h>
 #include "assets/lang_config.h"
 #include <cstring>
 #include "settings.h"
@@ -1002,20 +1003,20 @@ void LcdDisplay::SetEmotion(const char *emotion)
         {ANIMATION_NORMAL, "normal"},  // Direct mapping to normal animation
 
         // Positive / happy styles
-        {ANIMATION_HAPPY, "smirk"},
-        {ANIMATION_HAPPY, "happy"},
-        {ANIMATION_HAPPY, "laughing"},
-        {ANIMATION_HAPPY, "laugh"},
-        {ANIMATION_HAPPY, "funny"},
+        {ANIMATION_SMIRK, "smirk"},
+        {ANIMATION_SMIRK, "happy"},
+        {ANIMATION_LAUGH, "laughing"},
+        {ANIMATION_LAUGH, "laugh"},
+        {ANIMATION_LAUGH, "funny"},
         {ANIMATION_INSPIRATION, "cool"},
-        {ANIMATION_HAPPY, "relaxed"},
-        {ANIMATION_HAPPY, "delicious"},
+        {ANIMATION_SMIRK, "relaxed"},
+        {ANIMATION_SMIRK, "delicious"},
 
         // Heart / affection
-        {ANIMATION_INSPIRATION, "heart"},
-        {ANIMATION_INSPIRATION, "loving"},
-        {ANIMATION_INSPIRATION, "kissy"},
-        {ANIMATION_HAPPY, "confident"},
+        {ANIMATION_HAPPY, "heart"},
+        {ANIMATION_HAPPY, "loving"},
+        {ANIMATION_HAPPY, "kissy"},
+        {ANIMATION_SMIRK, "confident"},
 
         // Blush / embarrassed
         {ANIMATION_EMBARRESSED, "blush"},
@@ -1028,16 +1029,16 @@ void LcdDisplay::SetEmotion(const char *emotion)
         {ANIMATION_INSPIRATION, "shocked"},
         {ANIMATION_QUESTION, "thinking"},
         {ANIMATION_QUESTION, "question"},  // Direct mapping to question animation
-        {ANIMATION_QUESTION, "listening"},
+        {ANIMATION_LISTENING, "listening"},
 
         // Angry / fire
         {ANIMATION_FIRE, "angry"},
         {ANIMATION_FIRE, "fire"},  // Direct mapping to fire animation
 
         // Sad / crying
-        {ANIMATION_SHY, "sad"},
-        {ANIMATION_EMBARRESSED, "cry"},
-        {ANIMATION_EMBARRESSED, "crying"},
+        {ANIMATION_SAD, "sad"},
+        {ANIMATION_TALK, "cry"},
+        {ANIMATION_TALK, "crying"},
 
         // Sleepy / relaxed
         {ANIMATION_SLEEP, "sleepy"},
@@ -1053,7 +1054,8 @@ void LcdDisplay::SetEmotion(const char *emotion)
         {ANIMATION_TALK, "talk1"},
         {ANIMATION_TALK, "talk2"},
         {ANIMATION_TALK, "talk3"},
-        {ANIMATION_TALK, "talk4"}};
+        {ANIMATION_TALK, "talk4"},
+        {ANIMATION_SILENCE, "silence"}};
 
     // 查找匹配的表情
     ESP_LOGI(TAG, "***** SetEmotion request: %s *****", emotion ? emotion : "<null>");
@@ -1099,6 +1101,10 @@ void LcdDisplay::SetEmotion(const char *emotion)
 void LcdDisplay::SetEmotionImg(const lv_image_dsc_t *img)
 {
     DisplayLockGuard lock(this);
+
+    if (emotion_gif_ != nullptr) {
+        lv_obj_add_flag(emotion_gif_, LV_OBJ_FLAG_HIDDEN);
+    }
     
     // Create emotion_label_ in content area if it doesn't exist (status bar disabled)
     if (emotion_label_ == nullptr && content_ != nullptr) {
@@ -1141,6 +1147,68 @@ void LcdDisplay::SetEmotionImg(const lv_image_dsc_t *img)
         // Enable anti-aliasing for better quality
         lv_img_set_antialias(emotion_label_, true);
     }
+}
+
+void LcdDisplay::SetEmotionGif(const uint8_t* gif_data, size_t gif_size)
+{
+#if LV_USE_GIF
+    DisplayLockGuard lock(this);
+
+    if (!gif_data || gif_size == 0) {
+        ESP_LOGE(TAG, "Invalid GIF data");
+        return;
+    }
+
+    if (emotion_label_ != nullptr) {
+        lv_obj_add_flag(emotion_label_, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    if (emotion_gif_ == nullptr && content_ != nullptr) {
+        emotion_gif_ = lv_gif_create(content_);
+        lv_obj_align(emotion_gif_, LV_ALIGN_CENTER, 0, 0);
+        lv_obj_set_style_pad_all(emotion_gif_, 0, 0);
+        lv_obj_set_style_margin_all(emotion_gif_, 0, 0);
+        lv_obj_set_style_border_width(emotion_gif_, 0, 0);
+        lv_obj_set_style_bg_opa(emotion_gif_, LV_OPA_TRANSP, 0);
+    }
+
+    if (emotion_gif_ == nullptr) {
+        ESP_LOGE(TAG, "Failed to create GIF widget");
+        return;
+    }
+
+    lv_obj_clear_flag(emotion_gif_, LV_OBJ_FLAG_HIDDEN);
+
+    if (emotion_gif_data_ == gif_data && emotion_gif_size_ == gif_size) {
+        return;
+    }
+
+    lv_gif_pause(emotion_gif_);
+
+    emotion_gif_desc_.header.magic = LV_IMAGE_HEADER_MAGIC;
+    emotion_gif_desc_.header.cf = LV_COLOR_FORMAT_L8;
+    emotion_gif_desc_.header.flags = 0;
+    emotion_gif_desc_.header.w = 0;
+    emotion_gif_desc_.header.h = 0;
+    emotion_gif_desc_.header.stride = 0;
+    emotion_gif_desc_.data_size = gif_size;
+    emotion_gif_desc_.data = gif_data;
+
+    emotion_gif_data_ = gif_data;
+    emotion_gif_size_ = gif_size;
+
+    lv_gif_set_src(emotion_gif_, &emotion_gif_desc_);
+    if (!lv_gif_is_loaded(emotion_gif_)) {
+        ESP_LOGW(TAG, "GIF source failed to load; keeping animation paused");
+        return;
+    }
+
+    ESP_LOGD(TAG, "Set GIF animation (%d bytes)", gif_size);
+#else
+    ESP_LOGW(TAG, "GIF support not enabled (LV_USE_GIF is not set)");
+    (void)gif_data;
+    (void)gif_size;
+#endif
 }
 
 void LcdDisplay::SetIcon(const char *icon)

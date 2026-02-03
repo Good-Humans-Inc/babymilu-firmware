@@ -20,6 +20,7 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include <errno.h>
+#include <unistd.h>
 
 
 
@@ -33,6 +34,24 @@ static Animation_t sd_question = {0};
 static Animation_t sd_shy = {0};
 static Animation_t sd_sleep = {0};
 static Animation_t sd_talk = {0};
+static Animation_t sd_laugh = {0};
+static Animation_t sd_sad = {0};
+static Animation_t sd_silence = {0};
+static Animation_t sd_listening = {0};
+static Animation_t sd_smirk = {0};
+
+// Initialize GIF fields
+#define INIT_ANIM(anim) do { \
+    (anim).use_gif = false; \
+    (anim).gif_path = NULL; \
+    (anim).gif_data = NULL; \
+    (anim).gif_data_size = 0; \
+    (anim).has_start_gif = false; \
+    (anim).gif_start_data = NULL; \
+    (anim).gif_start_data_size = 0; \
+    (anim).gif_loop_data = NULL; \
+    (anim).gif_loop_data_size = 0; \
+} while(0)
 
 // Function to get the appropriate animation (SD card only)
 Animation_t* get_animation(int index) {
@@ -57,6 +76,16 @@ Animation_t* get_animation(int index) {
             return animation_get_happy_animation();
         case 9: // ANIMATION_TALK
             return animation_get_talk_animation();
+        case 10: // ANIMATION_LAUGH
+            return animation_get_laugh_animation();
+        case 11: // ANIMATION_SAD
+            return animation_get_sad_animation();
+        case 12: // ANIMATION_SILENCE
+            return animation_get_silence_animation();
+        case 13: // ANIMATION_LISTENING
+            return animation_get_listening_animation();
+        case 14: // ANIMATION_SMIRK
+            return animation_get_smirk_animation();
         default:
             return animation_get_normal_animation();
     }
@@ -73,7 +102,12 @@ Animation_t *animations[] = {
     NULL,  // ANIMATION_SHY
     NULL,  // ANIMATION_SLEEP
     NULL,  // ANIMATION_HAPPY
-    NULL}; // ANIMATION_TALK
+    NULL,  // ANIMATION_TALK
+    NULL,  // ANIMATION_LAUGH
+    NULL,  // ANIMATION_SAD
+    NULL,  // ANIMATION_SILENCE
+    NULL,  // ANIMATION_LISTENING
+    NULL}; // ANIMATION_SMIRK
 
 static int now_animation = 0;
 int pos = 0;
@@ -83,21 +117,66 @@ TaskHandle_t animation_task_handle = nullptr;
 void plat_animation_task(void *arg)
 {
     auto display = Board::GetInstance().GetDisplay();
+    int last_animation = -1;
+    bool in_start_phase = false;
+    bool start_gif_played = false;
+    bool loop_gif_set = false;
+    TickType_t start_phase_start_time = 0;
     while (1)
     {
-        ESP_LOGD("plat_animation_task", "now_animation: %d, pos: %d", now_animation, pos);
-        pos++;
-        
-        // Use get_animation() to get the appropriate animation (SD card only)
         Animation_t* current_anim = get_animation(now_animation);
-        
-        // Check for NULL animation to prevent crashes
+
         if (current_anim == NULL) {
             ESP_LOGW("plat_animation_task", "Animation %d is not available, skipping frame", now_animation);
-            vTaskDelay(pdMS_TO_TICKS(500));
+            vTaskDelay(pdMS_TO_TICKS(5000));
             continue;
         }
-        
+
+        if (current_anim->use_gif && current_anim->gif_data) {
+            bool animation_changed = (last_animation != now_animation);
+
+            if (animation_changed) {
+                in_start_phase = false;
+                start_gif_played = false;
+                loop_gif_set = false;
+                start_phase_start_time = 0;
+
+                if (current_anim->has_start_gif && current_anim->gif_start_data && current_anim->gif_loop_data) {
+                    in_start_phase = true;
+                    start_gif_played = true;
+                    loop_gif_set = false;
+                    start_phase_start_time = xTaskGetTickCount();
+                    display->SetEmotionGif(current_anim->gif_start_data, current_anim->gif_start_data_size);
+                } else {
+                    in_start_phase = false;
+                    start_gif_played = true;
+                    loop_gif_set = true;
+                    display->SetEmotionGif(current_anim->gif_data, current_anim->gif_data_size);
+                }
+                last_animation = now_animation;
+            } else {
+                if (current_anim->has_start_gif && current_anim->gif_start_data && current_anim->gif_loop_data) {
+                    if (in_start_phase && start_gif_played && !loop_gif_set) {
+                        TickType_t elapsed = xTaskGetTickCount() - start_phase_start_time;
+                        if (elapsed >= pdMS_TO_TICKS(1000)) {
+                            display->SetEmotionGif(current_anim->gif_loop_data, current_anim->gif_loop_data_size);
+                            in_start_phase = false;
+                            loop_gif_set = true;
+                        }
+                    }
+                }
+            }
+
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            continue;
+        }
+
+        if (last_animation != now_animation) {
+            pos = 0;
+            last_animation = now_animation;
+        }
+
+        pos++;
         if (pos >= current_anim->len)
         {
             pos = 0;
@@ -111,7 +190,7 @@ void animation_set_now_animation(int animation)
 {
     if (animation_task_handle == nullptr)
     {
-        xTaskCreatePinnedToCore(plat_animation_task, "plat_animation_task", 2048, nullptr, 4, &animation_task_handle, 0);
+        xTaskCreatePinnedToCore(plat_animation_task, "plat_animation_task", 4096, nullptr, 4, &animation_task_handle, 0);
     }
     if (animation < 0 || animation >= ANIMATION_NUM)
     {
@@ -140,6 +219,28 @@ void animation_load_sd_card_animations(void)
     
     // Debug SD card status before attempting to load
     SdCard::DebugStatus();
+
+    INIT_ANIM(sd_normal);
+    INIT_ANIM(sd_embarrass);
+    INIT_ANIM(sd_fire);
+    INIT_ANIM(sd_happy);
+    INIT_ANIM(sd_inspiration);
+    INIT_ANIM(sd_question);
+    INIT_ANIM(sd_shy);
+    INIT_ANIM(sd_sleep);
+    INIT_ANIM(sd_talk);
+    INIT_ANIM(sd_laugh);
+    INIT_ANIM(sd_sad);
+    INIT_ANIM(sd_silence);
+    INIT_ANIM(sd_listening);
+    INIT_ANIM(sd_smirk);
+
+    ESP_LOGI("animation", "Trying to load GIF animations from test.bin...");
+    if (animation_load_gifs_from_test_bin()) {
+        ESP_LOGI("animation", "🎉 Successfully loaded GIF animations from test.bin!");
+        ESP_LOGI("animation", "   - Using GIF format for animations");
+        return;
+    }
     
     // Try to load ALL animations from SD card mega file
     if (animation_load_all_from_sd_card()) {
@@ -211,7 +312,35 @@ void animation_load_sd_card_animations(void)
 
 void animation_cleanup_sd_card_animation(Animation_t* anim)
 {
-    if (anim && anim->use_spiffs && anim->spiffs_imgs) {
+    if (!anim) {
+        return;
+    }
+
+    if (anim->use_gif) {
+        if (anim->gif_data) {
+            free(anim->gif_data);
+            anim->gif_data = NULL;
+        }
+        if (anim->gif_path) {
+            free(anim->gif_path);
+            anim->gif_path = NULL;
+        }
+        if (anim->gif_start_data) {
+            free(anim->gif_start_data);
+            anim->gif_start_data = NULL;
+        }
+        if (anim->gif_loop_data) {
+            free(anim->gif_loop_data);
+            anim->gif_loop_data = NULL;
+        }
+        anim->use_gif = false;
+        anim->has_start_gif = false;
+        anim->gif_data_size = 0;
+        anim->gif_start_data_size = 0;
+        anim->gif_loop_data_size = 0;
+    }
+
+    if (anim->use_spiffs && anim->spiffs_imgs) {
         for (int i = 0; i < anim->len; i++) {
             if (anim->spiffs_imgs[i] && anim->spiffs_imgs[i]->data) {
                 free((void*)anim->spiffs_imgs[i]->data);
@@ -224,7 +353,7 @@ void animation_cleanup_sd_card_animation(Animation_t* anim)
         anim->spiffs_imgs = NULL;
     }
     
-    if (anim && anim->animations) {
+    if (anim->animations) {
         free(anim->animations);
         anim->animations = NULL;
     }
@@ -239,7 +368,8 @@ void animation_cleanup_sd_card_animation(Animation_t* anim)
 Animation_t* animation_get_normal_animation(void)
 {
     // Check if SD card normal animation is loaded and valid
-    if (sd_normal.use_spiffs && sd_normal.imges && sd_normal.len > 0) {
+    if ((sd_normal.use_gif && sd_normal.gif_data && sd_normal.gif_data_size > 0) ||
+        (sd_normal.use_spiffs && sd_normal.imges && sd_normal.len > 0)) {
         return &sd_normal;
     } else {
         ESP_LOGW("animation", "No normal animation available from SD card");
@@ -250,7 +380,8 @@ Animation_t* animation_get_normal_animation(void)
 // Function to get the appropriate embarrass animation (SD card only)
 Animation_t* animation_get_embarrass_animation(void)
 {
-    if (sd_embarrass.use_spiffs && sd_embarrass.imges && sd_embarrass.len > 0) {
+    if ((sd_embarrass.use_gif && sd_embarrass.gif_data && sd_embarrass.gif_data_size > 0) ||
+        (sd_embarrass.use_spiffs && sd_embarrass.imges && sd_embarrass.len > 0)) {
         return &sd_embarrass;
     } else {
         ESP_LOGW("animation", "No embarrass animation available from SD card");
@@ -261,7 +392,8 @@ Animation_t* animation_get_embarrass_animation(void)
 // Function to get the appropriate fire animation (SD card only)
 Animation_t* animation_get_fire_animation(void)
 {
-    if (sd_fire.use_spiffs && sd_fire.imges && sd_fire.len > 0) {
+    if ((sd_fire.use_gif && sd_fire.gif_data && sd_fire.gif_data_size > 0) ||
+        (sd_fire.use_spiffs && sd_fire.imges && sd_fire.len > 0)) {
         return &sd_fire;
     } else {
         ESP_LOGW("animation", "No fire animation available from SD card");
@@ -272,7 +404,8 @@ Animation_t* animation_get_fire_animation(void)
 // Function to get the appropriate happy animation (SD card only)
 Animation_t* animation_get_happy_animation(void)
 {
-    if (sd_happy.use_spiffs && sd_happy.imges && sd_happy.len > 0) {
+    if ((sd_happy.use_gif && sd_happy.gif_data && sd_happy.gif_data_size > 0) ||
+        (sd_happy.use_spiffs && sd_happy.imges && sd_happy.len > 0)) {
         return &sd_happy;
     } else {
         ESP_LOGW("animation", "No happy animation available from SD card");
@@ -283,7 +416,8 @@ Animation_t* animation_get_happy_animation(void)
 // Function to get the appropriate inspiration animation (SD card only)
 Animation_t* animation_get_inspiration_animation(void)
 {
-    if (sd_inspiration.use_spiffs && sd_inspiration.imges && sd_inspiration.len > 0) {
+    if ((sd_inspiration.use_gif && sd_inspiration.gif_data && sd_inspiration.gif_data_size > 0) ||
+        (sd_inspiration.use_spiffs && sd_inspiration.imges && sd_inspiration.len > 0)) {
         return &sd_inspiration;
     } else {
         ESP_LOGW("animation", "No inspiration animation available from SD card");
@@ -294,7 +428,8 @@ Animation_t* animation_get_inspiration_animation(void)
 // Function to get the appropriate question animation (SD card only)
 Animation_t* animation_get_question_animation(void)
 {
-    if (sd_question.use_spiffs && sd_question.imges && sd_question.len > 0) {
+    if ((sd_question.use_gif && sd_question.gif_data && sd_question.gif_data_size > 0) ||
+        (sd_question.use_spiffs && sd_question.imges && sd_question.len > 0)) {
         return &sd_question;
     } else {
         ESP_LOGW("animation", "No question animation available from SD card");
@@ -305,7 +440,8 @@ Animation_t* animation_get_question_animation(void)
 // Function to get the appropriate shy animation (SD card only)
 Animation_t* animation_get_shy_animation(void)
 {
-    if (sd_shy.use_spiffs && sd_shy.imges && sd_shy.len > 0) {
+    if ((sd_shy.use_gif && sd_shy.gif_data && sd_shy.gif_data_size > 0) ||
+        (sd_shy.use_spiffs && sd_shy.imges && sd_shy.len > 0)) {
         return &sd_shy;
     } else {
         ESP_LOGW("animation", "No shy animation available from SD card");
@@ -316,7 +452,8 @@ Animation_t* animation_get_shy_animation(void)
 // Function to get the appropriate sleep animation (SD card only)
 Animation_t* animation_get_sleep_animation(void)
 {
-    if (sd_sleep.use_spiffs && sd_sleep.imges && sd_sleep.len > 0) {
+    if ((sd_sleep.use_gif && sd_sleep.gif_data && sd_sleep.gif_data_size > 0) ||
+        (sd_sleep.use_spiffs && sd_sleep.imges && sd_sleep.len > 0)) {
         return &sd_sleep;
     } else {
         ESP_LOGW("animation", "No sleep animation available from SD card");
@@ -327,10 +464,66 @@ Animation_t* animation_get_sleep_animation(void)
 // Function to get the appropriate talk animation (SD card only)
 Animation_t* animation_get_talk_animation(void)
 {
-    if (sd_talk.use_spiffs && sd_talk.imges && sd_talk.len > 0) {
+    if ((sd_talk.use_gif && sd_talk.gif_data && sd_talk.gif_data_size > 0) ||
+        (sd_talk.use_spiffs && sd_talk.imges && sd_talk.len > 0)) {
         return &sd_talk;
     } else {
         ESP_LOGW("animation", "No talk animation available from SD card");
+        return NULL;
+    }
+}
+
+Animation_t* animation_get_laugh_animation(void)
+{
+    if ((sd_laugh.use_gif && sd_laugh.gif_data && sd_laugh.gif_data_size > 0) ||
+        (sd_laugh.use_spiffs && sd_laugh.imges && sd_laugh.len > 0)) {
+        return &sd_laugh;
+    } else {
+        ESP_LOGW("animation", "No laugh animation available from SD card");
+        return NULL;
+    }
+}
+
+Animation_t* animation_get_sad_animation(void)
+{
+    if ((sd_sad.use_gif && sd_sad.gif_data && sd_sad.gif_data_size > 0) ||
+        (sd_sad.use_spiffs && sd_sad.imges && sd_sad.len > 0)) {
+        return &sd_sad;
+    } else {
+        ESP_LOGW("animation", "No sad animation available from SD card");
+        return NULL;
+    }
+}
+
+Animation_t* animation_get_silence_animation(void)
+{
+    if ((sd_silence.use_gif && sd_silence.gif_data && sd_silence.gif_data_size > 0) ||
+        (sd_silence.use_spiffs && sd_silence.imges && sd_silence.len > 0)) {
+        return &sd_silence;
+    } else {
+        ESP_LOGW("animation", "No silence animation available from SD card");
+        return NULL;
+    }
+}
+
+Animation_t* animation_get_listening_animation(void)
+{
+    if ((sd_listening.use_gif && sd_listening.gif_data && sd_listening.gif_data_size > 0) ||
+        (sd_listening.use_spiffs && sd_listening.imges && sd_listening.len > 0)) {
+        return &sd_listening;
+    } else {
+        ESP_LOGW("animation", "No listening animation available from SD card");
+        return NULL;
+    }
+}
+
+Animation_t* animation_get_smirk_animation(void)
+{
+    if ((sd_smirk.use_gif && sd_smirk.gif_data && sd_smirk.gif_data_size > 0) ||
+        (sd_smirk.use_spiffs && sd_smirk.imges && sd_smirk.len > 0)) {
+        return &sd_smirk;
+    } else {
+        ESP_LOGW("animation", "No smirk animation available from SD card");
         return NULL;
     }
 }
@@ -343,10 +536,13 @@ void animation_show_current_sources(void)
         Animation_t* anim = get_animation(i);
         const char* anim_names[] = {
             "STATIC_NORMAL", "EMBARRESSED", "FIRE", "INSPIRATION", "NORMAL",
-            "QUESTION", "SHY", "SLEEP", "HAPPY", "TALK"
+            "QUESTION", "SHY", "SLEEP", "HAPPY", "TALK",
+            "LAUGH", "SAD", "SILENCE", "LISTENING", "SMIRK"
         };
         
-        if (anim && anim->use_spiffs) {
+        if (anim && anim->use_gif) {
+            ESP_LOGI("animation", "  %s: GIF (test.bin)", anim_names[i]);
+        } else if (anim && anim->use_spiffs) {
             ESP_LOGI("animation", "  %s: SD Card (dynamic, RAM)", anim_names[i]);
         } else {
             ESP_LOGI("animation", "  %s: Not available", anim_names[i]);
@@ -1249,6 +1445,357 @@ bool animation_load_talk_from_sd_card(void)
         return true;
     } else {
         ESP_LOGE("animation", "❌ Failed to load talk animation from SD card");
+        return false;
+    }
+}
+
+// ============================================================================
+// GIF LOADING FUNCTIONS
+// ============================================================================
+
+bool animation_extract_gif_from_test_bin(const char* gif_name, uint8_t** data, size_t* size)
+{
+    static bool header_read_failed = false;
+
+    if (!gif_name || !data || !size) {
+        ESP_LOGE("animation", "Invalid parameters for GIF extraction");
+        return false;
+    }
+
+    if (header_read_failed) {
+        return false;
+    }
+
+    if (!SdCard::IsMounted()) {
+        ESP_LOGE("animation", "SD card not mounted");
+        return false;
+    }
+
+    FILE* f = NULL;
+    char test_bin_path[512];
+
+    DIR* dir = opendir("/sdcard");
+    if (dir != NULL) {
+        struct dirent* entry;
+        bool found = false;
+
+        while ((entry = readdir(dir)) != NULL) {
+            if (entry->d_type == DT_REG) {
+                if (strcasecmp(entry->d_name, "test.bin") == 0 ||
+                    strcasecmp(entry->d_name, "TEST.BIN") == 0) {
+                    snprintf(test_bin_path, sizeof(test_bin_path), "/sdcard/%s", entry->d_name);
+                    found = true;
+                    break;
+                }
+            }
+        }
+        closedir(dir);
+
+        if (!found) {
+            ESP_LOGE("animation", "test.bin not found on SD card");
+            return false;
+        }
+    } else {
+        ESP_LOGE("animation", "Failed to open /sdcard directory");
+        return false;
+    }
+
+    f = fopen(test_bin_path, "rb");
+    if (!f) {
+        ESP_LOGE("animation", "Failed to open test.bin: %s", test_bin_path);
+        return false;
+    }
+
+    uint32_t file_count, checksum, data_length;
+    if (fread(&file_count, sizeof(uint32_t), 1, f) != 1 ||
+        fread(&checksum, sizeof(uint32_t), 1, f) != 1 ||
+        fread(&data_length, sizeof(uint32_t), 1, f) != 1) {
+        ESP_LOGE("animation", "Failed to read test.bin header");
+        fclose(f);
+
+        ESP_LOGE("animation", "Deleting corrupted test.bin file and skipping animation loading");
+        if (unlink(test_bin_path) == 0) {
+            ESP_LOGI("animation", "Successfully deleted corrupted test.bin: %s", test_bin_path);
+        } else {
+            ESP_LOGW("animation", "Failed to delete test.bin: %s (error: %s)", test_bin_path, strerror(errno));
+        }
+
+        header_read_failed = true;
+        return false;
+    }
+
+    ESP_LOGI("animation", "test.bin header: %d files, checksum=0x%08X, length=%d",
+             file_count, checksum, data_length);
+
+    bool found_gif = false;
+    uint32_t gif_offset = 0;
+    uint32_t gif_size = 0;
+
+    for (uint32_t i = 0; i < file_count; i++) {
+        char name[33] = {0};
+        uint32_t file_size, file_offset;
+        uint16_t width, height;
+
+        if (fread(name, 32, 1, f) != 1 ||
+            fread(&file_size, sizeof(uint32_t), 1, f) != 1 ||
+            fread(&file_offset, sizeof(uint32_t), 1, f) != 1 ||
+            fread(&width, sizeof(uint16_t), 1, f) != 1 ||
+            fread(&height, sizeof(uint16_t), 1, f) != 1) {
+            ESP_LOGE("animation", "Failed to read file table entry %d", i);
+            fclose(f);
+            return false;
+        }
+
+        size_t name_len = strnlen(name, 32);
+        name[name_len] = '\0';
+
+        if (strcmp(name, gif_name) == 0) {
+            found_gif = true;
+            gif_offset = file_offset;
+            gif_size = file_size;
+            ESP_LOGI("animation", "Found GIF: %s at offset %d, size %d", gif_name, gif_offset, gif_size);
+            break;
+        }
+    }
+
+    if (!found_gif) {
+        ESP_LOGE("animation", "GIF not found in test.bin: %s", gif_name);
+        fclose(f);
+        return false;
+    }
+
+    uint32_t table_size = file_count * 44;
+    uint32_t data_start = 12 + table_size;
+
+    if (fseek(f, data_start + gif_offset + 2, SEEK_SET) != 0) {
+        ESP_LOGE("animation", "Failed to seek to GIF data");
+        fclose(f);
+        return false;
+    }
+
+    *data = (uint8_t*)malloc(gif_size);
+    if (!*data) {
+        ESP_LOGE("animation", "Failed to allocate %d bytes for GIF data", gif_size);
+        fclose(f);
+        return false;
+    }
+
+    if (fread(*data, 1, gif_size, f) != gif_size) {
+        ESP_LOGE("animation", "Failed to read GIF data");
+        free(*data);
+        *data = NULL;
+        fclose(f);
+        return false;
+    }
+
+    *size = gif_size;
+    fclose(f);
+
+    ESP_LOGI("animation", "Successfully extracted GIF: %s (%d bytes)", gif_name, gif_size);
+    return true;
+}
+
+bool animation_load_gif_animation(Animation_t* anim, const char* gif_name, uint8_t* gif_data, size_t gif_size)
+{
+    if (!anim || !gif_name || !gif_data || gif_size == 0) {
+        ESP_LOGE("animation", "Invalid parameters for GIF animation loading");
+        return false;
+    }
+
+    animation_cleanup_sd_card_animation(anim);
+
+    anim->gif_data = (uint8_t*)malloc(gif_size);
+    if (!anim->gif_data) {
+        ESP_LOGE("animation", "Failed to allocate memory for GIF data");
+        return false;
+    }
+
+    memcpy(anim->gif_data, gif_data, gif_size);
+    anim->gif_data_size = gif_size;
+    anim->use_gif = true;
+    anim->use_spiffs = true;
+    anim->has_start_gif = false;
+
+    anim->gif_path = (char*)malloc(strlen(gif_name) + 1);
+    if (anim->gif_path) {
+        strcpy(anim->gif_path, gif_name);
+    }
+
+    anim->len = 1;
+    anim->imges = NULL;
+    anim->animations = NULL;
+    anim->spiffs_imgs = NULL;
+
+    ESP_LOGI("animation", "Successfully loaded GIF animation: %s (%d bytes)", gif_name, gif_size);
+    return true;
+}
+
+bool animation_load_gif_animation_with_start_loop(Animation_t* anim,
+                                                  const char* gif_loop_name, uint8_t* gif_loop_data, size_t gif_loop_size,
+                                                  const char* gif_start_name, uint8_t* gif_start_data, size_t gif_start_size)
+{
+    if (!anim || !gif_loop_name || !gif_loop_data || gif_loop_size == 0) {
+        ESP_LOGE("animation", "Invalid parameters for GIF animation loading (loop required)");
+        return false;
+    }
+
+    animation_cleanup_sd_card_animation(anim);
+
+    anim->gif_loop_data = (uint8_t*)malloc(gif_loop_size);
+    if (!anim->gif_loop_data) {
+        ESP_LOGE("animation", "Failed to allocate memory for loop GIF data");
+        return false;
+    }
+    memcpy(anim->gif_loop_data, gif_loop_data, gif_loop_size);
+    anim->gif_loop_data_size = gif_loop_size;
+
+    anim->gif_data = anim->gif_loop_data;
+    anim->gif_data_size = gif_loop_size;
+
+    if (gif_start_name && gif_start_data && gif_start_size > 0) {
+        anim->gif_start_data = (uint8_t*)malloc(gif_start_size);
+        if (!anim->gif_start_data) {
+            ESP_LOGE("animation", "Failed to allocate memory for start GIF data");
+            free(anim->gif_loop_data);
+            anim->gif_loop_data = NULL;
+            anim->gif_data = NULL;
+            return false;
+        }
+        memcpy(anim->gif_start_data, gif_start_data, gif_start_size);
+        anim->gif_start_data_size = gif_start_size;
+        anim->has_start_gif = true;
+    } else {
+        anim->has_start_gif = false;
+    }
+
+    anim->use_gif = true;
+    anim->use_spiffs = true;
+
+    anim->gif_path = (char*)malloc(strlen(gif_loop_name) + 1);
+    if (anim->gif_path) {
+        strcpy(anim->gif_path, gif_loop_name);
+    }
+
+    anim->len = 1;
+    anim->imges = NULL;
+    anim->animations = NULL;
+    anim->spiffs_imgs = NULL;
+
+    if (anim->has_start_gif) {
+        ESP_LOGI("animation", "Successfully loaded GIF animation with start+loop: %s + %s (%d + %d bytes)",
+                 gif_start_name, gif_loop_name, gif_start_size, gif_loop_size);
+    } else {
+        ESP_LOGI("animation", "Successfully loaded GIF animation (loop only): %s (%d bytes)",
+                 gif_loop_name, gif_loop_size);
+    }
+    return true;
+}
+
+bool animation_load_gifs_from_test_bin(void)
+{
+    if (!SdCard::IsMounted()) {
+        ESP_LOGE("animation", "SD card not mounted");
+        return false;
+    }
+
+    ESP_LOGI("animation", "Loading GIF animations from test.bin...");
+
+    typedef struct {
+        const char* logical_name;
+        const char* loop_gif;
+        const char* start_gif;
+        Animation_t* target_anim;
+    } GifAnimDef;
+
+    const GifAnimDef gif_anims[] = {
+        {"normal",   "normal.gif",      NULL,               &sd_normal},
+        {"smirk",    "smirk.gif",       "smirk_start.gif",  &sd_smirk},
+        {"heart",    "heart.gif",       "heart_start.gif",  &sd_happy},
+        {"blush",    "blush.gif",       NULL,               &sd_embarrass},
+        {"sad",      "sad.gif",         "sad_start.gif",    &sd_sad},
+        {"laugh",    "laugh.gif",       "laugh_start.gif",  &sd_laugh},
+        {"sleep",    "sleep.gif",       NULL,               &sd_sleep},
+        {"starry",   "starry.gif",      "starry_start.gif", &sd_inspiration},
+        {"cry",      "cry.gif",         NULL,               &sd_talk},
+        {"angry",    "angry.gif",       "angry_start.gif",  &sd_fire},
+        {"silence",  "silence.gif",     NULL,               &sd_silence},
+        {"listening","listening.gif",   NULL,               &sd_listening},
+    };
+
+    const size_t gif_anim_count = sizeof(gif_anims) / sizeof(gif_anims[0]);
+    int loaded_count = 0;
+
+    for (size_t i = 0; i < gif_anim_count; ++i) {
+        const GifAnimDef& def = gif_anims[i];
+
+        uint8_t* loop_data = NULL;
+        size_t loop_size = 0;
+        uint8_t* start_data = NULL;
+        size_t start_size = 0;
+
+        if (!animation_extract_gif_from_test_bin(def.loop_gif, &loop_data, &loop_size)) {
+            ESP_LOGW("animation", "⚠ Loop GIF not found in test.bin for %s: %s",
+                     def.logical_name, def.loop_gif);
+            continue;
+        }
+
+        if (def.start_gif != NULL) {
+            if (!animation_extract_gif_from_test_bin(def.start_gif, &start_data, &start_size)) {
+                ESP_LOGW("animation", "⚠ Start GIF not found in test.bin for %s: %s (using loop only)",
+                         def.logical_name, def.start_gif);
+                start_data = NULL;
+                start_size = 0;
+            }
+        }
+
+        bool ok = false;
+        if (start_data != NULL && start_size > 0) {
+            ok = animation_load_gif_animation_with_start_loop(
+                def.target_anim,
+                def.loop_gif, loop_data, loop_size,
+                def.start_gif, start_data, start_size
+            );
+        } else {
+            ok = animation_load_gif_animation_with_start_loop(
+                def.target_anim,
+                def.loop_gif, loop_data, loop_size,
+                NULL, NULL, 0
+            );
+        }
+
+        if (ok) {
+            loaded_count++;
+            if (start_data != NULL && start_size > 0) {
+                ESP_LOGI("animation", "✅ Loaded GIF animation %s: %s (start) + %s (loop)",
+                         def.logical_name, def.start_gif, def.loop_gif);
+            } else {
+                ESP_LOGI("animation", "✅ Loaded GIF animation %s: %s",
+                         def.logical_name, def.loop_gif);
+            }
+        } else {
+            ESP_LOGE("animation", "❌ Failed to load GIF animation %s", def.logical_name);
+        }
+
+        if (loop_data) {
+            free(loop_data);
+        }
+        if (start_data) {
+            free(start_data);
+        }
+    }
+
+    if (loaded_count == 0) {
+        if (access("/sdcard/test.bin", F_OK) != 0 && access("/sdcard/TEST.BIN", F_OK) != 0) {
+            ESP_LOGE("animation", "test.bin header read failed and file was deleted, skipping all GIF loading");
+            return false;
+        }
+    }
+
+    if (loaded_count > 0) {
+        ESP_LOGI("animation", "🎉 Successfully loaded %d GIF animation(s) from test.bin", loaded_count);
+        return true;
+    } else {
+        ESP_LOGE("animation", "❌ No GIF animations loaded from test.bin");
         return false;
     }
 }

@@ -21,12 +21,34 @@
 namespace {
 constexpr uint32_t kUpdateTaskStackBytes = 16 * 1024;
 constexpr uint32_t kUpdateTaskStackWords = kUpdateTaskStackBytes / sizeof(StackType_t);
+constexpr uint32_t kUpdateTaskStackBytesMin = 12 * 1024;
+constexpr uint32_t kUpdateTaskStackWordsMin = kUpdateTaskStackBytesMin / sizeof(StackType_t);
+constexpr uint32_t kUpdateTaskStackOverheadBytes = 2048;
 
 void LogHeapState(const char* reason) {
     size_t free_heap = heap_caps_get_free_size(MALLOC_CAP_8BIT);
     size_t largest_block = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
     ESP_LOGW(TAG, "%s free_heap=%u largest_block=%u",
              reason, static_cast<unsigned>(free_heap), static_cast<unsigned>(largest_block));
+}
+
+uint32_t SelectUpdateTaskStackWords() {
+    size_t largest_block = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+    if (largest_block >= kUpdateTaskStackBytes + kUpdateTaskStackOverheadBytes) {
+        return kUpdateTaskStackWords;
+    }
+    if (largest_block >= kUpdateTaskStackBytesMin + kUpdateTaskStackOverheadBytes) {
+        ESP_LOGW(TAG,
+                 "Low heap for updater task, using reduced stack: %u bytes (largest_block=%u)",
+                 static_cast<unsigned>(kUpdateTaskStackBytesMin),
+                 static_cast<unsigned>(largest_block));
+        return kUpdateTaskStackWordsMin;
+    }
+    ESP_LOGE(TAG,
+             "Insufficient heap for updater task: need >= %u bytes, largest_block=%u",
+             static_cast<unsigned>(kUpdateTaskStackBytesMin + kUpdateTaskStackOverheadBytes),
+             static_cast<unsigned>(largest_block));
+    return 0;
 }
 } // namespace
 
@@ -83,11 +105,17 @@ void AnimationUpdater::Start() {
     
     ESP_LOGI(TAG, "Starting animation updater");
     
-    // Create background task
+    // Create background task (prefer full stack, fallback to reduced stack if heap is tight)
+    uint32_t stack_words = SelectUpdateTaskStackWords();
+    if (stack_words == 0) {
+        LogHeapState("Start() skipped: insufficient heap:");
+        return;
+    }
+
     BaseType_t ret = xTaskCreate(
         UpdateTask,
         "animation_updater",
-        kUpdateTaskStackWords,  // 16KB stack to accommodate HTTP/TLS and validation
+        stack_words,
         this,
         2,     // Low priority
         &update_task_handle_
@@ -216,13 +244,13 @@ bool AnimationUpdater::ForceUpdateCheck() {
 }
 
 std::string AnimationUpdater::BuildMegaDownloadUrl() {
-    // Direct GCS URL for test.bin scoped by device MAC (uppercase + URL-encoded ':')
+    // Direct GCS URL for test.bin scoped by device MAC (lowercase + URL-encoded ':')
     std::string mac = SystemInfo::GetMacAddress();
-    std::string mac_upper = mac;
-    std::transform(mac_upper.begin(), mac_upper.end(), mac_upper.begin(), [](unsigned char c){ return (unsigned char)std::toupper(c); });
+    std::string mac_lower = mac;
+    std::transform(mac_lower.begin(), mac_lower.end(), mac_lower.begin(), [](unsigned char c){ return (unsigned char)std::tolower(c); });
     std::string mac_encoded;
-    mac_encoded.reserve(mac_upper.size() * 3);
-    for (char c : mac_upper) {
+    mac_encoded.reserve(mac_lower.size() * 3);
+    for (char c : mac_lower) {
         if (c == ':') mac_encoded += "%3A"; else mac_encoded += c;
     }
     return std::string("https://storage.googleapis.com/milu-public/device_bin/") + mac_encoded + "/test.bin";
