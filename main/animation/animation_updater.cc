@@ -447,8 +447,8 @@ void AnimationUpdater::UpdateLoop() {
     ESP_LOGI(TAG, "Animation updater task started");
     
     // Wait 10 seconds to ensure network is fully ready
-    ESP_LOGI(TAG, "Waiting 10 seconds before starting download...");
-    vTaskDelay(pdMS_TO_TICKS(1000));
+    //ESP_LOGI(TAG, "Waiting 10 seconds before starting download...");
+    //vTaskDelay(pdMS_TO_TICKS(1000));
     
     // Build download URL dynamically (uses configured server_url_ or constructs from MAC address)
     std::string url = BuildMegaDownloadUrl();
