@@ -95,6 +95,7 @@ extern "C" void app_main(void)
     ESP_ERROR_CHECK(ret);
     ESP_LOGI(TAG, "NVS flash initialized successfully");
 
+#if !defined(CONFIG_BOARD_TYPE_ECHOEAR)
     ESP_LOGI(TAG, "=== Starting SD card initialization process ===");
     
     // Process SD card startup (initialize, read test.bin, keep mounted for animations)
@@ -117,6 +118,9 @@ extern "C" void app_main(void)
     }
     
     ESP_LOGI(TAG, "=== SD card initialization process completed ===");
+#else
+    ESP_LOGI(TAG, "Skipping SD card startup in app_main for EchoEar (handled in background task)");
+#endif
 
     // NOTE: animation_init_spiffs() is now called from SensecapWatcher constructor
     // after SD card initialization to ensure proper timing

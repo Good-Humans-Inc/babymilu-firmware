@@ -8,6 +8,7 @@
 #include "backlight.h"
 #include "animation/animation.h"
 #include "sd_card.h"
+#include "sd_card_startup.h"
 #include "power_save_timer.h"
 
 #include <wifi_station.h>
@@ -40,6 +41,23 @@
 LV_FONT_DECLARE(font_puhui_20_4);
 LV_FONT_DECLARE(font_awesome_20_4);
 temperature_sensor_handle_t temp_sensor = NULL;
+
+static void SdAnimInitTask(void* /*arg*/) {
+    ESP_LOGI(TAG, "[SD/ANIM] Background init task started on core %d", xPortGetCoreID());
+    
+    if (!SdCard::IsMounted()) {
+        esp_err_t ret = SdCardStartup::ProcessStartup();
+        ESP_LOGI(TAG, "[SD/ANIM] SdCardStartup::ProcessStartup() returned: %s", esp_err_to_name(ret));
+    } else {
+        ESP_LOGI(TAG, "[SD/ANIM] SD card already mounted, skipping startup");
+    }
+    
+    ESP_LOGI(TAG, "[SD/ANIM] === Initializing animations ===");
+    animation_init();
+    ESP_LOGI(TAG, "[SD/ANIM] === Animations initialization completed ===");
+    
+    vTaskDelete(NULL);
+}
 static const st77916_lcd_init_cmd_t vendor_specific_init_yysj[] = {
     {0xF0, (uint8_t []){0x28}, 1, 0},
     {0xF2, (uint8_t []){0x28}, 1, 0},
@@ -1534,20 +1552,10 @@ public:
         InitializeTouchButton();
         ESP_LOGI(TAG, "[TOUCH] InitializeTouchButton() returned");
         
-        // Initialize SD card BEFORE animations to ensure it's available for animation loading
-        ESP_LOGI(TAG, "Initializing SD card before animations...");
-        esp_err_t ret = SdCard::Initialize();
-        if (ret == ESP_OK) {
-            ESP_LOGI(TAG, "SD card initialized successfully before animations");
-        } else {
-            ESP_LOGW(TAG, "SD card initialization failed before animations: %s", esp_err_to_name(ret));
-            ESP_LOGW(TAG, "Animations will not be loaded from SD card");
-        }
-        
-        // Initialize animations (will try SD card if available, otherwise animations won't be loaded)
-        ESP_LOGI(TAG, "=== Initializing animations ===");
-        animation_init();  // This will try SD card first, animations won't be available if SD card fails
-        ESP_LOGI(TAG, "=== Animations initialization completed ===");
+        // Start SD card + animation init in background to allow WiFi startup in parallel.
+        // Pin to core 0 so WiFi (core 1 in your logs) can connect concurrently.
+        ESP_LOGI(TAG, "[SD/ANIM] Starting background init task");
+        xTaskCreatePinnedToCore(SdAnimInitTask, "sd_anim_init", 8192, nullptr, 1, nullptr, 0);
     }
 
     virtual AudioCodec* GetAudioCodec() override {
