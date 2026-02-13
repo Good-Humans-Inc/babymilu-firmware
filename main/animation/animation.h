@@ -33,12 +33,12 @@ typedef enum _AnimationType_e {
     ANIMATION_HAPPY,
     ANIMATION_LAUGH,
     ANIMATION_SAD,
-    ANIMATION_TALK,
     ANIMATION_SILENCE,
     ANIMATION_LISTENING,
     ANIMATION_SMIRK,
     ANIMATION_WIFI,
     ANIMATION_BATTERY,
+    ANIMATION_CRY,
     ANIMATION_NUM
 }AnimationType_e;
 
@@ -55,7 +55,7 @@ Animation_t* animation_get_shy_animation(void);
 Animation_t* animation_get_sleep_animation(void);
 Animation_t* animation_get_laugh_animation(void);
 Animation_t* animation_get_sad_animation(void);
-Animation_t* animation_get_talk_animation(void);
+Animation_t* animation_get_cry_animation(void);
 Animation_t* animation_get_silence_animation(void);
 Animation_t* animation_get_listening_animation(void);
 Animation_t* animation_get_smirk_animation(void);
@@ -81,7 +81,6 @@ bool animation_load_shy_from_sd_card(void);
 bool animation_load_sleep_from_sd_card(void);
 bool animation_load_laugh_from_sd_card(void);
 bool animation_load_sad_from_sd_card(void);
-bool animation_load_talk_from_sd_card(void);
 
 // GIF loading functions
 bool animation_load_gifs_from_test_bin(void);
