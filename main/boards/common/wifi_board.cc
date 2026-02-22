@@ -14,8 +14,6 @@
 #include <tls_transport.h>
 #include <web_socket.h>
 #include <esp_log.h>
-#include <esp_event.h>
-#include <esp_wifi.h>
 
 #include <wifi_station.h>
 #include <wifi_configuration_ap.h>
@@ -24,92 +22,6 @@
 #include "display/lcd_display.h"
 
 static const char *TAG = "WifiBoard";
-
-namespace {
-
-const char* WifiDisconnectReasonToString(uint8_t reason) {
-    switch (reason) {
-        case WIFI_REASON_UNSPECIFIED: return "UNSPECIFIED";
-        case WIFI_REASON_AUTH_EXPIRE: return "AUTH_EXPIRE";
-        case WIFI_REASON_AUTH_LEAVE: return "AUTH_LEAVE";
-        case WIFI_REASON_ASSOC_EXPIRE: return "ASSOC_EXPIRE";
-        case WIFI_REASON_ASSOC_TOOMANY: return "ASSOC_TOOMANY";
-        case WIFI_REASON_NOT_AUTHED: return "NOT_AUTHED";
-        case WIFI_REASON_NOT_ASSOCED: return "NOT_ASSOCED";
-        case WIFI_REASON_ASSOC_LEAVE: return "ASSOC_LEAVE";
-        case WIFI_REASON_ASSOC_NOT_AUTHED: return "ASSOC_NOT_AUTHED";
-        case WIFI_REASON_DISASSOC_PWRCAP_BAD: return "DISASSOC_PWRCAP_BAD";
-        case WIFI_REASON_DISASSOC_SUPCHAN_BAD: return "DISASSOC_SUPCHAN_BAD";
-        case WIFI_REASON_IE_INVALID: return "IE_INVALID";
-        case WIFI_REASON_MIC_FAILURE: return "MIC_FAILURE";
-        case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT: return "4WAY_HANDSHAKE_TIMEOUT";
-        case WIFI_REASON_GROUP_KEY_UPDATE_TIMEOUT: return "GROUP_KEY_UPDATE_TIMEOUT";
-        case WIFI_REASON_IE_IN_4WAY_DIFFERS: return "IE_IN_4WAY_DIFFERS";
-        case WIFI_REASON_GROUP_CIPHER_INVALID: return "GROUP_CIPHER_INVALID";
-        case WIFI_REASON_PAIRWISE_CIPHER_INVALID: return "PAIRWISE_CIPHER_INVALID";
-        case WIFI_REASON_AKMP_INVALID: return "AKMP_INVALID";
-        case WIFI_REASON_UNSUPP_RSN_IE_VERSION: return "UNSUPP_RSN_IE_VERSION";
-        case WIFI_REASON_INVALID_RSN_IE_CAP: return "INVALID_RSN_IE_CAP";
-        case WIFI_REASON_802_1X_AUTH_FAILED: return "802_1X_AUTH_FAILED";
-        case WIFI_REASON_CIPHER_SUITE_REJECTED: return "CIPHER_SUITE_REJECTED";
-        case WIFI_REASON_BEACON_TIMEOUT: return "BEACON_TIMEOUT";
-        case WIFI_REASON_NO_AP_FOUND: return "NO_AP_FOUND";
-        case WIFI_REASON_AUTH_FAIL: return "AUTH_FAIL";
-        case WIFI_REASON_ASSOC_FAIL: return "ASSOC_FAIL";
-        case WIFI_REASON_HANDSHAKE_TIMEOUT: return "HANDSHAKE_TIMEOUT";
-        case WIFI_REASON_CONNECTION_FAIL: return "CONNECTION_FAIL";
-        default: return "UNKNOWN";
-    }
-}
-
-void WifiDiagEventHandler(void* /*arg*/, esp_event_base_t event_base, int32_t event_id, void* event_data) {
-    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
-        auto* disconnected = static_cast<wifi_event_sta_disconnected_t*>(event_data);
-        if (disconnected != nullptr) {
-            ESP_LOGW(TAG,
-                "[WiFiDiag] STA disconnected: reason=%u (%s), ssid=%.*s, bssid=" MACSTR,
-                static_cast<unsigned>(disconnected->reason),
-                WifiDisconnectReasonToString(disconnected->reason),
-                disconnected->ssid_len,
-                reinterpret_cast<const char*>(disconnected->ssid),
-                MAC2STR(disconnected->bssid));
-        } else {
-            ESP_LOGW(TAG, "[WiFiDiag] STA disconnected with null event data");
-        }
-    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_CONNECTED) {
-        auto* connected = static_cast<wifi_event_sta_connected_t*>(event_data);
-        if (connected != nullptr) {
-            ESP_LOGI(TAG,
-                "[WiFiDiag] STA connected: ssid=%.*s, channel=%u, authmode=%u",
-                connected->ssid_len,
-                reinterpret_cast<const char*>(connected->ssid),
-                static_cast<unsigned>(connected->channel),
-                static_cast<unsigned>(connected->authmode));
-        }
-    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
-        auto* got_ip = static_cast<ip_event_got_ip_t*>(event_data);
-        if (got_ip != nullptr) {
-            ESP_LOGI(TAG, "[WiFiDiag] STA got IP: " IPSTR, IP2STR(&got_ip->ip_info.ip));
-        }
-    }
-}
-
-void EnsureWifiDiagEventHandlerRegistered() {
-    static bool registered = false;
-    static esp_event_handler_instance_t wifi_event_instance;
-    static esp_event_handler_instance_t ip_event_instance;
-    if (registered) {
-        return;
-    }
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(
-        WIFI_EVENT, ESP_EVENT_ANY_ID, &WifiDiagEventHandler, nullptr, &wifi_event_instance));
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(
-        IP_EVENT, IP_EVENT_STA_GOT_IP, &WifiDiagEventHandler, nullptr, &ip_event_instance));
-    registered = true;
-    ESP_LOGI(TAG, "[WiFiDiag] Event diagnostics enabled");
-}
-
-}  // namespace
 
 WifiBoard::WifiBoard() {
     Settings settings("wifi", true);
@@ -198,8 +110,6 @@ void WifiBoard::EnterWifiConfigModeViaBLE() {
 
 
 void WifiBoard::StartNetwork() {
-    EnsureWifiDiagEventHandlerRegistered();
-
     // If no WiFi SSID is configured, use BLE for WiFi configuration
     auto& ssid_manager = SsidManager::GetInstance();
     auto ssid_list = ssid_manager.GetSsidList();
