@@ -20,6 +20,7 @@
 #include <ssid_manager.h>
 #include "animation/animation.h"
 #include "display/lcd_display.h"
+#include "error_log_uploader.h"
 
 static const char *TAG = "WifiBoard";
 
@@ -91,6 +92,9 @@ void WifiBoard::EnterWifiConfigModeViaBLE() {
         InitializeBleServer();
     }
     
+    // Enable error logging to SD card during WiFi config mode
+    ErrorLogUploader::EnableErrorLoggingToSD();
+    
     auto& application = Application::GetInstance();
     application.SetDeviceState(kDeviceStateWifiConfiguring);
     
@@ -131,6 +135,9 @@ void WifiBoard::StartNetwork() {
         if (!ble_initialized_) {
             InitializeBleServer();
         }
+        
+        // Enable error logging to SD card during WiFi config mode
+        ErrorLogUploader::EnableErrorLoggingToSD();
         
         auto& application = Application::GetInstance();
         application.SetDeviceState(kDeviceStateWifiConfiguring);
@@ -186,6 +193,20 @@ void WifiBoard::StartNetwork() {
         display->ShowNotification(Lang::Strings::SCANNING_WIFI, 30000);
     });
     wifi_station.OnConnect([this](const std::string& ssid) {
+        auto& ssid_manager = SsidManager::GetInstance();
+        auto ssid_list = ssid_manager.GetSsidList();
+        bool matched_ssid = false;
+        for (const auto& item : ssid_list) {
+            if (item.ssid == ssid) {
+                ESP_LOGI(TAG, "Connecting with SSID='%s', Password='%s'", item.ssid.c_str(), item.password.c_str());
+                matched_ssid = true;
+                break;
+            }
+        }
+        if (!matched_ssid) {
+            ESP_LOGW(TAG, "Connecting with SSID='%s', password not found in stored credentials", ssid.c_str());
+        }
+
         auto display = Board::GetInstance().GetDisplay();
         std::string notification = Lang::Strings::CONNECT_TO;
         notification += ssid;
@@ -245,7 +266,7 @@ void WifiBoard::StartNetwork() {
     wifi_station.Start();
 
     // Try to connect to WiFi, if failed, use BLE for configuration
-    if (!wifi_station.WaitForConnected(15 * 1000)) {
+    if (!wifi_station.WaitForConnected(30 * 1000)) {
         wifi_station.Stop();
         wifi_config_mode_ = true;
         ESP_LOGI(TAG, "WiFi connection failed, using BLE for configuration");
@@ -254,6 +275,9 @@ void WifiBoard::StartNetwork() {
         if (!ble_initialized_) {
             InitializeBleServer();
         }
+        
+        // Enable error logging to SD card during WiFi config mode
+        ErrorLogUploader::EnableErrorLoggingToSD();
         
         auto& application = Application::GetInstance();
         application.SetDeviceState(kDeviceStateWifiConfiguring);

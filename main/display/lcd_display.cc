@@ -1039,8 +1039,6 @@ void LcdDisplay::SetPreviewImage(const lv_img_dsc_t *img_dsc)
 void LcdDisplay::CreateSystemMessage(const char* message)
 {
     ESP_LOGI("LcdDisplay", "CreateSystemMessage called: message='%s'", message ? message : "NULL");
-    // Disabled: use overlay bubble only for volume.
-    return;
     DisplayLockGuard lock(this);
     if (content_ == nullptr)
     {

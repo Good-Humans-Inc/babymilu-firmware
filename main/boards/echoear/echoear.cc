@@ -1401,6 +1401,7 @@ private:
         xTaskCreate([](void* arg) {
             EchoEar* board = static_cast<EchoEar*>(arg);
             bool was_always_powersaving = false;
+            int log_counter = 0;  // Counter for 5-minute battery logging (60 iterations * 5 seconds = 5 minutes)
             
             while (true) {
                 int battery_level = 0;
@@ -1453,6 +1454,15 @@ private:
                     }
                     
                     was_always_powersaving = always_powersaving;
+
+                    // Log battery percentage every 30 seconds (6 iterations * 5 seconds)
+                    log_counter++;
+                    if (log_counter >= 6) {
+                        log_counter = 0;
+                        // Use ESP_LOGE so it goes through error logging system to /sdcard/err.txt
+                        ESP_LOGE(TAG, "[BATTERY] %d%%, %s", 
+                                battery_level, charging ? "charging" : (discharging ? "discharging" : "idle"));
+                    }
                 }
 
                 // Check every 5 seconds
@@ -1622,10 +1632,10 @@ public:
         if (level < 0) level = 0;
         if (level > 100) level = 100;
         
-        // Log battery status every 5 seconds
+        // Log battery status every 15 seconds
         static int64_t last_log_time = 0;
         int64_t current_time = esp_timer_get_time() / 1000; // Convert to milliseconds
-        const int64_t LOG_INTERVAL_MS = 5000; // 5 seconds
+        const int64_t LOG_INTERVAL_MS = 15000; // 15 seconds
         
         if (current_time - last_log_time >= LOG_INTERVAL_MS) {
             ESP_LOGI(TAG, "[BATTERY] Voltage: %d mV, Current: %d mA, Level: %d%%, Charging: %s, Discharging: %s",
