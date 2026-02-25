@@ -1497,8 +1497,9 @@ private:
     void InitializeButtons() {
         boot_button_.OnClick([this]() {
             auto& app = Application::GetInstance();
-            if (app.GetDeviceState() == kDeviceStateStarting && !WifiStation::GetInstance().IsConnected()) {
-                ResetWifiConfiguration();
+            if (app.GetDeviceState() == kDeviceStateStarting) {
+                ESP_LOGI(TAG, "Ignoring BOOT click during startup");
+                return;
             }
             if (power_save_timer_) {
                 // If in sleep mode, wake up and directly start talking
