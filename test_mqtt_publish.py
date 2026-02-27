@@ -108,6 +108,9 @@ Examples:
   # Trigger remote animation update
   python test_mqtt_publish.py --type "remote_anim_update" --message ""
   
+  # Trigger WiFi reconfiguration via NimBLE (device will reboot)
+  python test_mqtt_publish.py --type "wifi_reconfig_nimble" --message "" --mac "90:e5:b1:a8:ad:24"
+  
   # Adjust volume to 50
   python test_mqtt_publish.py --type "adjust_volume" --volume 50
   
@@ -118,8 +121,8 @@ Examples:
     
     parser.add_argument(
         "--broker",
-        default="34.30.176.148",
-        help="MQTT broker hostname or IP (default: 34.30.176.148)"
+        default="136.111.52.199",
+        help="MQTT broker hostname or IP (default: 136.111.52.199)"
     )
     
     parser.add_argument(
