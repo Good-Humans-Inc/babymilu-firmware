@@ -263,14 +263,18 @@ public:
         delete[] read_buffer_;
     }
     void Printcharge() {
+        if (!enabled_) {
+            return;
+        }
         if (TryReadRegs(0x08, read_buffer_, 2) != ESP_OK) {
-            ESP_LOGW(TAG, "[BATTERY] Read voltage failed");
+            HandleReadFailure("voltage");
             return;
         }
         if (TryReadRegs(0x0c, read_buffer_ + 2, 2) != ESP_OK) {
-            ESP_LOGW(TAG, "[BATTERY] Read current failed");
+            HandleReadFailure("current");
             return;
         }
+        consecutive_read_failures_ = 0;
         ESP_ERROR_CHECK(temperature_sensor_get_celsius(temp_sensor, &tsens_value));
 
         // Read voltage and current values (currently unused but available for future use)
@@ -280,9 +284,14 @@ public:
     
     // Get battery voltage in millivolts
     uint16_t GetVoltage() {
-        if (TryReadRegs(0x08, read_buffer_, 2) != ESP_OK) {
+        if (!enabled_) {
             return 0;
         }
+        if (TryReadRegs(0x08, read_buffer_, 2) != ESP_OK) {
+            HandleReadFailure("voltage");
+            return 0;
+        }
+        consecutive_read_failures_ = 0;
         uint16_t voltage_raw = (read_buffer_[1] << 8) | read_buffer_[0];
         // Voltage register format: typically in units of 0.1mV or similar
         // Assuming raw value needs scaling - adjust based on actual chip specifications
@@ -292,9 +301,14 @@ public:
     
     // Get battery current in milliamps (positive = charging, negative = discharging)
     int16_t GetCurrent() {
-        if (TryReadRegs(0x0c, read_buffer_ + 2, 2) != ESP_OK) {
+        if (!enabled_) {
             return 0;
         }
+        if (TryReadRegs(0x0c, read_buffer_ + 2, 2) != ESP_OK) {
+            HandleReadFailure("current");
+            return 0;
+        }
+        consecutive_read_failures_ = 0;
         int16_t current_raw = (int16_t)((read_buffer_[3] << 8) | read_buffer_[2]);
         // Current register format: typically in units of 0.1mA or similar
         // Adjust scaling based on actual chip specifications
@@ -309,8 +323,25 @@ public:
         }
     }
 
+    bool IsAvailable() const {
+        return enabled_;
+    }
+
 private:
+    void HandleReadFailure(const char* field) {
+        consecutive_read_failures_++;
+        if (consecutive_read_failures_ >= kMaxConsecutiveReadFailures) {
+            enabled_ = false;
+            ESP_LOGW(TAG, "[BATTERY] Charge IC unresponsive after repeated %s read failures, battery reporting disabled", field);
+            return;
+        }
+        ESP_LOGW(TAG, "[BATTERY] Read %s failed", field);
+    }
+
+    static constexpr uint8_t kMaxConsecutiveReadFailures = 3;
     uint8_t* read_buffer_ = nullptr;
+    uint8_t consecutive_read_failures_ = 0;
+    bool enabled_ = true;
 };
 
 
@@ -1182,6 +1213,14 @@ private:
             return;
         }
         charge_ = new Charge(i2c_bus_, 0x55);
+        // If the first read already fails, disable battery reporting to avoid
+        // continuous I2C NACK spam from periodic battery polling.
+        if (charge_->GetVoltage() == 0) {
+            ESP_LOGW(TAG, "[BATTERY] Charge IC unresponsive, battery reporting disabled");
+            delete charge_;
+            charge_ = nullptr;
+            return;
+        }
         xTaskCreatePinnedToCore(Charge::TaskFunction, "batterydecTask", 3 * 1024, charge_, 6, NULL, 0);
     }
 
@@ -1599,7 +1638,7 @@ public:
     }
 
     virtual bool GetBatteryLevel(int &level, bool& charging, bool& discharging) override {
-        if (charge_ == nullptr) {
+        if (charge_ == nullptr || !charge_->IsAvailable()) {
             return false;
         }
         
