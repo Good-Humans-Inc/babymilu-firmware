@@ -17,6 +17,34 @@
 #define MAX_RECONNECT_COUNT 3
 #define RECONNECT_INTERVAL_MS 15000
 
+namespace {
+
+std::string BytesToHex(const uint8_t* data, size_t len) {
+    static const char kHex[] = "0123456789ABCDEF";
+    std::string hex;
+    if (len == 0) {
+        return hex;
+    }
+    hex.reserve(len * 3 - 1);
+    for (size_t i = 0; i < len; ++i) {
+        if (i > 0) {
+            hex.push_back(' ');
+        }
+        hex.push_back(kHex[data[i] >> 4]);
+        hex.push_back(kHex[data[i] & 0x0F]);
+    }
+    return hex;
+}
+
+void LogSsidBytes(const char* label, const uint8_t* ssid, size_t ssid_len) {
+    ESP_LOGI(TAG, "%s len=%u hex=[%s]",
+             label,
+             static_cast<unsigned>(ssid_len),
+             BytesToHex(ssid, ssid_len).c_str());
+}
+
+}  // namespace
+
 WifiStation& WifiStation::GetInstance() {
     static WifiStation instance;
     return instance;
@@ -174,6 +202,13 @@ void WifiStation::HandleScanResult() {
                 ap_record.bssid[0], ap_record.bssid[1], ap_record.bssid[2],
                 ap_record.bssid[3], ap_record.bssid[4], ap_record.bssid[5],
                 ap_record.rssi, ap_record.primary, ap_record.authmode);
+            size_t scanned_ssid_len = strnlen(reinterpret_cast<const char*>(ap_record.ssid), sizeof(ap_record.ssid));
+            LogSsidBytes("Found AP SSID bytes",
+                         reinterpret_cast<const uint8_t*>(ap_record.ssid),
+                         scanned_ssid_len);
+            LogSsidBytes("Stored SSID bytes",
+                         reinterpret_cast<const uint8_t*>(item.ssid.data()),
+                         item.ssid.size());
             WifiApRecord record = {
                 .ssid = item.ssid,
                 .password = item.password,
@@ -209,6 +244,15 @@ void WifiStation::StartConnect() {
     bzero(&wifi_config, sizeof(wifi_config));
     strcpy((char *)wifi_config.sta.ssid, ap_record.ssid.c_str());
     strcpy((char *)wifi_config.sta.password, ap_record.password.c_str());
+    // Compatibility profile for consumer hotspots (including Windows hotspot):
+    // - allow WPA/WPA2 and above
+    // - support PMF when AP offers it, but do not require PMF
+    wifi_config.sta.threshold.authmode = WIFI_AUTH_WPA_PSK;
+    wifi_config.sta.pmf_cfg.capable = true;
+    wifi_config.sta.pmf_cfg.required = false;
+    LogSsidBytes("Target SSID bytes before connect",
+                 reinterpret_cast<const uint8_t*>(wifi_config.sta.ssid),
+                 strnlen(reinterpret_cast<const char*>(wifi_config.sta.ssid), sizeof(wifi_config.sta.ssid)));
     if (remember_bssid_) {
         wifi_config.sta.channel = ap_record.channel;
         memcpy(wifi_config.sta.bssid, ap_record.bssid, 6);
@@ -253,6 +297,17 @@ void WifiStation::WifiEventHandler(void* arg, esp_event_base_t event_base, int32
     } else if (event_id == WIFI_EVENT_SCAN_DONE) {
         this_->HandleScanResult();
     } else if (event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        auto* disc = static_cast<wifi_event_sta_disconnected_t*>(event_data);
+        if (disc != nullptr) {
+            ESP_LOGW(TAG,
+                     "Disconnected from %s, reason=%d, rssi=%d",
+                     reinterpret_cast<const char*>(disc->ssid),
+                     disc->reason,
+                     disc->rssi);
+            LogSsidBytes("Disconnected SSID bytes",
+                         reinterpret_cast<const uint8_t*>(disc->ssid),
+                         disc->ssid_len);
+        }
         xEventGroupClearBits(this_->event_group_, WIFI_EVENT_CONNECTED);
         if (this_->reconnect_count_ < MAX_RECONNECT_COUNT) {
             this_->reconnect_count_++;
