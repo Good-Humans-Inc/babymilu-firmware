@@ -1,6 +1,14 @@
 tmp/
 components/
 managed_components/
+!managed_components/
+managed_components/*
+!managed_components/78__esp-wifi-connect/
+managed_components/78__esp-wifi-connect/*
+!managed_components/78__esp-wifi-connect/wifi_station.cc
+!managed_components/78__esp-wifi-connect/include/
+managed_components/78__esp-wifi-connect/include/*
+!managed_components/78__esp-wifi-connect/include/wifi_station.h
 build/
 .vscode/
 .devcontainer/

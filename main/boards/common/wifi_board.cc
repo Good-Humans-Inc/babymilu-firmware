@@ -24,6 +24,34 @@
 
 static const char *TAG = "WifiBoard";
 
+// Keep newly added WiFi credentials at the lowest priority so existing
+// networks are tried first on startup.
+static void SaveCredentialAsLowestPriority(const std::string& ssid, const std::string& password) {
+    auto& ssid_manager = SsidManager::GetInstance();
+    auto current = ssid_manager.GetSsidList();
+
+    // Build target order: all existing (except same SSID) + new SSID at tail.
+    struct Cred {
+        std::string ssid;
+        std::string password;
+    };
+    std::vector<Cred> target;
+    target.reserve(current.size() + 1);
+    for (const auto& item : current) {
+        if (item.ssid != ssid) {
+            target.push_back({item.ssid, item.password});
+        }
+    }
+    target.push_back({ssid, password});
+
+    // Rebuild list in reverse order to place target head first because
+    // SsidManager::AddSsid currently gives newly added entries higher priority.
+    ssid_manager.Clear();
+    for (auto it = target.rbegin(); it != target.rend(); ++it) {
+        ssid_manager.AddSsid(it->ssid, it->password);
+    }
+}
+
 WifiBoard::WifiBoard() {
     Settings settings("wifi", true);
     // Comment out force_ap mode - use BLE instead
@@ -297,7 +325,9 @@ void WifiBoard::StartNetwork() {
     wifi_station.Start();
 
     // Try to connect to WiFi, if failed, use BLE for configuration
-    if (!wifi_station.WaitForConnected(30 * 1000)) {
+    // Keep this longer than per-SSID retry window (3 retries x 15s) so
+    // WifiStation can finish retries before BLE fallback.
+    if (!wifi_station.WaitForConnected(60 * 1000)) {
         wifi_station.Stop();
         wifi_config_mode_ = true;
         ESP_LOGI(TAG, "WiFi connection failed, using BLE for configuration");
@@ -642,9 +672,8 @@ void WifiBoard::ParseWifiCredentials(const char* data) {
         if (!temp_ssid_.empty()) {
             ESP_LOGI(TAG, "WiFi credentials received via BLE: %s", temp_ssid_.c_str());
             
-            // Save credentials
-            auto& ssid_manager = SsidManager::GetInstance();
-            ssid_manager.AddSsid(temp_ssid_, password);
+            // Save credentials with lowest priority (existing SSIDs first)
+            SaveCredentialAsLowestPriority(temp_ssid_, password);
             
             ble_server_send_data("WiFi credentials saved", 25);
             
@@ -676,9 +705,8 @@ void WifiBoard::ParseWifiCredentials(const char* data) {
             std::string password = credentials.substr(colon_pos + 1);
             ESP_LOGI(TAG, "WiFi credentials received via BLE: %s", ssid.c_str());
             
-            // Save credentials
-            auto& ssid_manager = SsidManager::GetInstance();
-            ssid_manager.AddSsid(ssid, password);
+            // Save credentials with lowest priority (existing SSIDs first)
+            SaveCredentialAsLowestPriority(ssid, password);
             
             ble_server_send_data("WiFi credentials saved", 25);
             
