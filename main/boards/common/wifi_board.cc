@@ -114,6 +114,37 @@ void WifiBoard::EnterWifiConfigModeViaBLE() {
 
 
 void WifiBoard::StartNetwork() {
+    // Allow remote-triggered BLE onboarding after reboot without wiping credentials.
+    {
+        Settings settings("wifi", true);
+        if (settings.GetInt("force_ble_cfg") == 1) {
+            ESP_LOGI(TAG, "force_ble_cfg is set, entering BLE WiFi configuration mode");
+            settings.SetInt("force_ble_cfg", 0);
+            wifi_config_mode_ = true;
+
+            if (!ble_initialized_) {
+                InitializeBleServer();
+            }
+
+            ErrorLogUploader::EnableErrorLoggingToSD();
+
+            auto& application = Application::GetInstance();
+            application.SetDeviceState(kDeviceStateWifiConfiguring);
+
+            std::string hint = "Connect to BLE device 'BabyMilu' to add WiFi credentials";
+            application.Alert("WiFi Configuration", hint.c_str(), "", Lang::Sounds::P3_WIFICONFIG);
+
+            while (wifi_config_mode_) {
+                vTaskDelay(pdMS_TO_TICKS(1000));
+            }
+
+            // Credentials were updated in BLE flow; restart cleanly.
+            ESP_LOGI(TAG, "BLE configuration complete from force_ble_cfg mode, restarting system");
+            esp_restart();
+            return;
+        }
+    }
+
     // If no WiFi SSID is configured, use BLE for WiFi configuration
     auto& ssid_manager = SsidManager::GetInstance();
     auto ssid_list = ssid_manager.GetSsidList();
@@ -420,6 +451,20 @@ void WifiBoard::ClearWifiConfiguration() {
     }
     
     ESP_LOGI(TAG, "WiFi configuration cleared successfully");
+}
+
+void WifiBoard::EnterBleWifiConfigMode() {
+    ESP_LOGI(TAG, "Entering BLE WiFi config mode (keep existing credentials, reboot first)");
+
+    // Persist intent and reboot into a clean boot path to avoid NimBLE runtime init
+    // failures while network stacks are active.
+    {
+        Settings settings("wifi", true);
+        settings.SetInt("force_ble_cfg", 1);
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(300));
+    esp_restart();
 }
 
 std::string WifiBoard::GetDeviceStatusJson() {
