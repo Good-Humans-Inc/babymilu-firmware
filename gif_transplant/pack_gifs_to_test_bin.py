@@ -40,7 +40,7 @@ from pathlib import Path
 # Animation names in order - all 10 main animations to load from SD card
 # Question has been removed, these are the main animations
 ANIMATION_NAMES = [
-    "normal",      # ANIMATION_STATIC_NORMAL / ANIMATION_NORMAL
+    "normal",      # ANIMATION_NORMAL
     "embarrass",   # ANIMATION_EMBARRESSED
     "fire",        # ANIMATION_FIRE
     "inspiration", # ANIMATION_INSPIRATION

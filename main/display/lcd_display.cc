@@ -1225,17 +1225,20 @@ void LcdDisplay::SetEmotion(const char *emotion)
 
     // LLM emotion mapping plus app/utility animations; all others map to normal (still).
     static const std::vector<Emotion> emotions = {
+        {ANIMATION_NORMAL, "normal"},
         {ANIMATION_SMIRK, "smirk"},
-        {ANIMATION_HAPPY, "heart"},
-        {ANIMATION_EMBARRESSED, "blush"},
+        {ANIMATION_HEARTY, "heart"},
+        {ANIMATION_HEARTY, "happy"},
+        {ANIMATION_BLUSH, "blush"},
+        {ANIMATION_BLUSH, "embarressed"},
         {ANIMATION_SAD, "sad"},
         {ANIMATION_LAUGH, "laugh"},
         {ANIMATION_SLEEP, "sleep"},
         {ANIMATION_SLEEP, "sleepy"},
         {ANIMATION_SLEEP, "relaxed"},
-        {ANIMATION_INSPIRATION, "starry"},
+        {ANIMATION_STARRY, "starry"},
         {ANIMATION_CRY, "cry"},
-        {ANIMATION_FIRE, "angry"},
+        {ANIMATION_ANGRY, "angry"},
         {ANIMATION_LISTENING, "listening"},
         {ANIMATION_SILENCE, "silence"},
         {ANIMATION_WIFI, "wifi"},
@@ -1282,8 +1285,8 @@ void LcdDisplay::SetEmotion(const char *emotion)
     }
     else
     {
-        ESP_LOGW(TAG, "***** Emotion unknown: %s -> default animation %d (ANIMATION_STATIC_NORMAL) *****", emotion, (int)ANIMATION_STATIC_NORMAL);
-        animation_set_now_animation(ANIMATION_STATIC_NORMAL);
+        ESP_LOGW(TAG, "***** Emotion unknown: %s -> default animation %d (ANIMATION_NORMAL) *****", emotion, (int)ANIMATION_NORMAL);
+        animation_set_now_animation(ANIMATION_NORMAL);
     }
 
 #if !CONFIG_USE_WECHAT_MESSAGE_STYLE

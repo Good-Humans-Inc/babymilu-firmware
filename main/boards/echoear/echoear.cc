@@ -432,7 +432,7 @@ private:
     PowerSaveTimer* power_save_timer_ = nullptr;
     esp_timer_handle_t emotion_reset_timer_ = nullptr;  // Timer to reset emotion to previous state after one animation cycle
     esp_timer_handle_t volume_message_timer_ = nullptr;  // Timer to clear volume message
-    std::string previous_emotion_ = "neutral";  // Store previous emotion string to restore
+    std::string previous_emotion_ = "normal";  // Store previous emotion string to restore
     int previous_volume_ = -1;  // Store volume before muting (for restore on unmute)
 
     void InitializeVolumeMessageTimer() {
@@ -856,12 +856,12 @@ private:
                         esp_timer_stop(board->emotion_reset_timer_);
                     }
 
-                    // Store current emotion state - default to "neutral" if unknown
-                    // (We can't easily detect the current emotion, so default to neutral)
-                    board->previous_emotion_ = "neutral";
+                    // Store current emotion state - default to "normal" if unknown
+                    // (We can't easily detect the current emotion, so default to normal)
+                    board->previous_emotion_ = "normal";
 
                     // Randomly select one of three emotions
-                    const char* emotions[] = {"angry", "happy", "embarrassed"};
+                    const char* emotions[] = {"angry", "happy", "embarressed"};
                     uint32_t random_index = esp_random() % 3;
                     const char* selected_emotion = emotions[random_index];
 
@@ -1420,7 +1420,7 @@ private:
 
             auto display = GetDisplay();
             if (display) {
-                display->SetEmotion("neutral");  // Restore to neutral animation (maps to ANIMATION_STATIC_NORMAL)
+                display->SetEmotion("normal");  // Restore to normal animation (maps to ANIMATION_NORMAL)
             }
             // Ensure application state is idle after waking from sleep
             auto& app = Application::GetInstance();

@@ -409,7 +409,7 @@ void Application::DismissAlert()
     {
         auto display = Board::GetInstance().GetDisplay();
         display->SetStatus(Lang::Strings::STANDBY);
-        display->SetEmotion("neutral");
+        display->SetEmotion("normal");
         // DISABLED: Comment out transcript display to reduce memory usage
         // display->SetChatMessage("system", "");
     }
@@ -1710,13 +1710,13 @@ void Application::SetDeviceState(DeviceState state)
     case kDeviceStateUnknown:
     case kDeviceStateIdle:
         display->SetStatus(Lang::Strings::STANDBY);
-        display->SetEmotion("neutral");
+        display->SetEmotion("normal");
         audio_processor_->Stop();
         wake_word_->StartDetection();
         break;
     case kDeviceStateConnecting:
         display->SetStatus(Lang::Strings::CONNECTING);
-        display->SetEmotion("neutral");
+        display->SetEmotion("normal");
         // DISABLED: Comment out transcript display to reduce memory usage
         // display->SetChatMessage("system", "");
         timestamp_queue_.clear();

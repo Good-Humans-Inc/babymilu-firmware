@@ -104,7 +104,7 @@ static Animation_t sd_battery = {0};
 // Function to get the appropriate animation (SD card only)
 Animation_t* get_animation(int index) {
     // Check WiFi and battery status for normal animations
-    if (index == ANIMATION_STATIC_NORMAL || index == ANIMATION_NORMAL) {
+    if (index == ANIMATION_NORMAL) {
         // First check WiFi connection - if disconnected, show wifi animation
         auto& wifi_station = WifiStation::GetInstance();
         if (!wifi_station.IsConnected()) {
@@ -139,37 +139,35 @@ Animation_t* get_animation(int index) {
     }
     
     switch(index) {
-        case 0: // ANIMATION_STATIC_NORMAL
+        case ANIMATION_NORMAL:
             return animation_get_normal_animation();
-        case 1: // ANIMATION_EMBARRESSED
+        case ANIMATION_BLUSH:
             return animation_get_embarrass_animation();
-        case 2: // ANIMATION_FIRE
+        case ANIMATION_ANGRY:
             return animation_get_fire_animation();
-        case 3: // ANIMATION_INSPIRATION
+        case ANIMATION_STARRY:
             return animation_get_inspiration_animation();
-        case 4: // ANIMATION_NORMAL
-            return animation_get_normal_animation();
-        case 5: // ANIMATION_SHY
+        case ANIMATION_SHY:
             return animation_get_shy_animation();
-        case 6: // ANIMATION_SLEEP
+        case ANIMATION_SLEEP:
             return animation_get_sleep_animation();
-        case 7: // ANIMATION_HAPPY
+        case ANIMATION_HEARTY:
             return animation_get_happy_animation();
-        case 8: // ANIMATION_LAUGH
+        case ANIMATION_LAUGH:
             return animation_get_laugh_animation();
-        case 9: // ANIMATION_SAD
+        case ANIMATION_SAD:
             return animation_get_sad_animation();
-        case 10: // ANIMATION_SILENCE
+        case ANIMATION_SILENCE:
             return animation_get_silence_animation();
-        case 11: // ANIMATION_LISTENING
+        case ANIMATION_LISTENING:
             return animation_get_listening_animation();
-        case 12: // ANIMATION_SMIRK
+        case ANIMATION_SMIRK:
             return animation_get_smirk_animation();
-        case 13: // ANIMATION_WIFI
+        case ANIMATION_WIFI:
             return animation_get_wifi_animation();
-        case 14: // ANIMATION_BATTERY
+        case ANIMATION_BATTERY:
             return animation_get_battery_animation();
-        case 15: // ANIMATION_CRY
+        case ANIMATION_CRY:
             return animation_get_cry_animation();
         default:
             return animation_get_normal_animation();
@@ -178,14 +176,13 @@ Animation_t* get_animation(int index) {
 
 // Animation array is no longer used - use get_animation() function instead
 Animation_t *animations[] = {
-    NULL,  // ANIMATION_STATIC_NORMAL
-    NULL,  // ANIMATION_EMBARRESSED
-    NULL,  // ANIMATION_FIRE
-    NULL,  // ANIMATION_INSPIRATION
     NULL,  // ANIMATION_NORMAL
+    NULL,  // ANIMATION_BLUSH
+    NULL,  // ANIMATION_ANGRY
+    NULL,  // ANIMATION_STARRY
     NULL,  // ANIMATION_SHY
     NULL,  // ANIMATION_SLEEP
-    NULL,  // ANIMATION_HAPPY
+    NULL,  // ANIMATION_HEARTY
     NULL,  // ANIMATION_LAUGH
     NULL,  // ANIMATION_SAD
     NULL,  // ANIMATION_SILENCE
@@ -196,7 +193,7 @@ Animation_t *animations[] = {
     NULL   // ANIMATION_CRY
 };
 
-static int now_animation = 0;
+static int now_animation = ANIMATION_NORMAL;
 int pos = 0;
 TaskHandle_t animation_task_handle = nullptr;
 static bool animation_locked_by_silence = false;  // Lock animation when volume is 0
@@ -205,8 +202,8 @@ static bool animation_locked_by_silence = false;  // Lock animation when volume 
 // Helper function to get animation name string
 static const char* get_animation_name(int animation_index) {
         const char* anim_names[] = {
-        "STATIC_NORMAL", "EMBARRESSED", "FIRE", "INSPIRATION", "NORMAL",
-        "SHY", "SLEEP", "HAPPY", "LAUGH", "SAD", "SILENCE",
+        "NORMAL", "BLUSH", "ANGRY", "STARRY", "SHY",
+        "SLEEP", "HEARTY", "LAUGH", "SAD", "SILENCE",
         "LISTENING", "SMIRK", "WIFI", "BATTERY", "CRY"
     };
     
@@ -364,8 +361,8 @@ void animation_set_now_animation(int animation)
     }
     if (animation < 0 || animation >= ANIMATION_NUM)
     {
-        ESP_LOGW("animation_set_now_animation", "Invalid animation index: %d, using neutral", animation);
-        animation = ANIMATION_STATIC_NORMAL;
+        ESP_LOGW("animation_set_now_animation", "Invalid animation index: %d, using normal", animation);
+        animation = ANIMATION_NORMAL;
     }
     
     ESP_LOGI("animation_set_now_animation", "Set now animation: %d", animation);
@@ -385,8 +382,8 @@ void animation_check_volume_and_lock(int volume)
         // Volume is restored, unlock animation
         animation_locked_by_silence = false;
         ESP_LOGI("animation", "Volume restored to %d, unlocking animation and restoring to normal", volume);
-        // Immediately restore to static-normal animation
-        animation_set_now_animation(ANIMATION_STATIC_NORMAL);
+        // Immediately restore to normal animation
+        animation_set_now_animation(ANIMATION_NORMAL);
     }
 }
 
@@ -778,8 +775,8 @@ void animation_show_current_sources(void)
     for (int i = 0; i < ANIMATION_NUM; i++) {
         Animation_t* anim = get_animation(i);
         const char* anim_names[] = {
-            "STATIC_NORMAL", "EMBARRESSED", "FIRE", "INSPIRATION", "NORMAL",
-            "SHY", "SLEEP", "HAPPY", "LAUGH", "SAD", "SILENCE",
+            "NORMAL", "BLUSH", "ANGRY", "STARRY", "SHY",
+            "SLEEP", "HEARTY", "LAUGH", "SAD", "SILENCE",
             "LISTENING", "SMIRK", "WIFI", "BATTERY", "CRY"
         };
         
