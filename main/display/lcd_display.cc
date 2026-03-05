@@ -1057,10 +1057,11 @@ void LcdDisplay::CreateSystemMessage(const char* message)
     // Remove any existing system messages created by CreateSystemMessage
     // Use a special marker to identify containers created by CreateSystemMessage
     static const char* SYSTEM_MSG_MARKER = "CreateSystemMessage";
-    uint32_t child_count = lv_obj_get_child_cnt(content_);
+    auto screen = lv_screen_active();
+    uint32_t child_count = lv_obj_get_child_cnt(screen);
     for (int32_t i = child_count - 1; i >= 0; i--)
     {
-        lv_obj_t *child = lv_obj_get_child(content_, i);
+        lv_obj_t *child = lv_obj_get_child(screen, i);
         if (child == nullptr) continue;
         
         // Check if this container is marked as a CreateSystemMessage container
@@ -1073,13 +1074,24 @@ void LcdDisplay::CreateSystemMessage(const char* message)
         }
     }
     
-    // Create a full-width container for centering
-    lv_obj_t *container = lv_obj_create(content_);
+    // Create a full-width floating container pinned near bottom on the screen.
+    // Keeping this on the screen layer prevents face widgets in content_ from
+    // covering the message while still avoiding flex re-layout drift.
+    lv_obj_t *container = lv_obj_create(screen);
     lv_obj_set_width(container, LV_HOR_RES);
     lv_obj_set_height(container, LV_SIZE_CONTENT);
-    lv_obj_set_style_bg_opa(container, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_bg_opa(container, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(container, current_theme_.system_bubble, 0);
     lv_obj_set_style_border_width(container, 0, 0);
-    lv_obj_set_style_pad_all(container, 0, 0);
+    lv_obj_set_style_radius(container, 0, 0);
+    // Give the banner flexible vertical space and keep it flush to the top.
+    lv_obj_set_style_pad_top(container, 8, 0);
+    lv_obj_set_style_pad_bottom(container, 8, 0);
+    lv_obj_set_style_pad_left(container, 0, 0);
+    lv_obj_set_style_pad_right(container, 0, 0);
+    lv_obj_add_flag(container, LV_OBJ_FLAG_FLOATING);
+    lv_obj_align(container, LV_ALIGN_TOP_MID, 0, 0);
+    lv_obj_move_foreground(container);
     // Mark this container as created by CreateSystemMessage
     lv_obj_set_user_data(container, (void*)SYSTEM_MSG_MARKER);
 
@@ -1104,7 +1116,8 @@ void LcdDisplay::CreateSystemMessage(const char* message)
     
     // Calculate and set appropriate width
     lv_coord_t text_width = lv_txt_get_width(message, strlen(message), fonts_.text_font, 0);
-    lv_coord_t max_width = LV_HOR_RES - 16;
+    // Narrower width for stronger multi-line wrapping.
+    lv_coord_t max_width = LV_HOR_RES * 70 / 100;
     lv_coord_t bubble_width = (text_width < max_width) ? text_width : max_width;
     if (bubble_width < 20) bubble_width = 20;
     lv_obj_set_width(msg_text, bubble_width);
@@ -1112,10 +1125,7 @@ void LcdDisplay::CreateSystemMessage(const char* message)
 
     // Center align the bubble in container
     lv_obj_align(msg_bubble, LV_ALIGN_CENTER, 0, 0);
-    
-    // Auto-scroll to show the message
-    lv_obj_scroll_to_view_recursive(container, LV_ANIM_ON);
-    
+
     ESP_LOGI("LcdDisplay", "CreateSystemMessage: Message created successfully");
 }
 
@@ -1132,11 +1142,12 @@ void LcdDisplay::ClearSystemMessages()
     // Remove all system messages created by CreateSystemMessage
     // Use a special marker to identify containers created by CreateSystemMessage
     static const char* SYSTEM_MSG_MARKER = "CreateSystemMessage";
-    uint32_t child_count = lv_obj_get_child_cnt(content_);
+    auto screen = lv_screen_active();
+    uint32_t child_count = lv_obj_get_child_cnt(screen);
     int removed_count = 0;
     for (int32_t i = child_count - 1; i >= 0; i--)
     {
-        lv_obj_t *child = lv_obj_get_child(content_, i);
+        lv_obj_t *child = lv_obj_get_child(screen, i);
         if (child == nullptr) continue;
         
         // Check if this container is marked as a CreateSystemMessage container

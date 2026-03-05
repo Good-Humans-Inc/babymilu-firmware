@@ -8,6 +8,7 @@
 #include "lvgl.h"
 #include "board.h"
 #include "display.h"
+#include "application.h"
 #include "sd_card.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -105,17 +106,24 @@ static Animation_t sd_battery = {0};
 Animation_t* get_animation(int index) {
     // Check WiFi and battery status for normal animations
     if (index == ANIMATION_NORMAL) {
-        // First check WiFi connection - if disconnected, show wifi animation
+        // First check WiFi connection. When disconnected, only show WiFi animation
+        // in specific interaction states (audio testing / connecting).
         auto& wifi_station = WifiStation::GetInstance();
         if (!wifi_station.IsConnected()) {
-            // WiFi is disconnected, show wifi animation instead of normal
-            Animation_t* wifi_anim = animation_get_wifi_animation();
-            if (wifi_anim != NULL && 
-                (wifi_anim->use_gif || wifi_anim->use_spiffs)) {
-                ESP_LOGI("animation", "WiFi disconnected, showing wifi animation instead of normal");
-                return wifi_anim;
-            } else {
-                ESP_LOGW("animation", "WiFi disconnected, but wifi animation not available, using normal");
+            auto& app = Application::GetInstance();
+            DeviceState state = app.GetDeviceState();
+            bool should_show_wifi_anim =
+                (state == kDeviceStateAudioTesting || state == kDeviceStateConnecting);
+
+            if (should_show_wifi_anim) {
+                Animation_t* wifi_anim = animation_get_wifi_animation();
+                if (wifi_anim != NULL &&
+                    (wifi_anim->use_gif || wifi_anim->use_spiffs)) {
+                    ESP_LOGI("animation", "WiFi disconnected in state %d, showing wifi animation instead of normal", state);
+                    return wifi_anim;
+                } else {
+                    ESP_LOGW("animation", "WiFi disconnected in state %d, but wifi animation unavailable, using normal", state);
+                }
             }
         }
         
