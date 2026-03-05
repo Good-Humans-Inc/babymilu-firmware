@@ -271,6 +271,15 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
                 Board::GetInstance().EnterBleWifiConfigMode();
             });
             // Don't forward wifi_reconfig_nimble to on_incoming_json_ as it's a protocol-level message
+        } else if (strcmp(type->valuestring, "wifi_clear_credential") == 0) {
+            // Clear all persisted WiFi credentials, then reboot into BLE onboarding mode.
+            ESP_LOGI(TAG, "Received wifi_clear_credential message, clearing saved WiFi credentials");
+            Application::GetInstance().Schedule([]() {
+                auto& board = Board::GetInstance();
+                board.ClearWifiConfiguration();
+                board.EnterBleWifiConfigMode();
+            });
+            // Don't forward wifi_clear_credential to on_incoming_json_ as it's a protocol-level message
         } else {
             // Forward all other message types (including "listen", "tts", "stt", etc.) to Application handler
             ESP_LOGI(TAG, "Forwarding MQTT message type '%s' to Application::OnIncomingJson", type->valuestring);

@@ -17,6 +17,23 @@
 #define MAX_RECONNECT_COUNT 3
 #define RECONNECT_INTERVAL_MS 15000
 
+static std::string ToHexBytes(const char* input) {
+    std::string out;
+    if (input == nullptr) {
+        return out;
+    }
+    while (*input) {
+        if (!out.empty()) {
+            out += " ";
+        }
+        char buf[4];
+        snprintf(buf, sizeof(buf), "%02X", static_cast<unsigned char>(*input));
+        out += buf;
+        ++input;
+    }
+    return out;
+}
+
 namespace {
 
 std::string BytesToHex(const uint8_t* data, size_t len) {
@@ -186,8 +203,36 @@ void WifiStation::HandleScanResult() {
     wifi_ap_record_t *ap_records = (wifi_ap_record_t *)malloc(ap_num * sizeof(wifi_ap_record_t));
     esp_wifi_scan_get_ap_records(&ap_num, ap_records);
 
+    // Debug: print visible AP SSIDs in raw hex-byte format.
+    std::string visible_aps = "[";
+    for (int i = 0; i < ap_num; i++) {
+        if (i > 0) {
+            visible_aps += ", ";
+        }
+        visible_aps += "[";
+        visible_aps += ToHexBytes((const char*)ap_records[i].ssid);
+        visible_aps += "]";
+    }
+    visible_aps += "]";
+    ESP_LOGI(TAG, "Scan visible AP SSIDs (hex): %s", visible_aps.c_str());
+
     auto& ssid_manager = SsidManager::GetInstance();
     auto ssid_list = ssid_manager.GetSsidList();
+
+    // Debug: print stored credentials in raw hex-byte format.
+    std::string creds = "[";
+    for (size_t i = 0; i < ssid_list.size(); ++i) {
+        if (i > 0) {
+            creds += ", ";
+        }
+        creds += "{\"ssid_hex\":[";
+        creds += ToHexBytes(ssid_list[i].ssid.c_str());
+        creds += "],\"pwd_hex\":[";
+        creds += ToHexBytes(ssid_list[i].password.c_str());
+        creds += "]}";
+    }
+    creds += "]";
+    ESP_LOGI(TAG, "Stored credentials (priority order, hex): %s", creds.c_str());
 
     // Build connection queue by stored credential order (priority list),
     // not by AP RSSI.
