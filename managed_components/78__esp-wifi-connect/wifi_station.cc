@@ -36,6 +36,49 @@ static std::string ToHexBytes(const char* input) {
 
 namespace {
 
+constexpr size_t kMaxSsidMatchDistance = 5;
+
+int BoundedSsidByteDistance(const uint8_t* lhs,
+                            size_t lhs_len,
+                            const uint8_t* rhs,
+                            size_t rhs_len,
+                            size_t max_distance) {
+    if (lhs == nullptr || rhs == nullptr) {
+        return -1;
+    }
+    if (lhs_len > 32 || rhs_len > 32) {
+        return -1;
+    }
+    if (lhs_len > rhs_len) {
+        return BoundedSsidByteDistance(rhs, rhs_len, lhs, lhs_len, max_distance);
+    }
+    if (rhs_len - lhs_len > max_distance) {
+        return -1;
+    }
+
+    int prev[33];
+    int curr[33];
+    for (size_t j = 0; j <= rhs_len; ++j) {
+        prev[j] = static_cast<int>(j);
+    }
+
+    for (size_t i = 1; i <= lhs_len; ++i) {
+        curr[0] = static_cast<int>(i);
+        int row_min = curr[0];
+        for (size_t j = 1; j <= rhs_len; ++j) {
+            const int substitution_cost = lhs[i - 1] == rhs[j - 1] ? 0 : 1;
+            curr[j] = std::min({prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + substitution_cost});
+            row_min = std::min(row_min, curr[j]);
+        }
+        if (row_min > static_cast<int>(max_distance)) {
+            return -1;
+        }
+        std::copy(curr, curr + rhs_len + 1, prev);
+    }
+
+    return prev[rhs_len] <= static_cast<int>(max_distance) ? prev[rhs_len] : -1;
+}
+
 std::string BytesToHex(const uint8_t* data, size_t len) {
     static const char kHex[] = "0123456789ABCDEF";
     std::string hex;
@@ -237,9 +280,21 @@ void WifiStation::HandleScanResult() {
     // Build connection queue by stored credential order (priority list),
     // not by AP RSSI.
     for (const auto& item : ssid_list) {
-        auto it = std::find_if(ap_records, ap_records + ap_num, [&item](const wifi_ap_record_t& ap_record) {
-            return strcmp((char *)ap_record.ssid, item.ssid.c_str()) == 0;
-        });
+        wifi_ap_record_t* it = ap_records + ap_num;
+        size_t matched_distance = 0;
+        for (auto ap_it = ap_records; ap_it != ap_records + ap_num; ++ap_it) {
+            size_t scanned_ssid_len = strnlen(reinterpret_cast<const char*>(ap_it->ssid), sizeof(ap_it->ssid));
+            int distance = BoundedSsidByteDistance(ap_it->ssid,
+                                                   scanned_ssid_len,
+                                                   reinterpret_cast<const uint8_t*>(item.ssid.data()),
+                                                   item.ssid.size(),
+                                                   kMaxSsidMatchDistance);
+            if (distance >= 0) {
+                it = ap_it;
+                matched_distance = static_cast<size_t>(distance);
+                break;
+            }
+        }
         if (it != ap_records + ap_num) {
             auto ap_record = *it;
             ESP_LOGI(TAG, "Found AP: %s, BSSID: %02x:%02x:%02x:%02x:%02x:%02x, RSSI: %d, Channel: %d, Authmode: %d",
@@ -254,8 +309,13 @@ void WifiStation::HandleScanResult() {
             LogSsidBytes("Stored SSID bytes",
                          reinterpret_cast<const uint8_t*>(item.ssid.data()),
                          item.ssid.size());
+            if (matched_distance > 0) {
+                ESP_LOGI(TAG,
+                         "Using fuzzy SSID match (distance=%u) with stored password",
+                         static_cast<unsigned>(matched_distance));
+            }
             WifiApRecord record = {
-                .ssid = item.ssid,
+                .ssid = std::string(reinterpret_cast<const char*>(ap_record.ssid), scanned_ssid_len),
                 .password = item.password,
                 .channel = ap_record.primary,
                 .authmode = ap_record.authmode
