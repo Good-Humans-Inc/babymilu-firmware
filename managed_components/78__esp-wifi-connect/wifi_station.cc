@@ -15,7 +15,7 @@
 #define TAG "wifi"
 #define WIFI_EVENT_CONNECTED BIT0
 #define MAX_RECONNECT_COUNT 3
-#define RECONNECT_INTERVAL_MS 15000
+#define RECONNECT_INTERVAL_MS 500
 
 static std::string ToHexBytes(const char* input) {
     std::string out;
