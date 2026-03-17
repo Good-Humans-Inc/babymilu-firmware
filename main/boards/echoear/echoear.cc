@@ -470,6 +470,17 @@ private:
         ESP_ERROR_CHECK(esp_timer_start_once(volume_message_timer_, 1000 * 1000));
     }
 
+    void ShowBrightnessMessage(int brightness) {
+        if (display_ == nullptr) {
+            return;
+        }
+        InitializeVolumeMessageTimer();
+        std::string message = "brightness: " + std::to_string(brightness) + "%";
+        display_->CreateOverlayMessage(message.c_str());
+        esp_timer_stop(volume_message_timer_);
+        ESP_ERROR_CHECK(esp_timer_start_once(volume_message_timer_, 1000 * 1000));
+    }
+
     void ShowBatteryMessage() {
         if (display_ == nullptr) {
             return;
@@ -699,13 +710,31 @@ private:
                                     show_volume(new_volume);
                                     break;
                                     
-                                case Cst816s::GESTURE_SWIPE_LEFT:
-                                    ESP_LOGI(TAG, "[TOUCH] Swipe LEFT detected");
+                                case Cst816s::GESTURE_SWIPE_LEFT: {
+                                    auto bl = board->GetBacklight();
+                                    if (bl != nullptr) {
+                                        int cur = bl->brightness();
+                                        int nb = cur + 10;
+                                        if (nb > 100) nb = 100;
+                                        bl->SetBrightness(nb, true);
+                                        ESP_LOGI(TAG, "[TOUCH] Swipe LEFT - Brightness: %d -> %d", cur, nb);
+                                        board->ShowBrightnessMessage(nb);
+                                    }
                                     break;
+                                }
                                     
-                                case Cst816s::GESTURE_SWIPE_RIGHT:
-                                    ESP_LOGI(TAG, "[TOUCH] Swipe RIGHT detected");
+                                case Cst816s::GESTURE_SWIPE_RIGHT: {
+                                    auto bl = board->GetBacklight();
+                                    if (bl != nullptr) {
+                                        int cur = bl->brightness();
+                                        int nb = cur - 10;
+                                        if (nb < 10) nb = 10;
+                                        bl->SetBrightness(nb, true);
+                                        ESP_LOGI(TAG, "[TOUCH] Swipe RIGHT - Brightness: %d -> %d", cur, nb);
+                                        board->ShowBrightnessMessage(nb);
+                                    }
                                     break;
+                                }
                                     
                                 case Cst816s::GESTURE_SINGLE_TAP:
                                     ESP_LOGI(TAG, "[TOUCH] Single tap detected");
