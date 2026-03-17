@@ -470,6 +470,25 @@ private:
         ESP_ERROR_CHECK(esp_timer_start_once(volume_message_timer_, 1000 * 1000));
     }
 
+    void ShowBatteryMessage() {
+        if (display_ == nullptr) {
+            return;
+        }
+        InitializeVolumeMessageTimer();
+        int level = 0;
+        bool charging = false, discharging = false;
+        std::string message;
+        if (GetBatteryLevel(level, charging, discharging)) {
+            message = "battery: " + std::to_string(level) + "%";
+            if (charging) message += " chrg";
+        } else {
+            message = "battery: N/A";
+        }
+        display_->CreateOverlayMessage(message.c_str());
+        esp_timer_stop(volume_message_timer_);
+        ESP_ERROR_CHECK(esp_timer_start_once(volume_message_timer_, 2000 * 1000));
+    }
+
     void InitializeI2c() {
         ESP_LOGI(TAG, "[BMI270] Initializing I2C bus for BMI270 compatibility");
         
@@ -697,7 +716,8 @@ private:
                                     break;
                                     
                                 case Cst816s::GESTURE_LONG_PRESS:
-                                    ESP_LOGI(TAG, "[TOUCH] Long press detected");
+                                    ESP_LOGI(TAG, "[TOUCH] Long press detected - showing battery");
+                                    board->ShowBatteryMessage();
                                     break;
                                     
                                 default:
