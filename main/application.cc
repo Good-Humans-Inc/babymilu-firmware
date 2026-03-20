@@ -746,6 +746,19 @@ void Application::Start()
     // Update the status bar immediately to show the network state
     display->UpdateStatusBar(true);
 
+    // Only enable OTA/protocol network features when Wi-Fi is actually connected.
+    // Otherwise lwIP/DNS/HTTP can assert and cause reboot loops.
+    bool network_available = false;
+    if (board.GetBoardType() == "ml307")
+    {
+        network_available = true;
+    }
+    else
+    {
+        network_available = WifiStation::GetInstance().IsConnected();
+    }
+    const bool should_use_network = (!IsFactoryTestMode() && network_available);
+
     // Check WiFi connection status and show message if not connected
     // Note: If no WiFi credentials exist, StartNetwork() will block in WiFi config mode,
     // so this code only runs if WiFi credentials exist but connection failed or is in progress
@@ -824,9 +837,9 @@ void Application::Start()
     // AnimationUpdater::GetInstance().Initialize();
     // AnimationUpdater::GetInstance().Start();
 
-    // Check for new firmware version or get the MQTT broker address
-    // (Skipped in factory test mode to keep boot time deterministic.)
-    if (!IsFactoryTestMode())
+    // Check for new firmware version or get the MQTT broker address.
+    // Network features are only enabled when Wi-Fi is connected.
+    if (should_use_network)
     {
         CheckNewVersion();
 
@@ -1215,7 +1228,7 @@ void Application::Start()
             ESP_LOGW(TAG, "Unknown message type: %s", type->valuestring);
         } });
     bool protocol_started = false;
-    if (!IsFactoryTestMode())
+    if (should_use_network)
     {
         protocol_started = protocol_->Start();
     }
@@ -1345,7 +1358,7 @@ void Application::Start()
             } else if (device_state_ == kDeviceStateActivating) {
                 SetDeviceState(kDeviceStateIdle);
             } }); });
-    if (!IsFactoryTestMode())
+    if (should_use_network)
     {
         wake_word_->StartDetection();
 
