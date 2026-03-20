@@ -263,14 +263,18 @@ public:
         delete[] read_buffer_;
     }
     void Printcharge() {
+        if (!enabled_) {
+            return;
+        }
         if (TryReadRegs(0x08, read_buffer_, 2) != ESP_OK) {
-            ESP_LOGW(TAG, "[BATTERY] Read voltage failed");
+            HandleReadFailure("voltage");
             return;
         }
         if (TryReadRegs(0x0c, read_buffer_ + 2, 2) != ESP_OK) {
-            ESP_LOGW(TAG, "[BATTERY] Read current failed");
+            HandleReadFailure("current");
             return;
         }
+        consecutive_read_failures_ = 0;
         ESP_ERROR_CHECK(temperature_sensor_get_celsius(temp_sensor, &tsens_value));
 
         // Read voltage and current values (currently unused but available for future use)
@@ -280,9 +284,14 @@ public:
     
     // Get battery voltage in millivolts
     uint16_t GetVoltage() {
-        if (TryReadRegs(0x08, read_buffer_, 2) != ESP_OK) {
+        if (!enabled_) {
             return 0;
         }
+        if (TryReadRegs(0x08, read_buffer_, 2) != ESP_OK) {
+            HandleReadFailure("voltage");
+            return 0;
+        }
+        consecutive_read_failures_ = 0;
         uint16_t voltage_raw = (read_buffer_[1] << 8) | read_buffer_[0];
         // Voltage register format: typically in units of 0.1mV or similar
         // Assuming raw value needs scaling - adjust based on actual chip specifications
@@ -292,9 +301,14 @@ public:
     
     // Get battery current in milliamps (positive = charging, negative = discharging)
     int16_t GetCurrent() {
-        if (TryReadRegs(0x0c, read_buffer_ + 2, 2) != ESP_OK) {
+        if (!enabled_) {
             return 0;
         }
+        if (TryReadRegs(0x0c, read_buffer_ + 2, 2) != ESP_OK) {
+            HandleReadFailure("current");
+            return 0;
+        }
+        consecutive_read_failures_ = 0;
         int16_t current_raw = (int16_t)((read_buffer_[3] << 8) | read_buffer_[2]);
         // Current register format: typically in units of 0.1mA or similar
         // Adjust scaling based on actual chip specifications
@@ -309,8 +323,25 @@ public:
         }
     }
 
+    bool IsAvailable() const {
+        return enabled_;
+    }
+
 private:
+    void HandleReadFailure(const char* field) {
+        consecutive_read_failures_++;
+        if (consecutive_read_failures_ >= kMaxConsecutiveReadFailures) {
+            enabled_ = false;
+            ESP_LOGW(TAG, "[BATTERY] Charge IC unresponsive after repeated %s read failures, battery reporting disabled", field);
+            return;
+        }
+        ESP_LOGW(TAG, "[BATTERY] Read %s failed", field);
+    }
+
+    static constexpr uint8_t kMaxConsecutiveReadFailures = 3;
     uint8_t* read_buffer_ = nullptr;
+    uint8_t consecutive_read_failures_ = 0;
+    bool enabled_ = true;
 };
 
 
@@ -385,6 +416,7 @@ private:
     
     // BMI270 sensor handle
     bmi270_handle_t bmi270_handle_ = nullptr;
+    lv_obj_t* imu_square_ = nullptr;
     
     Cst816s* cst816s_;
     Charge* charge_;
@@ -401,7 +433,7 @@ private:
     PowerSaveTimer* power_save_timer_ = nullptr;
     esp_timer_handle_t emotion_reset_timer_ = nullptr;  // Timer to reset emotion to previous state after one animation cycle
     esp_timer_handle_t volume_message_timer_ = nullptr;  // Timer to clear volume message
-    std::string previous_emotion_ = "neutral";  // Store previous emotion string to restore
+    std::string previous_emotion_ = "normal";  // Store previous emotion string to restore
     int previous_volume_ = -1;  // Store volume before muting (for restore on unmute)
 
     void InitializeVolumeMessageTimer() {
@@ -451,7 +483,7 @@ private:
             .sda_pullup_en = true,
             .scl_pullup_en = true,
             .master = {
-                .clk_speed = 400000,  // 400kHz
+                .clk_speed = 100000,  // 100kHz — BMI270 official examples all use 100kHz
             },
             .clk_flags = 0,
         };
@@ -825,12 +857,12 @@ private:
                         esp_timer_stop(board->emotion_reset_timer_);
                     }
 
-                    // Store current emotion state - default to "neutral" if unknown
-                    // (We can't easily detect the current emotion, so default to neutral)
-                    board->previous_emotion_ = "neutral";
+                    // Store current emotion state - default to "normal" if unknown
+                    // (We can't easily detect the current emotion, so default to normal)
+                    board->previous_emotion_ = "normal";
 
                     // Randomly select one of three emotions
-                    const char* emotions[] = {"angry", "happy", "embarrassed"};
+                    const char* emotions[] = {"angry", "happy", "embarressed"};
                     uint32_t random_index = esp_random() % 3;
                     const char* selected_emotion = emotions[random_index];
 
@@ -1032,146 +1064,163 @@ private:
         ESP_LOGI(TAG, "[TOUCH] Touch events will be ignored during speaking/listening mode");
     }
 
+    bool TryInitBmi270Sensor() {
+        if (bmi270_handle_) return true;
+        if (!shared_i2c_bus_handle_) return false;
+
+        // Soft-reset BMI270 before init to ensure clean state.
+        // Write 0xB6 to CMD register (0x7E) at I2C address 0x68.
+        ESP_LOGI(TAG, "[BMI270] Sending soft-reset...");
+        if (i2c_bus_) {
+            i2c_master_dev_handle_t tmp_dev = nullptr;
+            i2c_device_config_t dev_cfg = {
+                .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+                .device_address = BMI270_I2C_ADDR,
+                .scl_speed_hz = 100000,
+            };
+            if (i2c_master_bus_add_device(i2c_bus_, &dev_cfg, &tmp_dev) == ESP_OK && tmp_dev) {
+                uint8_t reset_cmd[] = {0x7E, 0xB6};
+                i2c_master_transmit(tmp_dev, reset_cmd, sizeof(reset_cmd), pdMS_TO_TICKS(100));
+                i2c_master_bus_rm_device(tmp_dev);
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(100));
+
+        ESP_LOGI(TAG, "[BMI270] Attempting BMI270 sensor create...");
+        esp_err_t ret = bmi270_sensor_create(
+            shared_i2c_bus_handle_, &bmi270_handle_, bmi270_config_file,
+            BMI2_GYRO_CROSS_SENS_ENABLE | BMI2_CRT_RTOSK_ENABLE
+        );
+        if (ret != ESP_OK || !bmi270_handle_) {
+            ESP_LOGE(TAG, "[BMI270] BMI270 create failed: %s", esp_err_to_name(ret));
+            bmi270_handle_ = nullptr;
+            return false;
+        }
+        ESP_LOGI(TAG, "[BMI270] Sensor created, enabling accel+gyro...");
+
+        const uint8_t sens_list[] = {BMI2_ACCEL, BMI2_GYRO};
+        int8_t rslt = bmi270_sensor_enable(sens_list, 2, bmi270_handle_);
+        if (rslt != BMI2_OK) {
+            ESP_LOGE(TAG, "[BMI270] Failed to enable sensors: %d", rslt);
+            return false;
+        }
+
+        struct bmi2_sens_config accel_config = {.type = BMI2_ACCEL};
+        rslt = bmi270_get_sensor_config(&accel_config, 1, bmi270_handle_);
+        if (rslt == BMI2_OK) {
+            accel_config.cfg.acc.odr = BMI2_ACC_ODR_100HZ;
+            accel_config.cfg.acc.bwp = BMI2_ACC_NORMAL_AVG4;
+            accel_config.cfg.acc.filter_perf = BMI2_PERF_OPT_MODE;
+            accel_config.cfg.acc.range = BMI2_ACC_RANGE_4G;
+            bmi270_set_sensor_config(&accel_config, 1, bmi270_handle_);
+        }
+
+        struct bmi2_sens_config gyro_config = {.type = BMI2_GYRO};
+        rslt = bmi270_get_sensor_config(&gyro_config, 1, bmi270_handle_);
+        if (rslt == BMI2_OK) {
+            gyro_config.cfg.gyr.odr = BMI2_GYR_ODR_100HZ;
+            gyro_config.cfg.gyr.bwp = BMI2_GYR_NORMAL_MODE;
+            gyro_config.cfg.gyr.filter_perf = BMI2_PERF_OPT_MODE;
+            gyro_config.cfg.gyr.range = BMI2_GYR_RANGE_2000;
+            bmi270_set_sensor_config(&gyro_config, 1, bmi270_handle_);
+        }
+
+        ESP_LOGI(TAG, "[BMI270] ✓ BMI270 fully initialized");
+        return true;
+    }
+
     void InitializeBmi270() {
         ESP_LOGI(TAG, "[BMI270] ===== Starting BMI270 initialization =====");
-        
-        // Validate I2C bus handle
         if (!shared_i2c_bus_handle_) {
             ESP_LOGE(TAG, "[BMI270] Shared I2C bus not initialized");
             return;
         }
 
-        // Create BMI270 sensor using the shared I2C bus wrapper
-        // bmi270_config_file is provided by the bmi270_api.h header
-        ESP_LOGI(TAG, "[BMI270] Creating BMI270 sensor...");
-        esp_err_t ret = bmi270_sensor_create(
-            shared_i2c_bus_handle_, 
-            &bmi270_handle_, 
-            bmi270_config_file,
-            BMI2_GYRO_CROSS_SENS_ENABLE | BMI2_CRT_RTOSK_ENABLE
-        );
-        
-        if (ret != ESP_OK || !bmi270_handle_) {
-            ESP_LOGE(TAG, "[BMI270] BMI270 create failed: %s", esp_err_to_name(ret));
-            return;
-        }
-        ESP_LOGI(TAG, "[BMI270] ✓ BMI270 sensor created successfully");
+        TryInitBmi270Sensor();
 
-        // Enable accelerometer and gyroscope
-        ESP_LOGI(TAG, "[BMI270] Enabling accelerometer and gyroscope...");
-        const uint8_t sens_list[] = {BMI2_ACCEL, BMI2_GYRO};
-        int8_t rslt = bmi270_sensor_enable(sens_list, 2, bmi270_handle_);
-        if (rslt != BMI2_OK) {
-            ESP_LOGE(TAG, "[BMI270] Failed to enable BMI270 sensors: %d", rslt);
-            return;
-        }
-        ESP_LOGI(TAG, "[BMI270] ✓ BMI270 sensors enabled");
-
-        // Configure accelerometer
-        ESP_LOGI(TAG, "[BMI270] Configuring accelerometer...");
-        struct bmi2_sens_config accel_config = {.type = BMI2_ACCEL};
-        rslt = bmi270_get_sensor_config(&accel_config, 1, bmi270_handle_);
-        if (rslt == BMI2_OK) {
-            accel_config.cfg.acc.odr = BMI2_ACC_ODR_100HZ;           // 100Hz output data rate
-            accel_config.cfg.acc.bwp = BMI2_ACC_NORMAL_AVG4;         // Normal mode, average 4 samples
-            accel_config.cfg.acc.filter_perf = BMI2_PERF_OPT_MODE;   // Performance optimized mode
-            accel_config.cfg.acc.range = BMI2_ACC_RANGE_4G;          // ±4G range
-            rslt = bmi270_set_sensor_config(&accel_config, 1, bmi270_handle_);
-            if (rslt != BMI2_OK) {
-                ESP_LOGW(TAG, "[BMI270] Failed to configure accelerometer: %d", rslt);
-            } else {
-                ESP_LOGI(TAG, "[BMI270] ✓ Accelerometer configured: ODR=100Hz, Range=±4G");
-            }
-        } else {
-            ESP_LOGW(TAG, "[BMI270] Failed to get accelerometer config: %d", rslt);
-        }
-
-        // Configure gyroscope
-        ESP_LOGI(TAG, "[BMI270] Configuring gyroscope...");
-        struct bmi2_sens_config gyro_config = {.type = BMI2_GYRO};
-        rslt = bmi270_get_sensor_config(&gyro_config, 1, bmi270_handle_);
-        if (rslt == BMI2_OK) {
-            gyro_config.cfg.gyr.odr = BMI2_GYR_ODR_100HZ;            // 100Hz output data rate
-            gyro_config.cfg.gyr.bwp = BMI2_GYR_NORMAL_MODE;          // Normal bandwidth mode
-            gyro_config.cfg.gyr.filter_perf = BMI2_PERF_OPT_MODE;    // Performance optimized mode
-            gyro_config.cfg.gyr.range = BMI2_GYR_RANGE_2000;         // ±2000°/s range
-            rslt = bmi270_set_sensor_config(&gyro_config, 1, bmi270_handle_);
-            if (rslt != BMI2_OK) {
-                ESP_LOGW(TAG, "[BMI270] Failed to configure gyroscope: %d", rslt);
-            } else {
-                ESP_LOGI(TAG, "[BMI270] ✓ Gyroscope configured: ODR=100Hz, Range=±2000°/s");
-            }
-        } else {
-            ESP_LOGW(TAG, "[BMI270] Failed to get gyroscope config: %d", rslt);
-        }
-
-        // Create task to read BMI270 data
-        ESP_LOGI(TAG, "[BMI270] Creating BMI270 reading task...");
+        ESP_LOGI(TAG, "[BMI270] Creating BMI270 task (will retry init if needed)...");
         BaseType_t task_ret = xTaskCreatePinnedToCore(
-            Bmi270ReadTask,      // Task function
-            "bmi270_task",       // Task name
-            4 * 1024,            // Stack size (4KB)
-            this,                // Task parameter (pass board instance)
-            5,                   // Task priority
-            NULL,                // Task handle (not stored)
-            1                    // Core ID (core 1)
+            Bmi270ReadTask, "bmi270_task", 4 * 1024, this, 5, NULL, 1
         );
-        
         if (task_ret != pdPASS) {
             ESP_LOGE(TAG, "[BMI270] Failed to create BMI270 reading task");
-            return;
         }
-        ESP_LOGI(TAG, "[BMI270] ✓ BMI270 reading task created successfully");
-        ESP_LOGI(TAG, "[BMI270] ===== BMI270 initialization complete =====");
     }
 
     static void Bmi270ReadTask(void* arg) {
         EchoEar* board = static_cast<EchoEar*>(arg);
-        if (!board || !board->bmi270_handle_) {
-            ESP_LOGE(TAG, "[BMI270] Invalid BMI270 handle in read task");
+        if (!board) {
+            ESP_LOGE(TAG, "[BMI270] Invalid board pointer in read task");
             vTaskDelete(NULL);
             return;
         }
 
-        ESP_LOGI(TAG, "[BMI270] Reading task started");
+        // Retry initialization if first attempt failed (chip needs time after power-on)
+        const int max_retries = 5;
+        for (int attempt = 1; !board->bmi270_handle_ && attempt <= max_retries; attempt++) {
+            ESP_LOGI(TAG, "[BMI270] Retry %d/%d — waiting 2s before re-init...", attempt, max_retries);
+            vTaskDelay(pdMS_TO_TICKS(2000));
+            board->TryInitBmi270Sensor();
+        }
+        if (!board->bmi270_handle_) {
+            ESP_LOGE(TAG, "[BMI270] All init retries failed, task exiting");
+            vTaskDelete(NULL);
+            return;
+        }
+
+        ESP_LOGI(TAG, "[BMI270] Reading task started, waiting for display...");
+        while (!board->display_) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
+        vTaskDelay(pdMS_TO_TICKS(500));
+
+        const int sq_size = 30;
+        const int screen_w = DISPLAY_WIDTH;
+        const int screen_h = DISPLAY_HEIGHT;
+        const float center_x = (screen_w - sq_size) / 2.0f;
+        const float center_y = (screen_h - sq_size) / 2.0f;
+        float pos_x = center_x;
+        float pos_y = center_y;
+
+        {
+            DisplayLockGuard lock(board->display_);
+            board->imu_square_ = lv_obj_create(lv_scr_act());
+            lv_obj_remove_style_all(board->imu_square_);
+            lv_obj_set_size(board->imu_square_, sq_size, sq_size);
+            lv_obj_set_pos(board->imu_square_, (int)pos_x, (int)pos_y);
+            lv_obj_set_style_bg_color(board->imu_square_, lv_color_hex(0x00FF00), 0);
+            lv_obj_set_style_bg_opa(board->imu_square_, LV_OPA_COVER, 0);
+            lv_obj_set_style_radius(board->imu_square_, 0, 0);
+            lv_obj_clear_flag(board->imu_square_, LV_OBJ_FLAG_SCROLLABLE);
+            lv_obj_add_flag(board->imu_square_, LV_OBJ_FLAG_FLOATING);
+            lv_obj_move_foreground(board->imu_square_);
+        }
+        ESP_LOGI(TAG, "[BMI270] Green square created at center (%d, %d)", (int)pos_x, (int)pos_y);
+
         struct bmi2_sens_data sensor_data = {0};
-        uint32_t read_count = 0;
-        uint32_t error_count = 0;
+        // At ±4G range, 1G ≈ 8192 raw. Map so ~30° tilt reaches screen edge.
+        const float scale = (screen_w / 2.0f) / 4500.0f;
 
         while (true) {
-            // Read sensor data
             int8_t rslt = bmi2_get_sensor_data(&sensor_data, board->bmi270_handle_);
             if (rslt == BMI2_OK) {
-                read_count++;
-                
-                // Access accelerometer data
-                int16_t accel_x = sensor_data.acc.x;
-                int16_t accel_y = sensor_data.acc.y;
-                int16_t accel_z = sensor_data.acc.z;
-                
-                // Access gyroscope data
-                int16_t gyro_x = sensor_data.gyr.x;
-                int16_t gyro_y = sensor_data.gyr.y;
-                int16_t gyro_z = sensor_data.gyr.z;
-                
-                // Log sensor data every 10 readings (every 10 seconds)
-                /*if (read_count % 10 == 0) {
-                    ESP_LOGI(TAG, "[BMI270] Reading #%lu - Accel: X=%d, Y=%d, Z=%d | Gyro: X=%d, Y=%d, Z=%d",
-                             (unsigned long)read_count, accel_x, accel_y, accel_z,
-                             gyro_x, gyro_y, gyro_z);
-                } else {
-                    // Log at DEBUG level for other readings
-                    ESP_LOGD(TAG, "[BMI270] Accel: X=%d, Y=%d, Z=%d | Gyro: X=%d, Y=%d, Z=%d",
-                             accel_x, accel_y, accel_z, gyro_x, gyro_y, gyro_z);
-                }*/
-            } else {
-                error_count++;
-                ESP_LOGW(TAG, "[BMI270] Failed to read BMI270 data: %d (error count: %lu)", 
-                         rslt, (unsigned long)error_count);
+                pos_x = center_x - sensor_data.acc.x * scale;
+                pos_y = center_y + sensor_data.acc.y * scale;
+
+                if (pos_x < 0) pos_x = 0;
+                if (pos_x > screen_w - sq_size) pos_x = screen_w - sq_size;
+                if (pos_y < 0) pos_y = 0;
+                if (pos_y > screen_h - sq_size) pos_y = screen_h - sq_size;
+
+                {
+                    DisplayLockGuard lock(board->display_);
+                    if (board->imu_square_) {
+                        lv_obj_set_pos(board->imu_square_, (int)pos_x, (int)pos_y);
+                        lv_obj_move_foreground(board->imu_square_);
+                    }
+                }
             }
-            
-            // Wait 1 second before next reading
-            vTaskDelay(pdMS_TO_TICKS(1000));
+            vTaskDelay(pdMS_TO_TICKS(30));
         }
     }
 
@@ -1182,6 +1231,14 @@ private:
             return;
         }
         charge_ = new Charge(i2c_bus_, 0x55);
+        // If the first read already fails, disable battery reporting to avoid
+        // continuous I2C NACK spam from periodic battery polling.
+        if (charge_->GetVoltage() == 0) {
+            ESP_LOGW(TAG, "[BATTERY] Charge IC unresponsive, battery reporting disabled");
+            delete charge_;
+            charge_ = nullptr;
+            return;
+        }
         xTaskCreatePinnedToCore(Charge::TaskFunction, "batterydecTask", 3 * 1024, charge_, 6, NULL, 0);
     }
 
@@ -1381,7 +1438,7 @@ private:
 
             auto display = GetDisplay();
             if (display) {
-                display->SetEmotion("neutral");  // Restore to neutral animation (maps to ANIMATION_STATIC_NORMAL)
+                display->SetEmotion("normal");  // Restore to normal animation (maps to ANIMATION_NORMAL)
             }
             // Ensure application state is idle after waking from sleep
             auto& app = Application::GetInstance();
@@ -1599,7 +1656,7 @@ public:
     }
 
     virtual bool GetBatteryLevel(int &level, bool& charging, bool& discharging) override {
-        if (charge_ == nullptr) {
+        if (charge_ == nullptr || !charge_->IsAvailable()) {
             return false;
         }
         

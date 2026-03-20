@@ -409,7 +409,7 @@ void Application::DismissAlert()
     {
         auto display = Board::GetInstance().GetDisplay();
         display->SetStatus(Lang::Strings::STANDBY);
-        display->SetEmotion("neutral");
+        display->SetEmotion("normal");
         // DISABLED: Comment out transcript display to reduce memory usage
         // display->SetChatMessage("system", "");
     }
@@ -488,6 +488,37 @@ void Application::ToggleChatState()
 
     if (device_state_ == kDeviceStateIdle)
     {
+        auto &wifi_station = WifiStation::GetInstance();
+        if (!wifi_station.IsConnected())
+        {
+            // Disconnected interaction UX:
+            // - First press: show WiFi face reminder and try connect flow.
+            // - Second press: exit reminder back to normal/idle.
+            if (wifi_error_reminder_active_)
+            {
+                auto display = Board::GetInstance().GetDisplay();
+                if (display != nullptr)
+                {
+                    display->SetEmotion("normal");
+                }
+                wifi_error_reminder_active_ = false;
+                return;
+            }
+
+            // If user starts interaction while disconnected, show WiFi animation as
+            // an immediate visual reminder of the network error condition.
+            auto display = Board::GetInstance().GetDisplay();
+            if (display != nullptr)
+            {
+                display->SetEmotion("wifi");
+            }
+            wifi_error_reminder_active_ = true;
+        }
+        else
+        {
+            wifi_error_reminder_active_ = false;
+        }
+
         Schedule([this]()
                  {
             auto* active_protocol = GetActiveProtocol();
@@ -902,7 +933,9 @@ void Application::Start()
     protocol_->OnNetworkError([this](const std::string &message)
                               {
         SetDeviceState(kDeviceStateIdle);
-        Alert(Lang::Strings::ERROR, message.c_str(), "sad", Lang::Sounds::P3_EXCLAMATION); });
+        // Use WiFi face for transport/connectivity failures so users get a
+        // consistent network-error visual cue.
+        Alert(Lang::Strings::ERROR, message.c_str(), "wifi", Lang::Sounds::P3_EXCLAMATION); });
     protocol_->OnIncomingAudio([this](AudioStreamPacket &&packet)
                                {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -1710,13 +1743,13 @@ void Application::SetDeviceState(DeviceState state)
     case kDeviceStateUnknown:
     case kDeviceStateIdle:
         display->SetStatus(Lang::Strings::STANDBY);
-        display->SetEmotion("neutral");
+        display->SetEmotion("normal");
         audio_processor_->Stop();
         wake_word_->StartDetection();
         break;
     case kDeviceStateConnecting:
         display->SetStatus(Lang::Strings::CONNECTING);
-        display->SetEmotion("neutral");
+        display->SetEmotion("normal");
         // DISABLED: Comment out transcript display to reduce memory usage
         // display->SetChatMessage("system", "");
         timestamp_queue_.clear();
@@ -1842,10 +1875,19 @@ void Application::SetDeviceState(DeviceState state)
         break;
     }
     case kDeviceStateStarting:
+        break;
     case kDeviceStateWifiConfiguring:
+        // Keep WiFi config mode on normal animation. Touch interactions can still
+        // temporarily switch emotions (angry/happy/embarressed) via board logic.
+        display->SetEmotion("normal");
+        break;
+    case kDeviceStateAudioTesting:
+        // In WiFi config flow, show WiFi animation only when talk button enters
+        // audio testing mode.
+        display->SetEmotion("wifi");
+        break;
     case kDeviceStateUpgrading:
     case kDeviceStateActivating:
-    case kDeviceStateAudioTesting:
     case kDeviceStateFatalError:
         // These states are handled elsewhere or don't require special handling here
         break;
@@ -2027,7 +2069,8 @@ void Application::OpenWebSocketConnection() {
         // Set up callbacks same as primary protocol
         websocket_protocol_->OnNetworkError([this](const std::string &message) {
             SetDeviceState(kDeviceStateIdle);
-            Alert(Lang::Strings::ERROR, message.c_str(), "sad", Lang::Sounds::P3_EXCLAMATION);
+            // Mirror primary protocol behavior: show WiFi face on connectivity errors.
+            Alert(Lang::Strings::ERROR, message.c_str(), "wifi", Lang::Sounds::P3_EXCLAMATION);
         });
         
         websocket_protocol_->OnIncomingAudio([this](AudioStreamPacket &&packet) {

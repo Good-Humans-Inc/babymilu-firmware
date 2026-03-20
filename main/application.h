@@ -113,6 +113,7 @@ private:
     bool aborted_ = false;
     bool voice_detected_ = false;
     bool busy_decoding_audio_ = false;
+    bool wifi_error_reminder_active_ = false;  // First press shows wifi face, second press exits to normal.
     
     // VAD interrupt debounce state
     int64_t speaking_start_time_us_ = 0;  // When speaking state started (for grace period)

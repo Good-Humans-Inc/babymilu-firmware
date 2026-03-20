@@ -91,7 +91,7 @@ void Display::ShowNotification(const char* notification, int duration_ms) {
     ESP_LOGI("Display", "ShowNotification called: notification='%s', duration_ms=%d", notification ? notification : "NULL", duration_ms);
     // Disabled: notifications are suppressed in favor of volume overlay.
     (void)duration_ms;
-    (void)notification;
+        (void)notification;
     return;
     DisplayLockGuard lock(this);
     if (notification_label_ == nullptr) {

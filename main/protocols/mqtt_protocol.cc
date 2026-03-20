@@ -265,12 +265,21 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
             // Don't forward remote_anim_update to on_incoming_json_ as it's a protocol-level message
         } else if (strcmp(type->valuestring, "wifi_reconfig_nimble") == 0) {
             // Remote WiFi reconfiguration request:
-            // clear stored credentials and reboot, then boot flow enters NimBLE WiFi setup.
-            ESP_LOGI(TAG, "Received wifi_reconfig_nimble message, clearing WiFi config and rebooting");
+            // enter NimBLE WiFi setup mode without clearing existing credentials.
+            ESP_LOGI(TAG, "Received wifi_reconfig_nimble message, entering BLE WiFi config mode");
             Application::GetInstance().Schedule([]() {
-                Application::GetInstance().ClearWifiConfiguration();
+                Board::GetInstance().EnterBleWifiConfigMode();
             });
             // Don't forward wifi_reconfig_nimble to on_incoming_json_ as it's a protocol-level message
+        } else if (strcmp(type->valuestring, "wifi_clear_credential") == 0) {
+            // Clear all persisted WiFi credentials, then reboot into BLE onboarding mode.
+            ESP_LOGI(TAG, "Received wifi_clear_credential message, clearing saved WiFi credentials");
+            Application::GetInstance().Schedule([]() {
+                auto& board = Board::GetInstance();
+                board.ClearWifiConfiguration();
+                board.EnterBleWifiConfigMode();
+            });
+            // Don't forward wifi_clear_credential to on_incoming_json_ as it's a protocol-level message
         } else {
             // Forward all other message types (including "listen", "tts", "stt", etc.) to Application handler
             ESP_LOGI(TAG, "Forwarding MQTT message type '%s' to Application::OnIncomingJson", type->valuestring);

@@ -57,6 +57,9 @@ def publish_test_message(broker_host, broker_port, topic, message_type="test", m
             sys.exit(1)
         payload["volume"] = volume
         payload["message"] = str(volume)  # Also include in message for compatibility
+    elif message_type == "wifi_clear_credential":
+        # Explicitly keep message empty for control command payload consistency.
+        payload["message"] = ""
     else:
         payload["message"] = message_text
     
@@ -110,6 +113,9 @@ Examples:
   
   # Trigger WiFi reconfiguration via NimBLE (device will reboot)
   python test_mqtt_publish.py --type "wifi_reconfig_nimble" --message "" --mac "90:e5:b1:a8:ad:24"
+
+  # Clear stored WiFi credentials and reboot into BLE onboarding
+  python test_mqtt_publish.py --type "wifi_clear_credential" --mac "90:e5:b1:a8:ad:24"
   
   # Adjust volume to 50
   python test_mqtt_publish.py --type "adjust_volume" --volume 50

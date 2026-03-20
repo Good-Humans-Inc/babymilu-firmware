@@ -40,7 +40,7 @@ The `test.bin` file contains multiple GIF files in a structured format:
 
 | Animation Type | GIF Filename | Description |
 |---------------|--------------|-------------|
-| ANIMATION_STATIC_NORMAL / ANIMATION_NORMAL | `normal.gif` | Default/idle state |
+| ANIMATION_NORMAL | `normal.gif` | Default/idle state |
 | ANIMATION_EMBARRESSED | `embarrass.gif` | Embarrassed emotion |
 | ANIMATION_FIRE | `fire.gif` | Excited/fire emotion |
 | ANIMATION_INSPIRATION | `inspiration.gif` | Inspired/thinking |

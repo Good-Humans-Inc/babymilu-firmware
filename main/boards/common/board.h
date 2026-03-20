@@ -51,6 +51,7 @@ public:
     virtual std::string GetJson();
     virtual void SetPowerSaveMode(bool enabled) = 0;
     virtual void ClearWifiConfiguration() {}
+    virtual void EnterBleWifiConfigMode() {}
     virtual std::string GetBoardJson() = 0;
     virtual std::string GetDeviceStatusJson() = 0;
 };

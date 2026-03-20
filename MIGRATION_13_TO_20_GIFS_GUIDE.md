@@ -244,7 +244,7 @@ typedef struct _Animation_t {
 
 ```cpp
 typedef enum _AnimationType_e {
-    ANIMATION_STATIC_NORMAL = 0,  // Maps to sd_normal
+    ANIMATION_NORMAL = 0,         // Maps to sd_normal
     ANIMATION_EMBARRESSED,        // Maps to sd_embarrass
     ANIMATION_FIRE,               // Maps to sd_fire
     ANIMATION_INSPIRATION,        // Maps to sd_inspiration
@@ -271,7 +271,7 @@ The `get_animation(int index)` function maps `AnimationType_e` enum values to `A
 ```cpp
 Animation_t* get_animation(int index) {
     switch(index) {
-        case 0:  // ANIMATION_STATIC_NORMAL
+        case 0:  // ANIMATION_NORMAL
             return animation_get_normal_animation();
         case 1:  // ANIMATION_EMBARRESSED
             return animation_get_embarrass_animation();
@@ -326,7 +326,7 @@ The emotion mapping system connects **emotion strings** (from server/user) to **
 ```cpp
 static const std::vector<Emotion> emotions = {
     // Neutral baseline (normal.gif)
-    {ANIMATION_STATIC_NORMAL, "neutral"},
+    {ANIMATION_NORMAL, "neutral"},
 
     // Positive / happy styles (smirk.gif + smirk_start.gif)
     {ANIMATION_SMIRK, "happy"},
@@ -396,7 +396,7 @@ Display system shows animation with start+loop GIFs
 
 | Emotion String | AnimationType_e | Animation_t | GIF Files | Notes |
 |---------------|-----------------|-------------|-----------|-------|
-| `"neutral"` | `ANIMATION_STATIC_NORMAL` | `sd_normal` | `normal.gif` | Baseline state |
+| `"neutral"` | `ANIMATION_NORMAL` | `sd_normal` | `normal.gif` | Baseline state |
 | `"happy"` | `ANIMATION_SMIRK` | `sd_smirk` | `smirk.gif` + `smirk_start.gif` | Positive/happy |
 | `"laughing"` | `ANIMATION_SMIRK` | `sd_smirk` | `smirk.gif` + `smirk_start.gif` | Same as happy |
 | `"funny"` | `ANIMATION_SMIRK` | `sd_smirk` | `smirk.gif` + `smirk_start.gif` | Same as happy |
@@ -421,7 +421,7 @@ Display system shows animation with start+loop GIFs
 
 1. **Volume Lock:** If volume is 0, the system automatically locks to `ANIMATION_SILENCE` (displays `silence.gif`) regardless of emotion input.
 
-2. **WiFi/Battery Override:** When displaying `ANIMATION_STATIC_NORMAL` or `ANIMATION_NORMAL`, the system checks:
+2. **WiFi/Battery Override:** When displaying `ANIMATION_NORMAL`, the system checks:
    - If WiFi is disconnected → shows `wifi.gif` instead
    - If battery < 20% → shows `battery.gif` instead
 
@@ -456,7 +456,7 @@ Display system shows animation with start+loop GIFs
 **Add new animation types (if not present):**
 ```cpp
 typedef enum _AnimationType_e {
-    ANIMATION_STATIC_NORMAL = 0,
+    ANIMATION_NORMAL = 0,
     ANIMATION_EMBARRESSED,
     ANIMATION_FIRE,
     ANIMATION_INSPIRATION,

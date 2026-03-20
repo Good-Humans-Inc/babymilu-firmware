@@ -246,7 +246,7 @@ Map current animation types to GIF files:
 
 | Animation Type | GIF Filename | Emotion Name | Frame Count (Old) |
 |---------------|--------------|--------------|-------------------|
-| ANIMATION_STATIC_NORMAL | `normal.gif` | "normal" | 3 |
+| ANIMATION_NORMAL | `normal.gif` | "normal" | 3 |
 | ANIMATION_NORMAL | `normal.gif` | "normal" | 3 |
 | ANIMATION_HAPPY | `happy.gif` | "happy" | 4 |
 | ANIMATION_EMBARRESSED | `embarrass.gif` | "embarrassed" | 3 |

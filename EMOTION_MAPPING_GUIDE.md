@@ -33,7 +33,7 @@ The emotion mapping is defined in `LcdDisplay::SetEmotion()` at **lines 1131-115
 
 ```cpp
 static const std::vector<Emotion> emotions = {
-    {ANIMATION_STATIC_NORMAL, "neutral"},
+    {ANIMATION_NORMAL, "neutral"},
     {ANIMATION_HAPPY, "happy"},
     {ANIMATION_HAPPY, "laughing"},
     {ANIMATION_HAPPY, "funny"},
@@ -69,7 +69,7 @@ Defined in `main/animation/animation.h`:
 
 ```cpp
 typedef enum _AnimationType_e {
-    ANIMATION_STATIC_NORMAL = 0,  // Static neutral state
+    ANIMATION_NORMAL = 0,         // Normal/idle state
     ANIMATION_EMBARRESSED,         // Embarrassed/shy expressions
     ANIMATION_FIRE,                // Excited/fire emotion
     ANIMATION_INSPIRATION,         // Inspired/surprised expressions
@@ -122,7 +122,7 @@ If the server sends a new emotion that needs its own unique animation (e.g., ser
 Add the new animation type to the enum:
 ```cpp
 typedef enum _AnimationType_e {
-    ANIMATION_STATIC_NORMAL = 0,
+    ANIMATION_NORMAL = 0,
     ANIMATION_EMBARRESSED,
     ANIMATION_FIRE,
     ANIMATION_INSPIRATION,
@@ -305,7 +305,7 @@ Displays animation frames on screen
 
 | Server Emotion String | System Animation Type | Notes |
 |----------------------|----------------------|-------|
-| "neutral" | ANIMATION_STATIC_NORMAL | Static state |
+| "neutral" | ANIMATION_NORMAL | Normal/idle state |
 | "happy", "laughing", "funny", "relaxed", "delicious", "confident", "silly" | ANIMATION_HAPPY | Happy expressions |
 | "sad", "embarrassed" | ANIMATION_SHY | Shy/sad expressions |
 | "angry" | ANIMATION_FIRE | Fire/excited |
