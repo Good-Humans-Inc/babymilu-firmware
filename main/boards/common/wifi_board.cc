@@ -194,9 +194,10 @@ void WifiBoard::StartNetwork() {
     }
     
     // Bench/factory quick mode:
-    // SD card is typically inserted during factory testing, so we use it
-    // to shorten Wi-Fi waits and skip the long "please connect" audio.
-    const bool bench_quick_mode = IsFactoryTestMode() || SdCard::IsMounted();
+    // We must enable this early because on EchoEar the SD mount may happen
+    // in a background task after Wi-Fi startup.
+    // Use IsDetected() (assumed true for EchoEar) instead of IsMounted().
+    const bool bench_quick_mode = IsFactoryTestMode() || SdCard::IsDetected();
 
     // By default forget saved Wi-Fi credentials in bench mode so we don't
     // scan/reconnect on boot. This makes the Wi-Fi module "functional"
@@ -218,7 +219,7 @@ void WifiBoard::StartNetwork() {
 
         if (ssid_list.empty()) {
             // No saved networks: skip scan/BLE wait, just show the audio prompt quickly.
-            application.Alert(Lang::Strings::WIFI_CONFIG_MODE, wifi_message, "", "");
+            application.Alert(Lang::Strings::WIFI_CONFIG_MODE, wifi_message, "", Lang::Sounds::P3_WIFICONFIG);
             return;
         }
 
@@ -236,7 +237,7 @@ void WifiBoard::StartNetwork() {
         wifi_station.Stop();
 
         if (!connected) {
-            application.Alert(Lang::Strings::WIFI_CONFIG_MODE, wifi_message, "", "");
+            application.Alert(Lang::Strings::WIFI_CONFIG_MODE, wifi_message, "", Lang::Sounds::P3_WIFICONFIG);
         } else {
             auto display = Board::GetInstance().GetDisplay();
             if (display) {
@@ -264,7 +265,7 @@ void WifiBoard::StartNetwork() {
         
         // Display BLE configuration instructions
         std::string hint = "Connect to BLE device 'BabyMilu' to configure WiFi";
-        application.Alert("WiFi Configuration", hint.c_str(), "", bench_quick_mode ? "" : Lang::Sounds::P3_WIFICONFIG);
+        application.Alert("WiFi Configuration", hint.c_str(), "", Lang::Sounds::P3_WIFICONFIG);
         
         // Show message to guide user to connect WiFi (display in center of screen)
         ESP_LOGI(TAG, "Attempting to display WiFi connection message...");
@@ -447,7 +448,14 @@ void WifiBoard::StartNetwork() {
             }
         }
         
-        // Wait for BLE configuration
+        // Bench quick mode must not block here; otherwise BOOT presses
+        // will be ignored until Application finishes starting.
+        if (bench_quick_mode) {
+            ESP_LOGI(TAG, "Bench quick mode: skipping BLE provisioning wait loop");
+            return;
+        }
+
+        // Wait for BLE configuration (non-bench mode)
         while (wifi_config_mode_) {
             vTaskDelay(pdMS_TO_TICKS(1000));
         }
