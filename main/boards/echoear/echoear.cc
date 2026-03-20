@@ -509,7 +509,8 @@ private:
         display_->CreateOverlayMessage("touched");
         esp_timer_stop(touch_message_timer_);
         // Show briefly so the operator can see it per touch.
-        ESP_ERROR_CHECK(esp_timer_start_once(touch_message_timer_, 700 * 1000));
+        ESP_LOGI(TAG, "[TOUCH] Showing on-screen 'touched' overlay");
+        ESP_ERROR_CHECK(esp_timer_start_once(touch_message_timer_, 2000 * 1000));
     }
 
     void InitializeI2c() {

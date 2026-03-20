@@ -22,6 +22,7 @@
 #include "display/lcd_display.h"
 #include "error_log_uploader.h"
 #include "factory_test.h"
+#include "sd_card.h"
 
 static const char *TAG = "WifiBoard";
 
@@ -95,7 +96,10 @@ void WifiBoard::EnterWifiConfigMode() {
     hint += "\n\n";
     
     // 播报配置 WiFi 的提示
-    application.Alert(Lang::Strings::WIFI_CONFIG_MODE, hint.c_str(), "", Lang::Sounds::P3_WIFICONFIG);
+    {
+        const bool bench_quick_mode = IsFactoryTestMode() || SdCard::IsMounted();
+        application.Alert(Lang::Strings::WIFI_CONFIG_MODE, hint.c_str(), "", bench_quick_mode ? "" : Lang::Sounds::P3_WIFICONFIG);
+    }
     
     // Wait forever until reset after configuration
     while (true) {
@@ -129,7 +133,10 @@ void WifiBoard::EnterWifiConfigModeViaBLE() {
     
     // Display BLE configuration instructions for reconnection
     std::string hint = "WiFi disconnected. Connect to BLE device 'BabyMilu' to reconfigure WiFi";
-    application.Alert("WiFi Reconfiguration", hint.c_str(), "", Lang::Sounds::P3_WIFICONFIG);
+    {
+        const bool bench_quick_mode = IsFactoryTestMode() || SdCard::IsMounted();
+        application.Alert("WiFi Reconfiguration", hint.c_str(), "", bench_quick_mode ? "" : Lang::Sounds::P3_WIFICONFIG);
+    }
     
     // Wait for BLE configuration
     while (wifi_config_mode_) {
@@ -161,7 +168,7 @@ void WifiBoard::StartNetwork() {
             application.SetDeviceState(kDeviceStateWifiConfiguring);
 
             std::string hint = "Connect to BLE device 'BabyMilu' to add WiFi credentials";
-            application.Alert("WiFi Configuration", hint.c_str(), "", Lang::Sounds::P3_WIFICONFIG);
+            application.Alert("WiFi Configuration", hint.c_str(), "", (IsFactoryTestMode() || SdCard::IsMounted()) ? "" : Lang::Sounds::P3_WIFICONFIG);
 
             while (wifi_config_mode_) {
                 vTaskDelay(pdMS_TO_TICKS(1000));
@@ -186,6 +193,11 @@ void WifiBoard::StartNetwork() {
                  ssid_list[i].password.c_str());
     }
     
+    // Bench/factory quick mode:
+    // SD card is typically inserted during factory testing, so we use it
+    // to shorten Wi-Fi waits and skip the long "please connect" audio.
+    const bool bench_quick_mode = IsFactoryTestMode() || SdCard::IsMounted();
+
     // Factory test mode: keep boot deterministic.
     // - Do not block waiting for BLE provisioning
     // - Shorten Wi-Fi connect wait so we quickly reach audio-testing readiness
@@ -197,7 +209,7 @@ void WifiBoard::StartNetwork() {
 
         if (ssid_list.empty()) {
             // No saved networks: skip scan/BLE wait, just show the audio prompt quickly.
-            application.Alert(Lang::Strings::WIFI_CONFIG_MODE, wifi_message, "", Lang::Sounds::P3_WIFICONFIG);
+            application.Alert(Lang::Strings::WIFI_CONFIG_MODE, wifi_message, "", "");
             return;
         }
 
@@ -215,7 +227,7 @@ void WifiBoard::StartNetwork() {
         wifi_station.Stop();
 
         if (!connected) {
-            application.Alert(Lang::Strings::WIFI_CONFIG_MODE, wifi_message, "", Lang::Sounds::P3_WIFICONFIG);
+            application.Alert(Lang::Strings::WIFI_CONFIG_MODE, wifi_message, "", "");
         } else {
             auto display = Board::GetInstance().GetDisplay();
             if (display) {
@@ -243,7 +255,7 @@ void WifiBoard::StartNetwork() {
         
         // Display BLE configuration instructions
         std::string hint = "Connect to BLE device 'BabyMilu' to configure WiFi";
-        application.Alert("WiFi Configuration", hint.c_str(), "", Lang::Sounds::P3_WIFICONFIG);
+        application.Alert("WiFi Configuration", hint.c_str(), "", bench_quick_mode ? "" : Lang::Sounds::P3_WIFICONFIG);
         
         // Show message to guide user to connect WiFi (display in center of screen)
         ESP_LOGI(TAG, "Attempting to display WiFi connection message...");
@@ -364,10 +376,14 @@ void WifiBoard::StartNetwork() {
     
     wifi_station.Start();
 
-    // Try to connect to WiFi, if failed, use BLE for configuration
+    // Try to connect to WiFi, if failed, use BLE for configuration.
     // Keep this longer than per-SSID retry window (3 retries x 15s) so
     // WifiStation can finish retries before BLE fallback.
-    if (!wifi_station.WaitForConnected(60 * 1000)) {
+    //
+    // In bench/factory quick mode we shorten this drastically so BOOT testing
+    // can begin without waiting for long Wi-Fi failure timeouts.
+    const int connect_wait_ms = bench_quick_mode ? 5 * 1000 : 60 * 1000;
+    if (!wifi_station.WaitForConnected(connect_wait_ms)) {
         wifi_station.Stop();
         wifi_config_mode_ = true;
         ESP_LOGI(TAG, "WiFi connection failed, using BLE for configuration");
@@ -385,7 +401,7 @@ void WifiBoard::StartNetwork() {
         
         // Display BLE configuration instructions
         std::string hint = "WiFi connection failed. Connect to BLE device 'BabyMilu' to configure WiFi";
-        application.Alert("WiFi Configuration", hint.c_str(), "", Lang::Sounds::P3_WIFICONFIG);
+        application.Alert("WiFi Configuration", hint.c_str(), "", bench_quick_mode ? "" : Lang::Sounds::P3_WIFICONFIG);
         
         // Show message to guide user to connect WiFi (display in center of screen)
         ESP_LOGI(TAG, "Attempting to display WiFi connection message (connection failed)...");
