@@ -86,6 +86,10 @@ public:
     // Overlay message (top, does not affect layout)
     void CreateOverlayMessage(const char* message);
     void ClearOverlayMessage();
+
+    // Like CreateOverlayMessage but places it relative to the screen center.
+    // Used for factory UI cues that must not overlap the center SD indicator.
+    void CreateCenteredOverlayMessage(const char* message, lv_coord_t y_offset);
 };
 
 // RGB LCD显示器

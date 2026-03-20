@@ -506,7 +506,8 @@ private:
             return;
         }
         InitializeTouchMessageTimer();
-        display_->CreateOverlayMessage("touched");
+        // Place below the center SD indicator dot.
+        display_->CreateCenteredOverlayMessage("touched", 26);
         esp_timer_stop(touch_message_timer_);
         // Show briefly so the operator can see it per touch.
         ESP_LOGI(TAG, "[TOUCH] Showing on-screen 'touched' overlay");

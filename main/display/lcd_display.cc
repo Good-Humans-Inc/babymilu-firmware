@@ -1251,6 +1251,58 @@ void LcdDisplay::CreateOverlayMessage(const char* message)
     lv_obj_align(overlay_bubble_, LV_ALIGN_TOP_MID, 0, 0);
 }
 
+void LcdDisplay::CreateCenteredOverlayMessage(const char* message, lv_coord_t y_offset)
+{
+    ESP_LOGI("LcdDisplay", "CreateCenteredOverlayMessage called: message='%s'", message ? message : "NULL");
+    DisplayLockGuard lock(this);
+    if (message == nullptr || strlen(message) == 0) {
+        ESP_LOGW("LcdDisplay", "CreateCenteredOverlayMessage: message is empty, skipping");
+        return;
+    }
+
+    if (overlay_container_ != nullptr) {
+        lv_obj_del(overlay_container_);
+        overlay_container_ = nullptr;
+        overlay_bubble_ = nullptr;
+        overlay_text_ = nullptr;
+    }
+
+    auto screen = lv_screen_active();
+    overlay_container_ = lv_obj_create(screen);
+    lv_obj_set_width(overlay_container_, LV_HOR_RES);
+    lv_obj_set_height(overlay_container_, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(overlay_container_, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(overlay_container_, 0, 0);
+    lv_obj_set_style_pad_all(overlay_container_, 0, 0);
+    lv_obj_align(overlay_container_, LV_ALIGN_CENTER, 0, y_offset);
+    lv_obj_move_foreground(overlay_container_);
+
+    overlay_bubble_ = lv_obj_create(overlay_container_);
+    lv_obj_set_style_radius(overlay_bubble_, 8, 0);
+    lv_obj_set_scrollbar_mode(overlay_bubble_, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_set_style_border_width(overlay_bubble_, 1, 0);
+    lv_obj_set_style_border_color(overlay_bubble_, current_theme_.border, 0);
+    lv_obj_set_style_pad_all(overlay_bubble_, 8, 0);
+    lv_obj_set_style_bg_color(overlay_bubble_, current_theme_.system_bubble, 0);
+    lv_obj_set_width(overlay_bubble_, LV_SIZE_CONTENT);
+    lv_obj_set_height(overlay_bubble_, LV_SIZE_CONTENT);
+
+    overlay_text_ = lv_label_create(overlay_bubble_);
+    lv_label_set_text(overlay_text_, message);
+    lv_label_set_long_mode(overlay_text_, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_font(overlay_text_, fonts_.text_font, 0);
+    lv_obj_set_style_text_color(overlay_text_, current_theme_.system_text, 0);
+
+    lv_coord_t text_width = lv_txt_get_width(message, strlen(message), fonts_.text_font, 0);
+    lv_coord_t max_width = LV_HOR_RES * 85 / 100 - 16;
+    lv_coord_t bubble_width = (text_width < max_width) ? text_width : max_width;
+    if (bubble_width < 20) bubble_width = 20;
+    lv_obj_set_width(overlay_text_, bubble_width);
+    lv_obj_set_width(overlay_bubble_, bubble_width);
+
+    lv_obj_align(overlay_bubble_, LV_ALIGN_TOP_MID, 0, 0);
+}
+
 void LcdDisplay::ClearOverlayMessage()
 {
     ESP_LOGI("LcdDisplay", "ClearOverlayMessage called");

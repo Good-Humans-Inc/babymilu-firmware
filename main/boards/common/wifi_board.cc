@@ -198,6 +198,15 @@ void WifiBoard::StartNetwork() {
     // to shorten Wi-Fi waits and skip the long "please connect" audio.
     const bool bench_quick_mode = IsFactoryTestMode() || SdCard::IsMounted();
 
+    // By default forget saved Wi-Fi credentials in bench mode so we don't
+    // scan/reconnect on boot. This makes the Wi-Fi module "functional"
+    // validation faster because we go directly into the connect/provision UI.
+    if (bench_quick_mode && !ssid_list.empty()) {
+        ESP_LOGI(TAG, "Bench quick mode: clearing saved WiFi credentials");
+        ssid_manager.Clear();
+        ssid_list = ssid_manager.GetSsidList();
+    }
+
     // Factory test mode: keep boot deterministic.
     // - Do not block waiting for BLE provisioning
     // - Shorten Wi-Fi connect wait so we quickly reach audio-testing readiness
@@ -267,7 +276,7 @@ void WifiBoard::StartNetwork() {
             
             // Wait for display to be fully initialized (LVGL needs time)
             ESP_LOGI(TAG, "Waiting for display to be fully initialized...");
-            vTaskDelay(pdMS_TO_TICKS(2000)); // Wait 2 seconds for LVGL to initialize
+            vTaskDelay(pdMS_TO_TICKS(bench_quick_mode ? 100 : 2000)); // Wait shorter in bench mode
             
             const char* wifi_message = "Connect me to wifi with BabyMilu App. Can't wait to meet you again.";
             
@@ -286,9 +295,15 @@ void WifiBoard::StartNetwork() {
             }
         }
         
-        // Wait for BLE configuration
-        while (wifi_config_mode_) {
-            vTaskDelay(pdMS_TO_TICKS(1000));
+        // Wait for BLE configuration unless we're in bench mode (where we
+        // want to return immediately so BOOT can start audio testing).
+        if (!bench_quick_mode) {
+            while (wifi_config_mode_) {
+                vTaskDelay(pdMS_TO_TICKS(1000));
+            }
+        } else {
+            ESP_LOGI(TAG, "Bench quick mode: not waiting for BLE WiFi provisioning");
+            return;
         }
         
         // After BLE configuration, restart the system for clean WiFi startup
