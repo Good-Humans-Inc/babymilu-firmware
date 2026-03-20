@@ -53,8 +53,8 @@ static void SdAnimInitTask(void* /*arg*/) {
         ESP_LOGI(TAG, "[SD/ANIM] SD card already mounted, skipping startup");
     }
 
-    // Factory test indicator: SD present => show red dot in the center.
-    if (IsFactoryTestMode() && SdCard::IsMounted()) {
+    // SD present => show red dot in the center.
+    if (SdCard::IsMounted()) {
         auto* display = Board::GetInstance().GetDisplay();
         if (display != nullptr) {
             display->ShowFactorySdDot(true);
@@ -442,6 +442,7 @@ private:
     PowerSaveTimer* power_save_timer_ = nullptr;
     esp_timer_handle_t emotion_reset_timer_ = nullptr;  // Timer to reset emotion to previous state after one animation cycle
     esp_timer_handle_t volume_message_timer_ = nullptr;  // Timer to clear volume message
+    esp_timer_handle_t touch_message_timer_ = nullptr;   // Timer to clear "touched" overlay
     std::string previous_emotion_ = "normal";  // Store previous emotion string to restore
     int previous_volume_ = -1;  // Store volume before muting (for restore on unmute)
 
@@ -478,6 +479,37 @@ private:
         }
         esp_timer_stop(volume_message_timer_);
         ESP_ERROR_CHECK(esp_timer_start_once(volume_message_timer_, 1000 * 1000));
+    }
+
+    void InitializeTouchMessageTimer() {
+        if (touch_message_timer_ != nullptr) {
+            return;
+        }
+        esp_timer_create_args_t timer_args = {
+            .callback = [](void* arg) {
+                auto self = static_cast<EchoEar*>(arg);
+                if (self == nullptr || self->display_ == nullptr) {
+                    return;
+                }
+                self->display_->ClearOverlayMessage();
+            },
+            .arg = this,
+            .dispatch_method = ESP_TIMER_TASK,
+            .name = "touch_msg_timer",
+            .skip_unhandled_events = true,
+        };
+        ESP_ERROR_CHECK(esp_timer_create(&timer_args, &touch_message_timer_));
+    }
+
+    void ShowTouchDetectedMessage() {
+        if (display_ == nullptr) {
+            return;
+        }
+        InitializeTouchMessageTimer();
+        display_->CreateOverlayMessage("touched");
+        esp_timer_stop(touch_message_timer_);
+        // Show briefly so the operator can see it per touch.
+        ESP_ERROR_CHECK(esp_timer_start_once(touch_message_timer_, 700 * 1000));
     }
 
     void InitializeI2c() {
@@ -860,6 +892,10 @@ private:
                     if (board->power_save_timer_) {
                         board->power_save_timer_->WakeUp();
                     }
+
+                    // Show an explicit on-screen indicator ("touched") whenever
+                    // the GPIO7 capacitive touch sensor triggers.
+                    board->ShowTouchDetectedMessage();
 
                     // Stop any existing emotion reset timer
                     if (board->emotion_reset_timer_ != nullptr) {

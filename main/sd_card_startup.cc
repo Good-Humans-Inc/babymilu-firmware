@@ -26,8 +26,10 @@ esp_err_t SdCardStartup::ProcessStartup()
         return ret;
     }
 
-    // Factory test indicator: SD present => show red dot at screen center.
-    if (IsFactoryTestMode() && SdCard::IsMounted()) {
+    // SD present => show red dot at screen center.
+    // (Keep it independent from partition-based "factory mode" to avoid false negatives
+    // when factory images are flashed to a non-"factory" running partition.)
+    if (SdCard::IsMounted()) {
         auto* display = Board::GetInstance().GetDisplay();
         if (display != nullptr) {
             display->ShowFactorySdDot(true);
