@@ -42,6 +42,9 @@ protected:
     lv_obj_t* overlay_bubble_ = nullptr;
     lv_obj_t* overlay_text_ = nullptr;
 
+    // Factory test UI: red center dot when SD card is present
+    lv_obj_t* factory_sd_dot_ = nullptr;
+
     DisplayFonts fonts_;
     ThemeColors current_theme_;
     bool display_rotated_180_ = false;  // Track 180° rotation state
@@ -76,6 +79,9 @@ public:
     
     // Public method to clear all system messages created by CreateSystemMessage
     void ClearSystemMessages();
+
+    // Factory test indicator (no-op unless SetupUI created the widget)
+    virtual void ShowFactorySdDot(bool present) override;
 
     // Overlay message (top, does not affect layout)
     void CreateOverlayMessage(const char* message);

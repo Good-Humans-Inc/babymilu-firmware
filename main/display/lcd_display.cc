@@ -387,6 +387,16 @@ void LcdDisplay::SetupUI()
     lv_obj_set_style_text_color(mute_label_, current_theme_.text, 0);
     lv_obj_align(mute_label_, LV_ALIGN_TOP_RIGHT, -2, 2);
 
+    // Factory test indicator: SD-present red dot in the center.
+    // Keep it hidden by default; SdCard startup logic will show it if mounted.
+    factory_sd_dot_ = lv_obj_create(screen);
+    lv_obj_set_size(factory_sd_dot_, 16, 16);
+    lv_obj_set_style_radius(factory_sd_dot_, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(factory_sd_dot_, lv_color_hex(0xFF0000), 0);
+    lv_obj_set_style_border_width(factory_sd_dot_, 0, 0);
+    lv_obj_add_flag(factory_sd_dot_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_align(factory_sd_dot_, LV_ALIGN_CENTER, 0, 0);
+
     // Enable scrolling for chat content
     lv_obj_set_scrollbar_mode(content_, LV_SCROLLBAR_MODE_OFF);
     lv_obj_set_scroll_dir(content_, LV_DIR_VER);
@@ -895,6 +905,16 @@ void LcdDisplay::SetupUI()
     lv_obj_set_style_text_color(mute_label_, current_theme_.text, 0);
     lv_obj_align(mute_label_, LV_ALIGN_TOP_RIGHT, -2, 2);
 
+    // Factory test indicator: SD-present red dot in the center.
+    // Keep it hidden by default; SdCard startup logic will show it if mounted.
+    factory_sd_dot_ = lv_obj_create(screen);
+    lv_obj_set_size(factory_sd_dot_, 16, 16);
+    lv_obj_set_style_radius(factory_sd_dot_, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(factory_sd_dot_, lv_color_hex(0xFF0000), 0);
+    lv_obj_set_style_border_width(factory_sd_dot_, 0, 0);
+    lv_obj_add_flag(factory_sd_dot_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_align(factory_sd_dot_, LV_ALIGN_CENTER, 0, 0);
+
     lv_obj_set_flex_flow(content_, LV_FLEX_FLOW_COLUMN);                                                     // 垂直布局（从上到下）
     lv_obj_set_flex_align(content_, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER); // 子对象居中对齐，优先显示emotion
 
@@ -1160,6 +1180,23 @@ void LcdDisplay::ClearSystemMessages()
         }
     }
     ESP_LOGI("LcdDisplay", "ClearSystemMessages: Removed %d system message(s)", removed_count);
+}
+
+void LcdDisplay::ShowFactorySdDot(bool present)
+{
+    DisplayLockGuard lock(this);
+    if (factory_sd_dot_ == nullptr)
+    {
+        return;
+    }
+    if (present)
+    {
+        lv_obj_clear_flag(factory_sd_dot_, LV_OBJ_FLAG_HIDDEN);
+    }
+    else
+    {
+        lv_obj_add_flag(factory_sd_dot_, LV_OBJ_FLAG_HIDDEN);
+    }
 }
 
 void LcdDisplay::CreateOverlayMessage(const char* message)

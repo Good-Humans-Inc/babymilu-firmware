@@ -21,6 +21,7 @@
 #include "animation/animation.h"
 #include "display/lcd_display.h"
 #include "error_log_uploader.h"
+#include "factory_test.h"
 
 static const char *TAG = "WifiBoard";
 
@@ -185,6 +186,45 @@ void WifiBoard::StartNetwork() {
                  ssid_list[i].password.c_str());
     }
     
+    // Factory test mode: keep boot deterministic.
+    // - Do not block waiting for BLE provisioning
+    // - Shorten Wi-Fi connect wait so we quickly reach audio-testing readiness
+    if (IsFactoryTestMode()) {
+        auto& application = Application::GetInstance();
+        application.SetDeviceState(kDeviceStateWifiConfiguring);
+
+        const char* wifi_message = "Connect me to wifi with BabyMilu App. Audio test is ready (Boot=record, Boot again=play).";
+
+        if (ssid_list.empty()) {
+            // No saved networks: skip scan/BLE wait, just show the audio prompt quickly.
+            application.Alert(Lang::Strings::WIFI_CONFIG_MODE, wifi_message, "", Lang::Sounds::P3_WIFICONFIG);
+            return;
+        }
+
+        auto& wifi_station = WifiStation::GetInstance();
+        wifi_station.OnScanBegin([&]() {
+            auto display = Board::GetInstance().GetDisplay();
+            if (display) {
+                display->ShowNotification(Lang::Strings::SCANNING_WIFI, 2000);
+            }
+        });
+
+        // Start Wi-Fi and wait briefly for a connection attempt (hardware validation).
+        wifi_station.Start();
+        bool connected = wifi_station.WaitForConnected(5 * 1000);
+        wifi_station.Stop();
+
+        if (!connected) {
+            application.Alert(Lang::Strings::WIFI_CONFIG_MODE, wifi_message, "", Lang::Sounds::P3_WIFICONFIG);
+        } else {
+            auto display = Board::GetInstance().GetDisplay();
+            if (display) {
+                display->ShowNotification("WiFi connected (factory fast check)", 3000);
+            }
+        }
+        return;
+    }
+
     if (ssid_list.empty()) {
         // No WiFi credentials found, use BLE for configuration
         wifi_config_mode_ = true;

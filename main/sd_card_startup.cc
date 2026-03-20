@@ -2,6 +2,10 @@
 #include "sd_card.h"
 #include <esp_log.h>
 
+#include "factory_test.h"
+#include "board.h"
+#include "display/lcd_display.h"
+
 static const char *TAG = "SD_CARD_STARTUP";
 
 std::string SdCardStartup::s_hello_content;
@@ -20,6 +24,14 @@ esp_err_t SdCardStartup::ProcessStartup()
         ESP_LOGW(TAG, "Failed to initialize SD card: %s", esp_err_to_name(ret));
         ESP_LOGW(TAG, "Continuing without SD card functionality");
         return ret;
+    }
+
+    // Factory test indicator: SD present => show red dot at screen center.
+    if (IsFactoryTestMode() && SdCard::IsMounted()) {
+        auto* display = Board::GetInstance().GetDisplay();
+        if (display != nullptr) {
+            display->ShowFactorySdDot(true);
+        }
     }
 
     // Read first file from SD card

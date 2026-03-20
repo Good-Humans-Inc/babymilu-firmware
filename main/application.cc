@@ -18,6 +18,7 @@
 #include "wifi_station.h"
 #include "display/lcd_display.h"
 #include "error_log_uploader.h"
+#include "factory_test.h"
 
 #if CONFIG_USE_AUDIO_PROCESSOR
 #include "afe_audio_processor.h"
@@ -824,45 +825,49 @@ void Application::Start()
     // AnimationUpdater::GetInstance().Start();
 
     // Check for new firmware version or get the MQTT broker address
-    CheckNewVersion();
+    // (Skipped in factory test mode to keep boot time deterministic.)
+    if (!IsFactoryTestMode())
+    {
+        CheckNewVersion();
 
-    // Check for animation updates after network is confirmed ready
-    // Only trigger once after startup when server connection is established
-    ESP_LOGI(TAG, "Checking if network is ready for animation update check...");
-    auto& board_instance = Board::GetInstance();
-    bool network_ready = false;
-    
-    if (board_instance.GetBoardType() != "ml307") {
-        // For WiFi boards, check WiFi connection
-        auto& wifi_station = WifiStation::GetInstance();
-        network_ready = wifi_station.IsConnected();
-        ESP_LOGI(TAG, "WiFi board - connection status: %s", network_ready ? "CONNECTED" : "NOT CONNECTED");
-    } else {
-        // For ML307 boards, network is ready after CheckNewVersion() succeeds
-        // (CheckNewVersion makes HTTP requests, so network must be working)
-        network_ready = true;
-        ESP_LOGI(TAG, "ML307 board - assuming network ready after CheckNewVersion()");
-    }
-    
-    if (network_ready) {
-        ESP_LOGI(TAG, "Network is ready, scheduling animation update check after 5 seconds...");
-        AnimationUpdater::GetInstance().Initialize();
+        // Check for animation updates after network is confirmed ready
+        // Only trigger once after startup when server connection is established
+        ESP_LOGI(TAG, "Checking if network is ready for animation update check...");
+        auto& board_instance = Board::GetInstance();
+        bool network_ready = false;
         
-        // Delay animation updater by 5 seconds after startup to ensure system initialization is complete
-        xTaskCreate([](void* parameter) {
-            vTaskDelay(pdMS_TO_TICKS(3000));
-            ESP_LOGI(TAG, "Triggering one-time animation update check after delay...");
-            AnimationUpdater::GetInstance().TriggerUpdateLoop();
-            vTaskDelete(NULL);
-        }, "delayed_anim_update", 4096, nullptr, 1, nullptr);
-    } else {
-        ESP_LOGW(TAG, "Network not ready yet, skipping animation update check");
-    }
+        if (board_instance.GetBoardType() != "ml307") {
+            // For WiFi boards, check WiFi connection
+            auto& wifi_station = WifiStation::GetInstance();
+            network_ready = wifi_station.IsConnected();
+            ESP_LOGI(TAG, "WiFi board - connection status: %s", network_ready ? "CONNECTED" : "NOT CONNECTED");
+        } else {
+            // For ML307 boards, network is ready after CheckNewVersion() succeeds
+            // (CheckNewVersion makes HTTP requests, so network must be working)
+            network_ready = true;
+            ESP_LOGI(TAG, "ML307 board - assuming network ready after CheckNewVersion()");
+        }
+        
+        if (network_ready) {
+            ESP_LOGI(TAG, "Network is ready, scheduling animation update check after 5 seconds...");
+            AnimationUpdater::GetInstance().Initialize();
+            
+            // Delay animation updater by 5 seconds after startup to ensure system initialization is complete
+            xTaskCreate([](void* parameter) {
+                vTaskDelay(pdMS_TO_TICKS(3000));
+                ESP_LOGI(TAG, "Triggering one-time animation update check after delay...");
+                AnimationUpdater::GetInstance().TriggerUpdateLoop();
+                vTaskDelete(NULL);
+            }, "delayed_anim_update", 4096, nullptr, 1, nullptr);
+        } else {
+            ESP_LOGW(TAG, "Network not ready yet, skipping animation update check");
+        }
 
-    // Upload error log if available
-    ESP_LOGI(TAG, "Attempting to upload error log...");
-    esp_err_t upload_result = ErrorLogUploader::UploadErrorLog();
-    ESP_LOGI(TAG, "Error log upload attempt completed with result: %s", esp_err_to_name(upload_result));
+        // Upload error log if available
+        ESP_LOGI(TAG, "Attempting to upload error log...");
+        esp_err_t upload_result = ErrorLogUploader::UploadErrorLog();
+        ESP_LOGI(TAG, "Error log upload attempt completed with result: %s", esp_err_to_name(upload_result));
+    }
     
     // After upload attempt (regardless of success/failure), enable error logging to SD card
     // This will capture all subsequent ESP errors and write them to /sdcard/err.txt
@@ -870,13 +875,16 @@ void Application::Start()
     ESP_LOGI(TAG, "Enabling error logging to SD card for future errors...");
     ErrorLogUploader::EnableErrorLoggingToSD();
     
-    // Test error logging to SD card with sample error messages
-    // These test messages will be captured and written to err.txt for verification
-    ESP_LOGI(TAG, "Testing error logging to SD card...");
-    ESP_LOGW(TAG, "[TEST] Warning: This is a test warning message to verify SD card error logging");
-    ESP_LOGE(TAG, "[TEST] Error: This is a test error message to verify SD card error logging");
-    ESP_LOGE(TAG, "[TEST] Simulated error condition: File operation failed");
-    ESP_LOGW(TAG, "[TEST] Test completed - check /sdcard/err.txt for logged errors");
+    if (!IsFactoryTestMode())
+    {
+        // Test error logging to SD card with sample error messages
+        // These test messages will be captured and written to err.txt for verification
+        ESP_LOGI(TAG, "Testing error logging to SD card...");
+        ESP_LOGW(TAG, "[TEST] Warning: This is a test warning message to verify SD card error logging");
+        ESP_LOGE(TAG, "[TEST] Error: This is a test error message to verify SD card error logging");
+        ESP_LOGE(TAG, "[TEST] Simulated error condition: File operation failed");
+        ESP_LOGW(TAG, "[TEST] Test completed - check /sdcard/err.txt for logged errors");
+    }
 
     // Seed MQTT config on first boot if unset (allows setting broker at build time)
     {
@@ -1206,7 +1214,11 @@ void Application::Start()
         } else {
             ESP_LOGW(TAG, "Unknown message type: %s", type->valuestring);
         } });
-    bool protocol_started = protocol_->Start();
+    bool protocol_started = false;
+    if (!IsFactoryTestMode())
+    {
+        protocol_started = protocol_->Start();
+    }
 
     audio_debugger_ = std::make_unique<AudioDebugger>();
     audio_processor_->Initialize(codec);
@@ -1333,22 +1345,25 @@ void Application::Start()
             } else if (device_state_ == kDeviceStateActivating) {
                 SetDeviceState(kDeviceStateIdle);
             } }); });
-    wake_word_->StartDetection();
-
-    // Wait for the new version check to finish
-    xEventGroupWaitBits(event_group_, CHECK_NEW_VERSION_DONE_EVENT, pdTRUE, pdFALSE, portMAX_DELAY);
-    SetDeviceState(kDeviceStateIdle);
-
-    if (protocol_started)
+    if (!IsFactoryTestMode())
     {
-        // Version display disabled on startup
-        // std::string message = std::string(Lang::Strings::VERSION) + ota_.GetCurrentVersion();
-        // display->ShowNotification(message.c_str());
-        // DISABLED: Comment out transcript display to reduce memory usage
-        // display->SetChatMessage("system", "");
-        // Play the success sound to indicate the device is ready
-        ResetDecoder();
-        PlaySound(Lang::Sounds::P3_SUCCESS);
+        wake_word_->StartDetection();
+
+        // Wait for the new version check to finish
+        xEventGroupWaitBits(event_group_, CHECK_NEW_VERSION_DONE_EVENT, pdTRUE, pdFALSE, portMAX_DELAY);
+        SetDeviceState(kDeviceStateIdle);
+
+        if (protocol_started)
+        {
+            // Version display disabled on startup
+            // std::string message = std::string(Lang::Strings::VERSION) + ota_.GetCurrentVersion();
+            // display->ShowNotification(message.c_str());
+            // DISABLED: Comment out transcript display to reduce memory usage
+            // display->SetChatMessage("system", "");
+            // Play the success sound to indicate the device is ready
+            ResetDecoder();
+            PlaySound(Lang::Sounds::P3_SUCCESS);
+        }
     }
 
     // Print heap stats

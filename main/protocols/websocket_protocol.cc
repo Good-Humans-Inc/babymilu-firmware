@@ -14,6 +14,9 @@
 
 #define TAG "WS"
 
+// Hardcoded fallback when no valid URL in settings and OTA URL not set (remove when using config)
+static const char* kDefaultWebSocketUrl = "ws://34.44.233.1:8000/xiaozhi/v1";
+
 WebsocketProtocol::WebsocketProtocol() {
     event_group_handle_ = xEventGroupCreate();
 }
@@ -109,6 +112,11 @@ static bool IsValidWebSocketUrl(const std::string& url) {
         return false;
     }
     
+    // Reject placeholder hostnames (e.g. from server config that was never updated)
+    if (url.find("<VM_EXTERNAL_IP>") != std::string::npos) {
+        return false;
+    }
+    
     // Check for localhost or loopback addresses
     if (url.find("127.0.0.1") != std::string::npos ||
         url.find("localhost") != std::string::npos ||
@@ -173,8 +181,8 @@ bool WebsocketProtocol::OpenAudioChannel() {
         }
         
         if (url.empty()) {
-            ESP_LOGE(TAG, "No valid WebSocket URL configured and could not derive from OTA URL");
-            return false;
+            url = kDefaultWebSocketUrl;
+            ESP_LOGI(TAG, "Using hardcoded default WebSocket URL: %s", url.c_str());
         }
     } else {
         ESP_LOGI(TAG, "Using WebSocket URL from settings: %s", url.c_str());

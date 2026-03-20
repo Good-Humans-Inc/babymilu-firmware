@@ -10,6 +10,7 @@
 #include "sd_card.h"
 #include "sd_card_startup.h"
 #include "power_save_timer.h"
+#include "factory_test.h"
 
 #include <wifi_station.h>
 #include <ssid_manager.h>
@@ -50,6 +51,14 @@ static void SdAnimInitTask(void* /*arg*/) {
         ESP_LOGI(TAG, "[SD/ANIM] SdCardStartup::ProcessStartup() returned: %s", esp_err_to_name(ret));
     } else {
         ESP_LOGI(TAG, "[SD/ANIM] SD card already mounted, skipping startup");
+    }
+
+    // Factory test indicator: SD present => show red dot in the center.
+    if (IsFactoryTestMode() && SdCard::IsMounted()) {
+        auto* display = Board::GetInstance().GetDisplay();
+        if (display != nullptr) {
+            display->ShowFactorySdDot(true);
+        }
     }
     
     ESP_LOGI(TAG, "[SD/ANIM] === Initializing animations ===");
