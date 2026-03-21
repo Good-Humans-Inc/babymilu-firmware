@@ -67,6 +67,8 @@ public:
     DeviceState GetDeviceState() const { return device_state_; }
     bool IsVoiceDetected() const { return voice_detected_; }
     void Schedule(std::function<void()> callback);
+    /** Wake MainEventLoop (e.g. after esp_timer) without queuing a callback. */
+    void WakeMainLoop();
     void SetDeviceState(DeviceState state);
     void Alert(const char* status, const char* message, const char* emotion = "", const std::string_view& sound = "");
     void DismissAlert();
@@ -89,6 +91,8 @@ public:
     Protocol* GetActiveProtocol();  // Returns the protocol to use for audio (WebSocket if available, else primary)
     void OpenWebSocketConnection();  // Opens WebSocket connection for conversations
     bool IsWebSocketConnected() const;  // Check if WebSocket is already connected
+    /** Raw PCM chunks for SD MP3 playback (bypasses Opus decode queue). */
+    void AddAudioData(AudioStreamPacket&& packet);
 
 private:
     Application();

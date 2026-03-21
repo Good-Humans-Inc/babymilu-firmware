@@ -280,6 +280,10 @@ void Display::SetChatMessage(const char* role, const char* content) {
     ESP_LOGI("Display", "SetChatMessage: text set successfully");
 }
 
+void Display::SetMusicInfo(const char* song_name) {
+    (void)song_name;
+}
+
 void Display::SetTheme(const std::string& theme_name) {
     current_theme_name_ = theme_name;
     Settings settings("display", true);

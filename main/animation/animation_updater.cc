@@ -17,8 +17,118 @@
 #include <sys/stat.h>
 #include <errno.h>
 #include <dirent.h>
+#include <atomic>
+
+#if defined(CONFIG_BOARD_TYPE_ECHOEAR)
+#include "music.h"
+#include "application.h"
+#include <freertos/task.h>
+#endif
 
 #define TAG "AnimationUpdater"
+
+/** Remote + main updater task stack size in bytes (ESP-IDF xTaskCreate uses bytes). Must fit largest INTERNAL block. */
+static constexpr uint32_t kAnimationUpdaterTaskStackBytes = 8192;
+
+#if defined(CONFIG_BOARD_TYPE_ECHOEAR)
+// Popup must NOT xTaskCreate while remote_anim_update still holds ~8KB internal stack.
+// Arm an esp_timer; after it fires, MainEventLoop creates ee_popup_mp3 (updater task is gone).
+
+static std::atomic<bool> s_echoear_popup_once{false};
+static std::atomic<bool> s_echoear_popup_main_should_try{false};
+static esp_timer_handle_t s_echoear_popup_wake_timer = nullptr;
+
+static void EchoEarPopupMp3DeferredTask(void* /*arg*/) {
+    vTaskDelay(pdMS_TO_TICKS(800));
+    if (!SdCard::IsMounted()) {
+        ESP_LOGW(TAG, "[EchoEar] Deferred popup.mp3: SD not mounted");
+        vTaskDelete(nullptr);
+        return;
+    }
+    Music* music = Board::GetInstance().GetMusicSd();
+    if (music) {
+        ESP_LOGI(TAG, "[EchoEar] Deferred start: /sdcard/popup.mp3");
+        if (!music->StartStreaming("/sdcard/popup.mp3")) {
+            ESP_LOGW(TAG, "[EchoEar] popup.mp3 StartStreaming failed (threads/OOM?)");
+        }
+    }
+    vTaskDelete(nullptr);
+}
+
+static void echoear_popup_wake_timer_cb(void* /*arg*/) {
+    s_echoear_popup_main_should_try.store(true);
+    Application::GetInstance().WakeMainLoop();
+}
+
+static esp_err_t echoear_ensure_popup_wake_timer() {
+    if (s_echoear_popup_wake_timer != nullptr) {
+        return ESP_OK;
+    }
+    esp_timer_create_args_t args = {};
+    args.callback = echoear_popup_wake_timer_cb;
+    args.dispatch_method = ESP_TIMER_TASK;
+    args.name = "ee_pop_wk";
+    args.skip_unhandled_events = true;
+    return esp_timer_create(&args, &s_echoear_popup_wake_timer);
+}
+
+void AnimationUpdater::PollEchoEarDeferredPopupFromMain() {
+    if (!s_echoear_popup_main_should_try.exchange(false)) {
+        return;
+    }
+    if (!SdCard::IsMounted()) {
+        ESP_LOGW(TAG, "[EchoEar] popup.mp3: SD not mounted at main-loop create");
+        return;
+    }
+    constexpr uint32_t kPopupTaskStackBytes = 3072;
+    BaseType_t ok = xTaskCreate(
+        EchoEarPopupMp3DeferredTask,
+        "ee_popup_mp3",
+        kPopupTaskStackBytes,
+        nullptr,
+        3,
+        nullptr);
+    if (ok != pdPASS) {
+        ESP_LOGE(TAG, "[EchoEar] ee_popup_mp3 xTaskCreate failed (stack=%u)", (unsigned)kPopupTaskStackBytes);
+        s_echoear_popup_once.store(false);
+        return;
+    }
+    ESP_LOGI(TAG, "[EchoEar] ee_popup_mp3 started from main loop");
+}
+
+static void EchoEarPlayPopupMp3AfterRemoteUpdater(bool do_play) {
+    if (!do_play) {
+        return;
+    }
+    bool expected = false;
+    if (!s_echoear_popup_once.compare_exchange_strong(expected, true)) {
+        return;
+    }
+    if (!SdCard::IsMounted()) {
+        ESP_LOGW(TAG, "[EchoEar] Skip popup.mp3: SD not mounted");
+        s_echoear_popup_once.store(false);
+        return;
+    }
+    esp_err_t te = echoear_ensure_popup_wake_timer();
+    if (te != ESP_OK) {
+        ESP_LOGE(TAG, "[EchoEar] popup wake timer create failed: %s", esp_err_to_name(te));
+        s_echoear_popup_once.store(false);
+        return;
+    }
+    s_echoear_popup_main_should_try.store(false);
+    te = esp_timer_start_once(s_echoear_popup_wake_timer, 80 * 1000);
+    if (te != ESP_OK) {
+        ESP_LOGE(TAG, "[EchoEar] esp_timer_start_once failed: %s", esp_err_to_name(te));
+        s_echoear_popup_once.store(false);
+        return;
+    }
+    ESP_LOGI(TAG, "[EchoEar] popup.mp3: main loop will create ee_popup_mp3 after 80ms (updater stack freed)");
+}
+#else
+static void EchoEarPlayPopupMp3AfterRemoteUpdater(bool) {}
+
+void AnimationUpdater::PollEchoEarDeferredPopupFromMain() {}
+#endif
 
 // Server version - should match the lambda function's SERVER_VERSION
 #define SERVER_VERSION "1.0.1"
@@ -72,7 +182,7 @@ void AnimationUpdater::Start() {
     BaseType_t ret = xTaskCreate(
         UpdateTask,
         "animation_updater",
-        12288,  // 12KB stack to accommodate HTTP/TLS and validation
+        kAnimationUpdaterTaskStackBytes,
         this,
         1,     // Very low priority to avoid interfering with audio processing
         &update_task_handle_
@@ -390,12 +500,12 @@ std::string AnimationUpdater::GetStatusJson() const {
 
 void AnimationUpdater::UpdateTask(void* parameter) {
     AnimationUpdater* updater = static_cast<AnimationUpdater*>(parameter);
-    updater->UpdateLoop();
+    updater->UpdateLoop(false);
 }
 
 void AnimationUpdater::RemoteUpdateTask(void* parameter) {
     AnimationUpdater* updater = static_cast<AnimationUpdater*>(parameter);
-    updater->UpdateLoop();
+    updater->UpdateLoop(true);
 }
 
 void AnimationUpdater::TriggerUpdateLoop() {
@@ -405,30 +515,30 @@ void AnimationUpdater::TriggerUpdateLoop() {
     size_t free_heap = esp_get_free_heap_size();
     size_t min_free_heap = esp_get_minimum_free_heap_size();
     size_t largest_free_block = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
-    ESP_LOGI(TAG, "Free heap: %u bytes, Min free heap: %u bytes, Largest free block: %u bytes", 
+    ESP_LOGI(TAG, "Free heap: %u bytes (incl. PSRAM), Min free: %u, Largest INTERNAL block: %u (task stacks use this, not PSRAM total)",
              (uint32_t)free_heap, (uint32_t)min_free_heap, (uint32_t)largest_free_block);
     
-    // Task creation requires contiguous memory, so check largest free block
-    size_t required_memory = 12288 + 1024; // Stack + overhead
+    const size_t stack_bytes = kAnimationUpdaterTaskStackBytes;
+    size_t required_memory = stack_bytes + 1024; // Stack + overhead
     if (largest_free_block < required_memory) {
-        ESP_LOGW(TAG, "Largest free block (%u bytes) too small for 12KB stack", 
-                 (uint32_t)largest_free_block);
+        ESP_LOGW(TAG, "Largest INTERNAL block (%u bytes) may be too small for %u-byte task stack",
+                 (uint32_t)largest_free_block, (unsigned)stack_bytes);
     }
     
-    ESP_LOGI(TAG, "Attempting to create remote update task with 12KB stack...");
+    ESP_LOGI(TAG, "Creating remote_anim_update (stack=%u bytes)...", (unsigned)kAnimationUpdaterTaskStackBytes);
     
     // Create a task to run UpdateLoop (since it calls vTaskDelete at the end)
     BaseType_t ret = xTaskCreate(
         RemoteUpdateTask,
         "remote_anim_update",
-        12288,
+        kAnimationUpdaterTaskStackBytes,
         this,
         1,      // Low priority
         nullptr // Don't need to track the handle since task will delete itself
     );
     
     if (ret == pdPASS) {
-        ESP_LOGI(TAG, "Remote update task created successfully with 12KB stack");
+        ESP_LOGI(TAG, "Remote update task created successfully");
     } else {
         // Log detailed error information
         free_heap = esp_get_free_heap_size();
@@ -440,10 +550,18 @@ void AnimationUpdater::TriggerUpdateLoop() {
         ESP_LOGE(TAG, "Memory fragmentation detected - largest contiguous block (%u bytes) is insufficient", 
                  (uint32_t)largest_free_block);
         ESP_LOGE(TAG, "Possible solutions: free memory or wait for memory to defragment");
+        EchoEarPlayPopupMp3AfterRemoteUpdater(true);
     }
 }
 
-void AnimationUpdater::UpdateLoop() {
+void AnimationUpdater::LeaveUpdateLoopTask(bool play_echoear_startup_chime_when_done) {
+    EchoEarPlayPopupMp3AfterRemoteUpdater(play_echoear_startup_chime_when_done);
+    is_running_.store(false);
+    update_task_handle_ = nullptr;
+    vTaskDelete(NULL);
+}
+
+void AnimationUpdater::UpdateLoop(bool play_echoear_startup_chime_when_done) {
     ESP_LOGI(TAG, "Animation updater task started");
     
     // Wait 10 seconds to ensure network is fully ready
@@ -460,9 +578,7 @@ void AnimationUpdater::UpdateLoop() {
         esp_err_t init_ret = SdCard::Initialize();
         if (init_ret != ESP_OK) {
             ESP_LOGE(TAG, "SD card not available, cannot download");
-            is_running_.store(false);
-            update_task_handle_ = nullptr;
-            vTaskDelete(NULL);
+            LeaveUpdateLoopTask(play_echoear_startup_chime_when_done);
             return;
         }
     }
@@ -490,9 +606,7 @@ void AnimationUpdater::UpdateLoop() {
             if (ValidateGifMegaAnimationFileFromDisk(file_path)) {
                 ESP_LOGI(TAG, "Local file is valid and matches remote file. Skipping download.");
                 ESP_LOGI(TAG, "No download needed - file is already up to date.");
-                is_running_.store(false);
-                update_task_handle_ = nullptr;
-                vTaskDelete(NULL);
+                LeaveUpdateLoopTask(play_echoear_startup_chime_when_done);
                 return;
             } else {
                 ESP_LOGW(TAG, "Local file header matches but validation failed. File may be corrupted. Will re-download.");
@@ -553,9 +667,7 @@ void AnimationUpdater::UpdateLoop() {
     auto http = std::unique_ptr<Http>(board.CreateHttp());
     if (!http) {
         ESP_LOGE(TAG, "Failed to create HTTP client");
-        is_running_.store(false);
-        update_task_handle_ = nullptr;
-        vTaskDelete(NULL);
+        LeaveUpdateLoopTask(play_echoear_startup_chime_when_done);
         return;
     }
     
@@ -568,9 +680,7 @@ void AnimationUpdater::UpdateLoop() {
     // Open connection
     if (!http->Open("GET", url)) {
         ESP_LOGE(TAG, "Failed to open HTTP connection");
-        is_running_.store(false);
-        update_task_handle_ = nullptr;
-        vTaskDelete(NULL);
+        LeaveUpdateLoopTask(play_echoear_startup_chime_when_done);
         return;
     }
     
@@ -579,9 +689,7 @@ void AnimationUpdater::UpdateLoop() {
     ESP_LOGI(TAG, "HTTP status code: %d", status_code);
     if (status_code != 200) {
         http->Close();
-        is_running_.store(false);
-        update_task_handle_ = nullptr;
-        vTaskDelete(NULL);
+        LeaveUpdateLoopTask(play_echoear_startup_chime_when_done);
         return;
     }
     
@@ -596,9 +704,7 @@ void AnimationUpdater::UpdateLoop() {
     if (!file) {
         ESP_LOGE(TAG, "Failed to open file for writing: %s", file_path);
         http->Close();
-        is_running_.store(false);
-        update_task_handle_ = nullptr;
-        vTaskDelete(NULL);
+        LeaveUpdateLoopTask(play_echoear_startup_chime_when_done);
         return;
     }
     
@@ -620,9 +726,7 @@ void AnimationUpdater::UpdateLoop() {
             fclose(file);
             unlink(file_path);
             http->Close();
-            is_running_.store(false);
-            update_task_handle_ = nullptr;
-            vTaskDelete(NULL);
+            LeaveUpdateLoopTask(play_echoear_startup_chime_when_done);
             return;
         }
         
@@ -642,9 +746,7 @@ void AnimationUpdater::UpdateLoop() {
         fclose(file);
         unlink(file_path);
         http->Close();
-        is_running_.store(false);
-        update_task_handle_ = nullptr;
-        vTaskDelete(NULL);
+        LeaveUpdateLoopTask(play_echoear_startup_chime_when_done);
         return;
     }
     
@@ -669,11 +771,6 @@ void AnimationUpdater::UpdateLoop() {
     
     ESP_LOGI(TAG, "Rebooting now...");
     esp_restart();
-    
-    // Should never reach here
-    is_running_.store(false);
-    update_task_handle_ = nullptr;
-    vTaskDelete(NULL); // Delete this task
 }
 
 // Original HTTP server checking logic

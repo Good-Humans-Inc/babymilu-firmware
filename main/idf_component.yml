@@ -34,6 +34,10 @@ dependencies:
   espressif/esp_mmap_assets: '>=1.2'
   txp666/otto-emoji-gif-component: ~1.0.2
 
+  # SD MP3 (Xiaozhi SP32SD1114 / esp32_music_sdcard)
+  chmorgan/esp-libhelix-mp3:
+    version: "*"
+
   # BMI270 Gesture Sensor
   espressif/bmi270_sensor:
     version: ^0.1.0

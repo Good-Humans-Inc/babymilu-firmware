@@ -24,6 +24,8 @@ main/mmap_generate_emoji.h
 main/mmap_generate_emoji.h
 *.pyc
 *.bin
+.venv/
+venv/
 animation_transplant/
 
 # include .bin in /animations/ and /main/spiffs_data/

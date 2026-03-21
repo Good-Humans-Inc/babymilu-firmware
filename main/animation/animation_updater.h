@@ -59,6 +59,9 @@ public:
     // Trigger the update loop (runs in a separate task)
     void TriggerUpdateLoop();
 
+    /** EchoEar: create ee_popup_mp3 from MainEventLoop after updater stack is freed (see esp_timer in .cc). */
+    static void PollEchoEarDeferredPopupFromMain();
+
 private:
     AnimationUpdater();
     ~AnimationUpdater();
@@ -70,7 +73,8 @@ private:
     // Background task
     static void UpdateTask(void* parameter);
     static void RemoteUpdateTask(void* parameter);
-    void UpdateLoop();
+    void UpdateLoop(bool play_echoear_startup_chime_when_done);
+    void LeaveUpdateLoopTask(bool play_echoear_startup_chime_when_done);
     
     // HTTP operations
     bool CheckServerForUpdates();

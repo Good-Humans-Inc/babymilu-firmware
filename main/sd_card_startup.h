@@ -5,10 +5,7 @@
 #include <string>
 
 /**
- * @brief SD Card startup manager for reading hello.txt and ejecting the card
- * 
- * This class handles SD card operations during application startup.
- * It reads the hello.txt file and then properly ejects the SD card.
+ * @brief SD card startup (first-file probe); mount stays active at /sdcard for animations + SP32SD1114 MP3.
  */
 class SdCardStartup {
 public:

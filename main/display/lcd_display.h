@@ -61,7 +61,8 @@ public:
     virtual void SetPreviewImage(const lv_img_dsc_t* img_dsc) override;
 #if CONFIG_USE_WECHAT_MESSAGE_STYLE
     virtual void SetChatMessage(const char* role, const char* content) override; 
-#endif  
+#endif
+    virtual void SetMusicInfo(const char* song_name) override;
     virtual void SetEmotionImg(const lv_image_dsc_t *img) override;
     // Set GIF animation from data
     void SetEmotionGif(const uint8_t* gif_data, size_t gif_size);

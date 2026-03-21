@@ -9,6 +9,8 @@
 #include "animation/animation.h"
 #include "sd_card.h"
 #include "sd_card_startup.h"
+#include "esp32_music_sdcard.h"
+#include <memory>
 #include "power_save_timer.h"
 
 #include <wifi_station.h>
@@ -430,6 +432,7 @@ private:
     TaskHandle_t touch_event_task_handle_;  // Task handle for processing touch events (used by CST816S)
     QueueHandle_t touch_button_app_queue_ = nullptr;  // Queue for app-level touch button events
     PowerSaveTimer* power_save_timer_ = nullptr;
+    std::unique_ptr<Esp32MusicSdcard> music_sd_;
     esp_timer_handle_t emotion_reset_timer_ = nullptr;  // Timer to reset emotion to previous state after one animation cycle
     esp_timer_handle_t volume_message_timer_ = nullptr;  // Timer to clear volume message
     std::string previous_emotion_ = "normal";  // Store previous emotion string to restore
@@ -1650,6 +1653,8 @@ public:
         ESP_LOGI(TAG, "[TOUCH] About to call InitializeTouchButton()");
         InitializeTouchButton();
         ESP_LOGI(TAG, "[TOUCH] InitializeTouchButton() returned");
+
+        music_sd_ = std::make_unique<Esp32MusicSdcard>();
         
         // Start SD card + animation init in background to allow WiFi startup in parallel.
         // Pin to core 0 so WiFi (core 1 in your logs) can connect concurrently.
@@ -1676,6 +1681,10 @@ public:
     
     virtual Display* GetDisplay() override {
         return display_;
+    }
+
+    Music* GetMusicSd() override {
+        return music_sd_.get();
     }
 
     Cst816s* GetTouchpad() {

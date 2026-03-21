@@ -1162,6 +1162,15 @@ void LcdDisplay::ClearSystemMessages()
     ESP_LOGI("LcdDisplay", "ClearSystemMessages: Removed %d system message(s)", removed_count);
 }
 
+void LcdDisplay::SetMusicInfo(const char* song_name)
+{
+    if (song_name == nullptr || song_name[0] == '\0') {
+        ClearOverlayMessage();
+        return;
+    }
+    CreateOverlayMessage(song_name);
+}
+
 void LcdDisplay::CreateOverlayMessage(const char* message)
 {
     ESP_LOGI("LcdDisplay", "CreateOverlayMessage called: message='%s'", message ? message : "NULL");

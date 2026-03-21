@@ -13,6 +13,7 @@
 #include "application.h"
 #include "display.h"
 #include "board.h"
+#include "music.h"
 #include "animation/animation_updater.h"
 
 #define TAG "MCP"
@@ -87,7 +88,7 @@ void McpServer::AddCommonTools() {
     auto camera = board.GetCamera();
     if (camera) {
         AddTool("self.camera.take_photo",
-            "Take a photo and explain it. Use this tool after the user asks you to see something.\n"
+            "Xiaozhi SP32SD1114 / EchoEar: take a photo and explain it. Use when the user asks you to see something.\n"
             "Args:\n"
             "  `question`: The question that you want to ask about the photo.\n"
             "Return:\n"
@@ -181,6 +182,24 @@ void McpServer::AddCommonTools() {
             animation_updater.Stop();
             return "Animation updater stopped.";
         });
+
+    Music* music_sd = board.GetMusicSd();
+    if (music_sd) {
+        AddTool("self.music.play_sd_song",
+            "Play an MP3 from the SD card (/sdcard). Does not replace built-in .p3 alert sounds.\n"
+            "Args:\n"
+            "  `song_name`: Keyword to match in the filename (without .mp3), or empty to pick randomly.\n"
+            "Return:\n"
+            "  true if playback started.",
+            PropertyList({Property("song_name", kPropertyTypeString)}),
+            [music_sd](const PropertyList& properties) -> ReturnValue {
+                auto song_name = properties["song_name"].value<std::string>();
+                if (!music_sd->Download(song_name)) {
+                    return false;
+                }
+                return true;
+            });
+    }
 
     // Restore the original tools list to the end of the tools list
     tools_.insert(tools_.end(), original_tools.begin(), original_tools.end());

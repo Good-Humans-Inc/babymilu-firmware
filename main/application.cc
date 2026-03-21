@@ -1,5 +1,6 @@
 #include "application.h"
 #include "board.h"
+#include "music.h"
 #include "display.h"
 #include "system_info.h"
 #include "ml307_ssl_transport.h"
@@ -1400,6 +1401,13 @@ void Application::Schedule(std::function<void()> callback)
     xEventGroupSetBits(event_group_, SCHEDULE_EVENT);
 }
 
+void Application::WakeMainLoop()
+{
+    if (event_group_ != nullptr) {
+        xEventGroupSetBits(event_group_, SCHEDULE_EVENT);
+    }
+}
+
 // The Main Event Loop controls the chat state and websocket connection
 // If other tasks need to access the websocket or chat state,
 // they should use Schedule to call this function
@@ -1411,6 +1419,8 @@ void Application::MainEventLoop()
     while (true)
     {
         auto bits = xEventGroupWaitBits(event_group_, SCHEDULE_EVENT | SEND_AUDIO_EVENT | MAIN_EVENT_VAD_CHANGE, pdTRUE, pdFALSE, portMAX_DELAY);
+
+        AnimationUpdater::PollEchoEarDeferredPopupFromMain();
 
         if (bits & SEND_AUDIO_EVENT)
         {
@@ -1738,6 +1748,15 @@ void Application::SetDeviceState(DeviceState state)
     auto display = board.GetDisplay();
     auto led = board.GetLed();
     led->OnStateChanged();
+
+    if (previous_state == kDeviceStateIdle && state != kDeviceStateIdle) {
+        Music* music_sd = board.GetMusicSd();
+        if (music_sd) {
+            ESP_LOGI(TAG, "Stopping SD MP3 streaming (state %d -> %d)", (int)previous_state, (int)state);
+            music_sd->StopStreaming();
+        }
+    }
+
     switch (state)
     {
     case kDeviceStateUnknown:
@@ -2300,5 +2319,70 @@ void Application::OpenWebSocketConnection() {
         // This handles the case where ws_start arrives while device is connecting
         ESP_LOGI(TAG, "Remote wakeup: Device is connecting, entering listening state");
         SetListeningMode(kListeningModeAutoStop);
+    }
+}
+
+void Application::AddAudioData(AudioStreamPacket&& packet)
+{
+    auto codec = Board::GetInstance().GetAudioCodec();
+    if (device_state_ != kDeviceStateIdle || !codec) {
+        return;
+    }
+    if (packet.payload.size() < 2) {
+        return;
+    }
+
+    size_t num_samples = packet.payload.size() / sizeof(int16_t);
+    std::vector<int16_t> pcm_data(num_samples);
+    memcpy(pcm_data.data(), packet.payload.data(), packet.payload.size());
+
+    if (packet.sample_rate != codec->output_sample_rate()) {
+        if (packet.sample_rate <= 0 || codec->output_sample_rate() <= 0) {
+            ESP_LOGE(TAG, "Invalid sample rates: %d -> %d", packet.sample_rate, codec->output_sample_rate());
+            return;
+        }
+        float ratio = static_cast<float>(packet.sample_rate) / codec->output_sample_rate();
+        std::vector<int16_t> resampled;
+        if (packet.sample_rate > codec->output_sample_rate()) {
+            size_t expected_size = static_cast<size_t>(pcm_data.size() / ratio + 0.5f);
+            resampled.reserve(expected_size);
+            for (float i = 0; i < pcm_data.size(); i += ratio) {
+                size_t index = static_cast<size_t>(i + 0.5f);
+                if (index < pcm_data.size()) {
+                    resampled.push_back(pcm_data[index]);
+                }
+            }
+        } else {
+            float upsample_ratio = codec->output_sample_rate() / static_cast<float>(packet.sample_rate);
+            size_t expected_size = static_cast<size_t>(pcm_data.size() * upsample_ratio + 0.5f);
+            resampled.reserve(expected_size);
+            for (size_t i = 0; i < pcm_data.size(); ++i) {
+                resampled.push_back(pcm_data[i]);
+                int interpolation_count = static_cast<int>(upsample_ratio) - 1;
+                if (interpolation_count > 0 && i + 1 < pcm_data.size()) {
+                    int16_t current = pcm_data[i];
+                    int16_t next = pcm_data[i + 1];
+                    for (int j = 1; j <= interpolation_count; ++j) {
+                        float t = static_cast<float>(j) / (interpolation_count + 1);
+                        resampled.push_back(static_cast<int16_t>(current + (next - current) * t));
+                    }
+                } else if (interpolation_count > 0) {
+                    for (int j = 1; j <= interpolation_count; ++j) {
+                        resampled.push_back(pcm_data[i]);
+                    }
+                }
+            }
+        }
+        pcm_data = std::move(resampled);
+    }
+
+    if (!codec->output_enabled()) {
+        codec->EnableOutput(true);
+    }
+    codec->OutputData(pcm_data);
+
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        last_output_time_ = std::chrono::steady_clock::now();
     }
 }
