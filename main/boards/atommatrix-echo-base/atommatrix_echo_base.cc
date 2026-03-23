@@ -96,8 +96,13 @@ private:
             auto& app = Application::GetInstance();
             if (app.GetDeviceState() == kDeviceStateStarting && !WifiStation::GetInstance().IsConnected()) {
                 ResetWifiConfiguration();
-            } 
-            app.ToggleChatState();
+            }
+        });
+        face_button_.OnPressDown([this]() {
+            Application::GetInstance().StartListening();
+        });
+        face_button_.OnPressUp([this]() {
+            Application::GetInstance().StopListening();
         });
     }
 

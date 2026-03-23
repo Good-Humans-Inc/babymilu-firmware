@@ -128,12 +128,12 @@ private:
             }
             app.ToggleChatState();
         });
-        // boot_button_.OnPressDown([this]() {
-        //     Application::GetInstance().StartListening();
-        // });
-        // boot_button_.OnPressUp([this]() {
-        //     Application::GetInstance().StopListening();
-        // });
+        boot_button_.OnPressDown([this]() {
+            Application::GetInstance().StartListening();
+        });
+        boot_button_.OnPressUp([this]() {
+            Application::GetInstance().StopListening();
+        });
 
         volume_up_button_.OnClick([this]() {
             power_save_timer_->WakeUp();

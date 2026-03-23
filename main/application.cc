@@ -30,6 +30,7 @@
 #endif
 
 #include <cstring>
+#include <algorithm>
 #include <esp_log.h>
 #include <cJSON.h>
 #include <driver/gpio.h>
@@ -47,6 +48,58 @@
 // Minimal WAV-from-HTTP player for POC: expects mono 16-bit PCM at codec sample rate
 static bool PlayWavFromUrl(const std::string &url, float gain)
 {
+    struct WavHeaderInfo {
+        uint16_t audio_format = 0;
+        uint16_t channels = 0;
+        uint32_t sample_rate = 0;
+        uint16_t bits_per_sample = 0;
+        size_t data_offset = 0;
+    };
+    auto read_le16 = [](const uint8_t* p) -> uint16_t {
+        return static_cast<uint16_t>(p[0]) | (static_cast<uint16_t>(p[1]) << 8);
+    };
+    auto read_le32 = [](const uint8_t* p) -> uint32_t {
+        return static_cast<uint32_t>(p[0]) |
+               (static_cast<uint32_t>(p[1]) << 8) |
+               (static_cast<uint32_t>(p[2]) << 16) |
+               (static_cast<uint32_t>(p[3]) << 24);
+    };
+    auto parse_wav_header = [&](const std::vector<uint8_t>& header, WavHeaderInfo& info) -> bool {
+        if (header.size() < 12) {
+            return false;
+        }
+        if (memcmp(header.data(), "RIFF", 4) != 0 || memcmp(header.data() + 8, "WAVE", 4) != 0) {
+            return false;
+        }
+        bool have_fmt = false;
+        bool have_data = false;
+        size_t offset = 12;
+        while (offset + 8 <= header.size()) {
+            const uint8_t* chunk = header.data() + offset;
+            uint32_t chunk_size = read_le32(chunk + 4);
+            size_t chunk_data_start = offset + 8;
+            size_t padded_chunk_size = static_cast<size_t>(chunk_size) + (chunk_size & 1u);
+            if (chunk_data_start + static_cast<size_t>(chunk_size) > header.size()) {
+                return false;
+            }
+            if (memcmp(chunk, "fmt ", 4) == 0 && chunk_size >= 16) {
+                info.audio_format = read_le16(chunk + 8);
+                info.channels = read_le16(chunk + 10);
+                info.sample_rate = read_le32(chunk + 12);
+                info.bits_per_sample = read_le16(chunk + 22);
+                have_fmt = true;
+            } else if (memcmp(chunk, "data", 4) == 0) {
+                info.data_offset = chunk_data_start;
+                have_data = true;
+            }
+            offset = chunk_data_start + padded_chunk_size;
+            if (have_fmt && have_data) {
+                return true;
+            }
+        }
+        return false;
+    };
+
     auto &board = Board::GetInstance();
     auto codec = board.GetAudioCodec();
     if (!codec)
@@ -79,26 +132,123 @@ static bool PlayWavFromUrl(const std::string &url, float gain)
         return false;
     }
 
-    // Naively skip 44-byte WAV header for PCM WAV
-    int to_skip = 44;
-    char hdr[64];
-    while (to_skip > 0)
-    {
-        int n = http->Read(hdr, to_skip > (int)sizeof(hdr) ? (int)sizeof(hdr) : to_skip);
-        if (n <= 0)
-        {
+    // Read and parse WAV header robustly (fmt/data chunk scanning).
+    // Also detect MP3 early and fail fast with guidance.
+    std::vector<uint8_t> header;
+    header.reserve(4096);
+    WavHeaderInfo wav;
+    constexpr size_t kMaxHeaderProbe = 16 * 1024;
+    bool header_ok = false;
+    while (header.size() < kMaxHeaderProbe) {
+        char tmp[512];
+        int n = http->Read(tmp, sizeof(tmp));
+        if (n <= 0) {
             break;
         }
-        to_skip -= n;
+        header.insert(header.end(), reinterpret_cast<uint8_t*>(tmp), reinterpret_cast<uint8_t*>(tmp) + n);
+
+        if (header.size() >= 3 && memcmp(header.data(), "ID3", 3) == 0) {
+            ESP_LOGE(TAG, "MP3 stream detected (ID3). This player supports WAV PCM only; convert TTS output to WAV PCM 16-bit mono.");
+            http->Close();
+            return false;
+        }
+        if (header.size() >= 2 && header[0] == 0xFF && (header[1] & 0xE0) == 0xE0) {
+            ESP_LOGE(TAG, "Likely MP3 frame stream detected. Use WAV PCM output for reliable playback.");
+            http->Close();
+            return false;
+        }
+        if (parse_wav_header(header, wav)) {
+            header_ok = true;
+            break;
+        }
     }
 
-    // Stream PCM frames -> codec
+    if (!header_ok) {
+        ESP_LOGE(TAG, "Failed to parse WAV header (or unsupported container)");
+        http->Close();
+        return false;
+    }
+
+    if (wav.audio_format != 1 || wav.bits_per_sample != 16 || (wav.channels != 1 && wav.channels != 2) || wav.sample_rate == 0) {
+        ESP_LOGE(TAG,
+                 "Unsupported WAV format: audio_format=%u channels=%u sample_rate=%u bits=%u (need PCM16 mono/stereo)",
+                 wav.audio_format, wav.channels, wav.sample_rate, wav.bits_per_sample);
+        http->Close();
+        return false;
+    }
+
+    ESP_LOGI(TAG, "WAV format: %u Hz, %u ch, %u-bit PCM", wav.sample_rate, wav.channels, wav.bits_per_sample);
+
+    OpusResampler wav_resampler;
+    bool need_resample = static_cast<int>(wav.sample_rate) != codec->output_sample_rate();
+    if (need_resample) {
+        wav_resampler.Configure(static_cast<int>(wav.sample_rate), codec->output_sample_rate());
+        ESP_LOGI(TAG, "Resampling WAV from %u Hz to %d Hz", wav.sample_rate, codec->output_sample_rate());
+    }
+
+    // Stream PCM frames -> codec (downmix to mono if needed).
     const size_t BUF = 1024;
     std::unique_ptr<uint8_t[]> buf(new uint8_t[BUF]);
-    bool have_leftover = false;
-    uint8_t leftover = 0;
+    std::vector<uint8_t> pending;
+    pending.reserve(BUF * 2);
     gain = (gain <= 0.0f) ? 1.0f : gain;
     codec->EnableOutput(true);
+
+    auto process_pending_pcm = [&](std::vector<uint8_t>& bytes) {
+        const size_t bytes_per_frame = static_cast<size_t>(wav.channels) * 2;
+        size_t frames = bytes.size() / bytes_per_frame;
+        if (frames == 0) {
+            return;
+        }
+
+        std::vector<int16_t> mono;
+        mono.reserve(frames);
+        for (size_t i = 0; i < frames; ++i) {
+            size_t base = i * bytes_per_frame;
+            int16_t sample = 0;
+            if (wav.channels == 1) {
+                sample = static_cast<int16_t>(
+                    static_cast<uint16_t>(bytes[base]) |
+                    (static_cast<uint16_t>(bytes[base + 1]) << 8));
+            } else {
+                int16_t left = static_cast<int16_t>(
+                    static_cast<uint16_t>(bytes[base]) |
+                    (static_cast<uint16_t>(bytes[base + 1]) << 8));
+                int16_t right = static_cast<int16_t>(
+                    static_cast<uint16_t>(bytes[base + 2]) |
+                    (static_cast<uint16_t>(bytes[base + 3]) << 8));
+                sample = static_cast<int16_t>((static_cast<int32_t>(left) + static_cast<int32_t>(right)) / 2);
+            }
+            int32_t scaled = static_cast<int32_t>(sample * gain);
+            scaled = std::clamp(scaled, -32768, 32767);
+            mono.push_back(static_cast<int16_t>(scaled));
+        }
+
+        if (mono.empty()) {
+            return;
+        }
+        if (need_resample) {
+            int target = wav_resampler.GetOutputSamples(mono.size());
+            if (target > 0) {
+                std::vector<int16_t> out(static_cast<size_t>(target));
+                wav_resampler.Process(mono.data(), mono.size(), out.data());
+                if (!out.empty()) {
+                    codec->OutputData(out);
+                }
+            }
+        } else {
+            codec->OutputData(mono);
+        }
+
+        size_t consumed = frames * bytes_per_frame;
+        bytes.erase(bytes.begin(), bytes.begin() + consumed);
+    };
+
+    // Consume any PCM bytes already read while probing header.
+    if (header.size() > wav.data_offset) {
+        pending.insert(pending.end(), header.begin() + static_cast<std::ptrdiff_t>(wav.data_offset), header.end());
+        process_pending_pcm(pending);
+    }
 
     while (true)
     {
@@ -107,45 +257,8 @@ static bool PlayWavFromUrl(const std::string &url, float gain)
         {
             break;
         }
-
-        size_t offset = 0;
-        std::vector<int16_t> samples;
-        samples.reserve(n / 2 + 1);
-
-        // Handle odd byte from previous chunk
-        if (have_leftover)
-        {
-            int16_t s = (int16_t)((uint16_t)buf[offset] << 8 | leftover);
-            int32_t v = (int32_t)(s * gain);
-            if (v > 32767) v = 32767; else if (v < -32768) v = -32768;
-            samples.push_back((int16_t)v);
-            offset += 1;
-            have_leftover = false;
-        }
-
-        // Convert little-endian 16-bit to int16_t, apply gain
-        for (; offset + 1 < (size_t)n; offset += 2)
-        {
-            int16_t s = (int16_t)((uint16_t)buf[offset + 1] << 8 | buf[offset]);
-            int32_t v = (int32_t)(s * gain);
-            if (v > 32767)
-                v = 32767;
-            else if (v < -32768)
-                v = -32768;
-            samples.push_back((int16_t)v);
-        }
-
-        // Save leftover byte if odd length
-        if (offset < (size_t)n)
-        {
-            leftover = buf[offset];
-            have_leftover = true;
-        }
-
-        if (!samples.empty())
-        {
-            codec->OutputData(samples);
-        }
+        pending.insert(pending.end(), buf.get(), buf.get() + n);
+        process_pending_pcm(pending);
     }
 
     http->Close();
@@ -751,8 +864,15 @@ void Application::Start()
     protocol_->OnIncomingAudio([this](AudioStreamPacket &&packet)
                                {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (device_state_ == kDeviceStateSpeaking && audio_decode_queue_.size() < MAX_AUDIO_PACKETS_IN_QUEUE) {
+        if (audio_decode_queue_.size() < MAX_AUDIO_PACKETS_IN_QUEUE) {
             audio_decode_queue_.emplace_back(std::move(packet));
+            if (device_state_ == kDeviceStateIdle || device_state_ == kDeviceStateListening) {
+                Schedule([this]() {
+                    if (device_state_ == kDeviceStateIdle || device_state_ == kDeviceStateListening) {
+                        SetDeviceState(kDeviceStateSpeaking);
+                    }
+                });
+            }
         } });
     protocol_->OnAudioChannelOpened([this, codec, &board]()
                                     {
@@ -1633,8 +1753,15 @@ void Application::OpenWebSocketConnection() {
         
         websocket_protocol_->OnIncomingAudio([this](AudioStreamPacket &&packet) {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (device_state_ == kDeviceStateSpeaking && audio_decode_queue_.size() < MAX_AUDIO_PACKETS_IN_QUEUE) {
+            if (audio_decode_queue_.size() < MAX_AUDIO_PACKETS_IN_QUEUE) {
                 audio_decode_queue_.emplace_back(std::move(packet));
+                if (device_state_ == kDeviceStateIdle || device_state_ == kDeviceStateListening) {
+                    Schedule([this]() {
+                        if (device_state_ == kDeviceStateIdle || device_state_ == kDeviceStateListening) {
+                            SetDeviceState(kDeviceStateSpeaking);
+                        }
+                    });
+                }
             }
         });
         
