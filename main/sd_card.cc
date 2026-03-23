@@ -32,6 +32,10 @@
 #include "esp_io_expander_tca9554.h"
 #endif
 
+#ifdef CONFIG_BOARD_TYPE_ECHOEAR
+#include "boards/echoear/config.h"
+#endif
+
 static const char *TAG = "SD_CARD";
 
 // IO expander handle for LCD boards
@@ -348,6 +352,65 @@ esp_err_t SdCard::Initialize()
     ESP_LOGI(TAG, "SD card mounted successfully at %s", MOUNT_POINT);
     return ESP_OK;
 
+#elif defined(CONFIG_BOARD_TYPE_ECHOEAR)
+    // Pin mapping: SD_SCK -> CLK, SD_MOSI -> CMD, SD_MISO -> D0
+    #define ESP_SD_PIN_CLK SD_SCK      // GPIO_NUM_16
+    #define ESP_SD_PIN_CMD SD_MOSI     // GPIO_NUM_38
+    #define ESP_SD_PIN_D0  SD_MISO     // GPIO_NUM_17
+
+    gpio_config_t power_gpio_config = {
+        .pin_bit_mask = (BIT64(GPIO_NUM_9)),
+        .mode = GPIO_MODE_OUTPUT,
+    };
+
+    esp_err_t err = gpio_config(&power_gpio_config);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to configure SD card power GPIO: %s", esp_err_to_name(err));
+    } else {
+        gpio_set_level(GPIO_NUM_9, 0);
+    }
+
+    esp_vfs_fat_sdmmc_mount_config_t mount_config = {
+        .format_if_mount_failed = true,
+        .max_files = 20,
+        .allocation_unit_size = 64 * 1024
+    };
+
+    sdmmc_host_t host = SDMMC_HOST_DEFAULT();
+    sdmmc_slot_config_t slot_config = SDMMC_SLOT_CONFIG_DEFAULT();
+
+    slot_config.width = 1;
+    slot_config.clk = ESP_SD_PIN_CLK;
+    slot_config.cmd = ESP_SD_PIN_CMD;
+    slot_config.d0 = ESP_SD_PIN_D0;
+    slot_config.flags |= SDMMC_SLOT_FLAG_INTERNAL_PULLUP;
+
+    ESP_LOGI(TAG, "Mounting filesystem");
+
+    sdmmc_card_t* card;
+    esp_err_t ret = esp_vfs_fat_sdmmc_mount(MOUNT_POINT, &host, &slot_config, &mount_config, &card);
+
+    if (ret != ESP_OK) {
+        if (ret == ESP_FAIL) {
+            ESP_LOGE(TAG, "Failed to mount filesystem. "
+                          "If you want the card to be formatted, set the EXAMPLE_FORMAT_IF_MOUNT_FAILED menuconfig option.");
+        } else {
+            ESP_LOGE(TAG, "Failed to initialize the card (%s). "
+                     "Make sure SD card lines have pull-up resistors in place.",
+                     esp_err_to_name(ret));
+        }
+        return ret;
+    }
+
+    ESP_LOGI(TAG, "Filesystem mounted successfully");
+    sdmmc_card_print_info(stdout, card);
+
+    s_spi_host = SPI_HOST_MAX;
+
+    s_mounted = true;
+    ESP_LOGI(TAG, "SD card mounted successfully at %s", MOUNT_POINT);
+    return ESP_OK;
+
 #else
     ESP_LOGE(TAG, "SD card functionality not supported on this board");
     return ESP_ERR_NOT_SUPPORTED;
@@ -480,7 +543,8 @@ bool SdCard::IsMounted()
 
 bool SdCard::IsDetected()
 {
-#if defined(CONFIG_BOARD_TYPE_SENSECAP_WATCHER) || defined(CONFIG_BOARD_TYPE_ESP32S3_Touch_AMOLED_1_75)
+#if defined(CONFIG_BOARD_TYPE_SENSECAP_WATCHER) || defined(CONFIG_BOARD_TYPE_ESP32S3_Touch_AMOLED_1_75) || \
+    defined(CONFIG_BOARD_TYPE_ECHOEAR)
     // For boards without a dedicated SD card detection pin,
     // assume SD card is detected if we can initialize SPI communication
     ESP_LOGI(TAG, "SD card detection check not implemented - assuming detected");
