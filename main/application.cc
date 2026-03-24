@@ -87,17 +87,82 @@ static bool PlayWavFromUrl(const std::string &url, float gain)
         return false;
     }
 
-    // Naively skip 44-byte WAV header for PCM WAV
-    int to_skip = 44;
-    char hdr[64];
-    while (to_skip > 0)
-    {
-        int n = http->Read(hdr, to_skip > (int)sizeof(hdr) ? (int)sizeof(hdr) : to_skip);
-        if (n <= 0)
-        {
+    // Parse WAV header robustly (RIFF/WAVE + locate fmt/data chunks).
+    uint8_t header_buf[512] = {0};
+    const int header_read = http->Read(reinterpret_cast<char *>(header_buf), sizeof(header_buf));
+    if (header_read < 44) {
+        ESP_LOGE(TAG, "WAV header too short: %d bytes", header_read);
+        http->Close();
+        return false;
+    }
+    if (!(header_buf[0] == 'R' && header_buf[1] == 'I' && header_buf[2] == 'F' && header_buf[3] == 'F' &&
+          header_buf[8] == 'W' && header_buf[9] == 'A' && header_buf[10] == 'V' && header_buf[11] == 'E')) {
+        ESP_LOGE(TAG, "play_url payload is not RIFF/WAVE");
+        http->Close();
+        return false;
+    }
+
+    uint16_t audio_format = 0;
+    uint16_t channels = 0;
+    uint32_t sample_rate = 0;
+    uint16_t bits_per_sample = 0;
+    size_t data_offset = 0;
+    uint32_t data_size = 0;
+    size_t cursor = 12;
+    while (cursor + 8 <= (size_t)header_read) {
+        const uint8_t* chunk = &header_buf[cursor];
+        uint32_t chunk_size = (uint32_t)chunk[4] |
+                              ((uint32_t)chunk[5] << 8) |
+                              ((uint32_t)chunk[6] << 16) |
+                              ((uint32_t)chunk[7] << 24);
+        size_t chunk_data_offset = cursor + 8;
+        size_t next_cursor = chunk_data_offset + chunk_size;
+        if (next_cursor > (size_t)header_read) {
             break;
         }
-        to_skip -= n;
+
+        if (chunk[0] == 'f' && chunk[1] == 'm' && chunk[2] == 't' && chunk[3] == ' ') {
+            if (chunk_size >= 16) {
+                const uint8_t* fmt = &header_buf[chunk_data_offset];
+                audio_format = (uint16_t)fmt[0] | ((uint16_t)fmt[1] << 8);
+                channels = (uint16_t)fmt[2] | ((uint16_t)fmt[3] << 8);
+                sample_rate = (uint32_t)fmt[4] |
+                              ((uint32_t)fmt[5] << 8) |
+                              ((uint32_t)fmt[6] << 16) |
+                              ((uint32_t)fmt[7] << 24);
+                bits_per_sample = (uint16_t)fmt[14] | ((uint16_t)fmt[15] << 8);
+            }
+        } else if (chunk[0] == 'd' && chunk[1] == 'a' && chunk[2] == 't' && chunk[3] == 'a') {
+            data_offset = chunk_data_offset;
+            data_size = chunk_size;
+            break;
+        }
+
+        cursor = next_cursor + (chunk_size & 1); // word align
+    }
+
+    if (data_offset == 0) {
+        ESP_LOGE(TAG, "WAV data chunk not found in initial header buffer");
+        http->Close();
+        return false;
+    }
+    if (audio_format != 1 || channels != 1 || bits_per_sample != 16) {
+        ESP_LOGE(TAG, "Unsupported WAV format: fmt=%u ch=%u bits=%u (need PCM mono 16-bit)",
+                 audio_format, channels, bits_per_sample);
+        http->Close();
+        return false;
+    }
+
+    ESP_LOGI(TAG, "WAV parsed: sample_rate=%u, channels=%u, bits=%u, data_size=%u",
+             (unsigned int)sample_rate, (unsigned int)channels,
+             (unsigned int)bits_per_sample, (unsigned int)data_size);
+
+    // Keep bytes that belong to audio payload from already-read header buffer.
+    std::vector<uint8_t> prefetched_audio;
+    if (data_offset < (size_t)header_read) {
+        size_t payload_in_header = (size_t)header_read - data_offset;
+        prefetched_audio.resize(payload_in_header);
+        memcpy(prefetched_audio.data(), &header_buf[data_offset], payload_in_header);
     }
 
     // Stream PCM frames -> codec
@@ -107,6 +172,49 @@ static bool PlayWavFromUrl(const std::string &url, float gain)
     uint8_t leftover = 0;
     gain = (gain <= 0.0f) ? 1.0f : gain;
     codec->EnableOutput(true);
+    size_t total_samples_sent = 0;
+    size_t total_bytes_read = 0;
+
+    auto push_pcm_bytes = [&](const uint8_t* bytes, size_t byte_len) {
+        if (!bytes || byte_len == 0) {
+            return;
+        }
+        size_t offset = 0;
+        std::vector<int16_t> samples;
+        samples.reserve(byte_len / 2 + 1);
+
+        if (have_leftover) {
+            int16_t s = (int16_t)((uint16_t)bytes[offset] << 8 | leftover);
+            int32_t v = (int32_t)(s * gain);
+            if (v > 32767) v = 32767; else if (v < -32768) v = -32768;
+            samples.push_back((int16_t)v);
+            offset += 1;
+            have_leftover = false;
+        }
+
+        for (; offset + 1 < byte_len; offset += 2) {
+            int16_t s = (int16_t)((uint16_t)bytes[offset + 1] << 8 | bytes[offset]);
+            int32_t v = (int32_t)(s * gain);
+            if (v > 32767) v = 32767;
+            else if (v < -32768) v = -32768;
+            samples.push_back((int16_t)v);
+        }
+
+        if (offset < byte_len) {
+            leftover = bytes[offset];
+            have_leftover = true;
+        }
+
+        if (!samples.empty()) {
+            total_samples_sent += samples.size();
+            codec->OutputData(samples);
+        }
+    };
+
+    if (!prefetched_audio.empty()) {
+        total_bytes_read += prefetched_audio.size();
+        push_pcm_bytes(prefetched_audio.data(), prefetched_audio.size());
+    }
 
     while (true)
     {
@@ -116,47 +224,16 @@ static bool PlayWavFromUrl(const std::string &url, float gain)
             break;
         }
 
-        size_t offset = 0;
-        std::vector<int16_t> samples;
-        samples.reserve(n / 2 + 1);
-
-        // Handle odd byte from previous chunk
-        if (have_leftover)
-        {
-            int16_t s = (int16_t)((uint16_t)buf[offset] << 8 | leftover);
-            int32_t v = (int32_t)(s * gain);
-            if (v > 32767) v = 32767; else if (v < -32768) v = -32768;
-            samples.push_back((int16_t)v);
-            offset += 1;
-            have_leftover = false;
-        }
-
-        // Convert little-endian 16-bit to int16_t, apply gain
-        for (; offset + 1 < (size_t)n; offset += 2)
-        {
-            int16_t s = (int16_t)((uint16_t)buf[offset + 1] << 8 | buf[offset]);
-            int32_t v = (int32_t)(s * gain);
-            if (v > 32767)
-                v = 32767;
-            else if (v < -32768)
-                v = -32768;
-            samples.push_back((int16_t)v);
-        }
-
-        // Save leftover byte if odd length
-        if (offset < (size_t)n)
-        {
-            leftover = buf[offset];
-            have_leftover = true;
-        }
-
-        if (!samples.empty())
-        {
-            codec->OutputData(samples);
-        }
+        total_bytes_read += (size_t)n;
+        push_pcm_bytes(buf.get(), (size_t)n);
     }
 
     http->Close();
+    if (total_samples_sent == 0) {
+        ESP_LOGE(TAG, "play_url decoded 0 PCM samples (bytes_read=%u)", (unsigned int)total_bytes_read);
+        return false;
+    }
+    ESP_LOGI(TAG, "play_url streamed %u bytes, %u samples", (unsigned int)total_bytes_read, (unsigned int)total_samples_sent);
     return true;
 }
 

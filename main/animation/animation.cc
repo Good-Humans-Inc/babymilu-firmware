@@ -327,6 +327,11 @@ void plat_animation_task(void *arg)
                 ESP_LOGW("plat_animation_task", "Animation %d is not available, skipping frame", now_animation);
                 last_warning_time = current_time_check;
             }
+            if (now_animation != ANIMATION_NORMAL) {
+                // Force a stable state instead of repeatedly trying a missing animation.
+                now_animation = ANIMATION_NORMAL;
+                pos = 0;
+            }
             // Use longer delay (5 seconds) to reduce CPU usage and avoid interfering with audio tasks
             vTaskDelay(pdMS_TO_TICKS(5000));
             continue;
