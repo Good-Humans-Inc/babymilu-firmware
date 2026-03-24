@@ -71,7 +71,9 @@ static bool PlayWavFromUrl(const std::string &url, float gain)
     }
     http->SetHeader("Accept", "audio/wav,application/octet-stream");
     http->SetHeader("Accept-Encoding", "identity");
-    http->SetTimeout(10000);
+    // Marketing-hosted WAV files can be slow to start streaming on some networks.
+    // Use a longer read timeout to avoid premature short-stream termination.
+    http->SetTimeout(30000);
 
     ESP_LOGI(TAG, "Opening URL: %s", url.c_str());
     if (!http->Open("GET", url))
@@ -263,16 +265,28 @@ static bool PlayWavFromUrl(const std::string &url, float gain)
     };
 
     uint32_t remaining_pcm_bytes = data_size;
+    int consecutive_empty_reads = 0;
+    const int kMaxConsecutiveEmptyReads = 80; // ~4s with 50ms backoff
     while (remaining_pcm_bytes > 0)
     {
         size_t want = remaining_pcm_bytes > BUF ? BUF : remaining_pcm_bytes;
         int n = http->Read(reinterpret_cast<char *>(buf.get()), want);
-        if (n <= 0)
-        {
-            ESP_LOGW(TAG, "WAV stream ended early: %u bytes remaining", (unsigned int)remaining_pcm_bytes);
+        if (n < 0) {
+            ESP_LOGE(TAG, "WAV stream read error: %d (remaining=%u)", n, (unsigned int)remaining_pcm_bytes);
             break;
         }
+        if (n == 0) {
+            consecutive_empty_reads++;
+            if (consecutive_empty_reads >= kMaxConsecutiveEmptyReads) {
+                ESP_LOGW(TAG, "WAV stream ended early after retries: %u bytes remaining",
+                         (unsigned int)remaining_pcm_bytes);
+                break;
+            }
+            vTaskDelay(pdMS_TO_TICKS(50));
+            continue;
+        }
 
+        consecutive_empty_reads = 0;
         total_bytes_read += (size_t)n;
         push_pcm_bytes(buf.get(), (size_t)n);
         remaining_pcm_bytes -= (uint32_t)n;
@@ -281,6 +295,11 @@ static bool PlayWavFromUrl(const std::string &url, float gain)
     http->Close();
     if (total_samples_sent == 0) {
         ESP_LOGE(TAG, "play_url decoded 0 PCM samples (bytes_read=%u)", (unsigned int)total_bytes_read);
+        return false;
+    }
+    if (remaining_pcm_bytes > 0) {
+        ESP_LOGE(TAG, "play_url incomplete WAV stream: consumed=%u bytes, missing=%u bytes",
+                 (unsigned int)total_bytes_read, (unsigned int)remaining_pcm_bytes);
         return false;
     }
     ESP_LOGI(TAG, "play_url streamed %u bytes, %u samples", (unsigned int)total_bytes_read, (unsigned int)total_samples_sent);
