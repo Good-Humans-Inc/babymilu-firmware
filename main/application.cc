@@ -224,9 +224,19 @@ static bool PlayWavFromUrl(const std::string &url, float gain)
     bool have_leftover = false;
     uint8_t leftover = 0;
     gain = (gain <= 0.0f) ? 1.0f : gain;
+    int original_volume = codec->output_volume();
+    bool boosted_volume = false;
+    if (original_volume < 40) {
+        codec->SetOutputVolume(60);
+        boosted_volume = true;
+        ESP_LOGW(TAG, "play_url boosting output volume from %d to 60 for audibility", original_volume);
+    } else {
+        ESP_LOGI(TAG, "play_url output volume=%d", original_volume);
+    }
     codec->EnableOutput(true);
     size_t total_samples_sent = 0;
     size_t total_bytes_read = 0;
+    bool logged_first_output = false;
 
     auto push_pcm_bytes = [&](const uint8_t* bytes, size_t byte_len) {
         if (!bytes || byte_len == 0) {
@@ -260,6 +270,10 @@ static bool PlayWavFromUrl(const std::string &url, float gain)
 
         if (!samples.empty()) {
             total_samples_sent += samples.size();
+            if (!logged_first_output) {
+                logged_first_output = true;
+                ESP_LOGI(TAG, "play_url first PCM chunk: %u samples", (unsigned int)samples.size());
+            }
             codec->OutputData(samples);
         }
     };
@@ -295,14 +309,24 @@ static bool PlayWavFromUrl(const std::string &url, float gain)
     http->Close();
     if (total_samples_sent == 0) {
         ESP_LOGE(TAG, "play_url decoded 0 PCM samples (bytes_read=%u)", (unsigned int)total_bytes_read);
+        if (boosted_volume) {
+            codec->SetOutputVolume(original_volume);
+        }
         return false;
     }
     if (remaining_pcm_bytes > 0) {
         ESP_LOGE(TAG, "play_url incomplete WAV stream: consumed=%u bytes, missing=%u bytes",
                  (unsigned int)total_bytes_read, (unsigned int)remaining_pcm_bytes);
+        if (boosted_volume) {
+            codec->SetOutputVolume(original_volume);
+        }
         return false;
     }
     ESP_LOGI(TAG, "play_url streamed %u bytes, %u samples", (unsigned int)total_bytes_read, (unsigned int)total_samples_sent);
+    if (boosted_volume) {
+        codec->SetOutputVolume(original_volume);
+        ESP_LOGI(TAG, "play_url restored output volume to %d", original_volume);
+    }
     return true;
 }
 
