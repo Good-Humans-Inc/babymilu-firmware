@@ -92,6 +92,7 @@ static Animation_t sd_battery = {0};
 // In that case we must not parse it as frame-based mega animation.
 static bool g_test_bin_incompatible = false;
 static TickType_t g_missing_anim_log_ticks[ANIMATION_NUM] = {0};
+static const char* get_animation_name(int animation_index);
 
 // Initialize GIF fields
 #define INIT_ANIM(anim) do { \
