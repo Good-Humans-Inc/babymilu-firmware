@@ -57,6 +57,9 @@ public:
     virtual void SetEmotionImg(const lv_image_dsc_t *img) override;
     // Add theme switching function
     virtual void SetTheme(const std::string& theme_name) override;
+
+    // Optional board debug hook (e.g. accelerometer-driven overlay); default no-op
+    virtual void UpdateDebugSquarePosition(int delta_x, int delta_y) { (void)delta_x; (void)delta_y; }
 };
 
 // RGB LCD显示器

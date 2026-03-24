@@ -220,7 +220,7 @@ static bool PlayWavFromUrl(const std::string &url, float gain)
                 sample = static_cast<int16_t>((static_cast<int32_t>(left) + static_cast<int32_t>(right)) / 2);
             }
             int32_t scaled = static_cast<int32_t>(sample * gain);
-            scaled = std::clamp(scaled, -32768, 32767);
+            scaled = std::clamp(scaled, static_cast<int32_t>(-32768), static_cast<int32_t>(32767));
             mono.push_back(static_cast<int16_t>(scaled));
         }
 
