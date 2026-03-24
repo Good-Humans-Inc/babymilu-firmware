@@ -87,16 +87,41 @@ static bool PlayWavFromUrl(const std::string &url, float gain)
         return false;
     }
 
-    // Parse WAV header robustly (RIFF/WAVE + locate fmt/data chunks).
-    uint8_t header_buf[512] = {0};
-    const int header_read = http->Read(reinterpret_cast<char *>(header_buf), sizeof(header_buf));
-    if (header_read < 44) {
-        ESP_LOGE(TAG, "WAV header too short: %d bytes", header_read);
+    auto read_exact = [&](uint8_t* out, size_t len) -> bool {
+        size_t read_total = 0;
+        while (read_total < len) {
+            int n = http->Read(reinterpret_cast<char*>(out + read_total), len - read_total);
+            if (n <= 0) {
+                return false;
+            }
+            read_total += (size_t)n;
+        }
+        return true;
+    };
+
+    auto skip_bytes = [&](size_t len) -> bool {
+        uint8_t scratch[256];
+        size_t left = len;
+        while (left > 0) {
+            size_t want = left > sizeof(scratch) ? sizeof(scratch) : left;
+            int n = http->Read(reinterpret_cast<char*>(scratch), want);
+            if (n <= 0) {
+                return false;
+            }
+            left -= (size_t)n;
+        }
+        return true;
+    };
+
+    // Stream-parse WAV RIFF container so we can handle metadata chunks before "data".
+    uint8_t riff_header[12] = {0};
+    if (!read_exact(riff_header, sizeof(riff_header))) {
+        ESP_LOGE(TAG, "Failed to read RIFF header");
         http->Close();
         return false;
     }
-    if (!(header_buf[0] == 'R' && header_buf[1] == 'I' && header_buf[2] == 'F' && header_buf[3] == 'F' &&
-          header_buf[8] == 'W' && header_buf[9] == 'A' && header_buf[10] == 'V' && header_buf[11] == 'E')) {
+    if (!(riff_header[0] == 'R' && riff_header[1] == 'I' && riff_header[2] == 'F' && riff_header[3] == 'F' &&
+          riff_header[8] == 'W' && riff_header[9] == 'A' && riff_header[10] == 'V' && riff_header[11] == 'E')) {
         ESP_LOGE(TAG, "play_url payload is not RIFF/WAVE");
         http->Close();
         return false;
@@ -106,43 +131,77 @@ static bool PlayWavFromUrl(const std::string &url, float gain)
     uint16_t channels = 0;
     uint32_t sample_rate = 0;
     uint16_t bits_per_sample = 0;
-    size_t data_offset = 0;
     uint32_t data_size = 0;
-    size_t cursor = 12;
-    while (cursor + 8 <= (size_t)header_read) {
-        const uint8_t* chunk = &header_buf[cursor];
-        uint32_t chunk_size = (uint32_t)chunk[4] |
-                              ((uint32_t)chunk[5] << 8) |
-                              ((uint32_t)chunk[6] << 16) |
-                              ((uint32_t)chunk[7] << 24);
-        size_t chunk_data_offset = cursor + 8;
-        size_t next_cursor = chunk_data_offset + chunk_size;
-        if (next_cursor > (size_t)header_read) {
-            break;
+    bool fmt_found = false;
+    bool data_found = false;
+
+    while (!data_found) {
+        uint8_t chunk_header[8] = {0};
+        if (!read_exact(chunk_header, sizeof(chunk_header))) {
+            ESP_LOGE(TAG, "Unexpected EOF while scanning WAV chunks");
+            http->Close();
+            return false;
         }
 
-        if (chunk[0] == 'f' && chunk[1] == 'm' && chunk[2] == 't' && chunk[3] == ' ') {
-            if (chunk_size >= 16) {
-                const uint8_t* fmt = &header_buf[chunk_data_offset];
-                audio_format = (uint16_t)fmt[0] | ((uint16_t)fmt[1] << 8);
-                channels = (uint16_t)fmt[2] | ((uint16_t)fmt[3] << 8);
-                sample_rate = (uint32_t)fmt[4] |
-                              ((uint32_t)fmt[5] << 8) |
-                              ((uint32_t)fmt[6] << 16) |
-                              ((uint32_t)fmt[7] << 24);
-                bits_per_sample = (uint16_t)fmt[14] | ((uint16_t)fmt[15] << 8);
+        uint32_t chunk_size = (uint32_t)chunk_header[4] |
+                              ((uint32_t)chunk_header[5] << 8) |
+                              ((uint32_t)chunk_header[6] << 16) |
+                              ((uint32_t)chunk_header[7] << 24);
+        bool is_fmt = (chunk_header[0] == 'f' && chunk_header[1] == 'm' && chunk_header[2] == 't' && chunk_header[3] == ' ');
+        bool is_data = (chunk_header[0] == 'd' && chunk_header[1] == 'a' && chunk_header[2] == 't' && chunk_header[3] == 'a');
+
+        if (is_fmt) {
+            if (chunk_size < 16) {
+                ESP_LOGE(TAG, "Invalid fmt chunk size: %u", (unsigned int)chunk_size);
+                http->Close();
+                return false;
             }
-        } else if (chunk[0] == 'd' && chunk[1] == 'a' && chunk[2] == 't' && chunk[3] == 'a') {
-            data_offset = chunk_data_offset;
+            uint8_t fmt16[16] = {0};
+            if (!read_exact(fmt16, sizeof(fmt16))) {
+                ESP_LOGE(TAG, "Failed to read fmt chunk");
+                http->Close();
+                return false;
+            }
+            audio_format = (uint16_t)fmt16[0] | ((uint16_t)fmt16[1] << 8);
+            channels = (uint16_t)fmt16[2] | ((uint16_t)fmt16[3] << 8);
+            sample_rate = (uint32_t)fmt16[4] |
+                          ((uint32_t)fmt16[5] << 8) |
+                          ((uint32_t)fmt16[6] << 16) |
+                          ((uint32_t)fmt16[7] << 24);
+            bits_per_sample = (uint16_t)fmt16[14] | ((uint16_t)fmt16[15] << 8);
+            fmt_found = true;
+
+            if (chunk_size > 16) {
+                if (!skip_bytes(chunk_size - 16)) {
+                    ESP_LOGE(TAG, "Failed to skip fmt extension");
+                    http->Close();
+                    return false;
+                }
+            }
+        } else if (is_data) {
             data_size = chunk_size;
+            data_found = true;
             break;
+        } else {
+            if (!skip_bytes(chunk_size)) {
+                ESP_LOGE(TAG, "Failed to skip WAV chunk %.4s (%u bytes)",
+                         reinterpret_cast<const char*>(chunk_header), (unsigned int)chunk_size);
+                http->Close();
+                return false;
+            }
         }
 
-        cursor = next_cursor + (chunk_size & 1); // word align
+        if (chunk_size & 1) {
+            if (!skip_bytes(1)) {
+                ESP_LOGE(TAG, "Failed to skip chunk padding byte");
+                http->Close();
+                return false;
+            }
+        }
     }
 
-    if (data_offset == 0) {
-        ESP_LOGE(TAG, "WAV data chunk not found in initial header buffer");
+    if (!fmt_found || !data_found) {
+        ESP_LOGE(TAG, "Missing WAV fmt/data chunk (fmt=%d data=%d)", (int)fmt_found, (int)data_found);
         http->Close();
         return false;
     }
@@ -156,14 +215,6 @@ static bool PlayWavFromUrl(const std::string &url, float gain)
     ESP_LOGI(TAG, "WAV parsed: sample_rate=%u, channels=%u, bits=%u, data_size=%u",
              (unsigned int)sample_rate, (unsigned int)channels,
              (unsigned int)bits_per_sample, (unsigned int)data_size);
-
-    // Keep bytes that belong to audio payload from already-read header buffer.
-    std::vector<uint8_t> prefetched_audio;
-    if (data_offset < (size_t)header_read) {
-        size_t payload_in_header = (size_t)header_read - data_offset;
-        prefetched_audio.resize(payload_in_header);
-        memcpy(prefetched_audio.data(), &header_buf[data_offset], payload_in_header);
-    }
 
     // Stream PCM frames -> codec
     const size_t BUF = 1024;
@@ -211,21 +262,20 @@ static bool PlayWavFromUrl(const std::string &url, float gain)
         }
     };
 
-    if (!prefetched_audio.empty()) {
-        total_bytes_read += prefetched_audio.size();
-        push_pcm_bytes(prefetched_audio.data(), prefetched_audio.size());
-    }
-
-    while (true)
+    uint32_t remaining_pcm_bytes = data_size;
+    while (remaining_pcm_bytes > 0)
     {
-        int n = http->Read(reinterpret_cast<char *>(buf.get()), BUF);
+        size_t want = remaining_pcm_bytes > BUF ? BUF : remaining_pcm_bytes;
+        int n = http->Read(reinterpret_cast<char *>(buf.get()), want);
         if (n <= 0)
         {
+            ESP_LOGW(TAG, "WAV stream ended early: %u bytes remaining", (unsigned int)remaining_pcm_bytes);
             break;
         }
 
         total_bytes_read += (size_t)n;
         push_pcm_bytes(buf.get(), (size_t)n);
+        remaining_pcm_bytes -= (uint32_t)n;
     }
 
     http->Close();
