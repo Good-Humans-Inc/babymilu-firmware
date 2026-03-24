@@ -263,6 +263,22 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
                 anim_updater.TriggerUpdateLoop();
             });
             // Don't forward remote_anim_update to on_incoming_json_ as it's a protocol-level message
+        } else if (strcmp(type->valuestring, "auto_update") == 0) {
+            // New marketing tool command: download test.bin from provided URL.
+            auto url = cJSON_GetObjectItem(root, "url");
+            if (!cJSON_IsString(url) || std::string(url->valuestring).empty()) {
+                ESP_LOGE(TAG, "auto_update message missing valid 'url' field");
+            } else {
+                std::string update_url = url->valuestring;
+                ESP_LOGI(TAG, "Received auto_update with URL: %s", update_url.c_str());
+                Application::GetInstance().Schedule([update_url]() {
+                    auto& anim_updater = AnimationUpdater::GetInstance();
+                    // Persist URL and trigger async update task.
+                    anim_updater.SetServerUrl(update_url);
+                    anim_updater.TriggerUpdateLoop();
+                });
+            }
+            // Don't forward auto_update to on_incoming_json_ as it's a protocol-level message
         } else if (strcmp(type->valuestring, "wifi_reconfig_nimble") == 0) {
             // Remote WiFi reconfiguration request:
             // enter NimBLE WiFi setup mode without clearing existing credentials.

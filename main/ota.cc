@@ -46,8 +46,8 @@ std::string Ota::GetCheckVersionUrl() {
     if (url && strlen(url) > 0) {
         return std::string(url);
     }
-    // Return empty string if not configured (OTA will be disabled)
-    return "";
+    // Fallback for BabyMilu deployment: use staging OTA when menuconfig value is empty.
+    return "http://136.111.52.199:8003/xiaozhi/ota/";
 }
 
 Http* Ota::SetupHttp() {

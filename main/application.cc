@@ -48,6 +48,9 @@
 #ifndef DEFAULT_MQTT_PUBLISH_TEMPLATE
 #define DEFAULT_MQTT_PUBLISH_TEMPLATE "xiaozhi/%s/up"
 #endif
+#ifndef DEFAULT_MARKETING_MQTT_ENDPOINT
+#define DEFAULT_MARKETING_MQTT_ENDPOINT "mqtt://136.117.60.16:1883"
+#endif
 
 // Minimal WAV-from-HTTP player for POC: expects mono 16-bit PCM at codec sample rate
 static bool PlayWavFromUrl(const std::string &url, float gain)
@@ -892,6 +895,26 @@ void Application::Start()
             mqtt_settings.SetString("publish_topic", up_topic);
             // Optional username/password can be added similarly if needed
             ESP_LOGI(TAG, "Seeded MQTT endpoint to %s", DEFAULT_MQTT_ENDPOINT);
+        }
+    }
+
+    // Force MQTT control channel to marketing broker so play_url/llm/animation commands
+    // always arrive from yf-dev-vm, while OTA/WS can still come from staging.
+    {
+        Settings mqtt_settings("mqtt", true);
+        auto endpoint = mqtt_settings.GetString("endpoint");
+        if (endpoint != DEFAULT_MARKETING_MQTT_ENDPOINT) {
+            auto mac = SystemInfo::GetMacAddress();
+            char up_topic[128];
+            snprintf(up_topic, sizeof(up_topic), DEFAULT_MQTT_PUBLISH_TEMPLATE, mac.c_str());
+            mqtt_settings.SetString("endpoint", DEFAULT_MARKETING_MQTT_ENDPOINT);
+            if (mqtt_settings.GetString("client_id").empty()) {
+                mqtt_settings.SetString("client_id", mac);
+            }
+            if (mqtt_settings.GetString("publish_topic").empty()) {
+                mqtt_settings.SetString("publish_topic", up_topic);
+            }
+            ESP_LOGI(TAG, "Pinned MQTT endpoint to marketing broker: %s", DEFAULT_MARKETING_MQTT_ENDPOINT);
         }
     }
 
