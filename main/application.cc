@@ -1018,18 +1018,10 @@ void Application::Start()
     }
     
     if (network_ready) {
-        ESP_LOGI(TAG, "Network is ready, scheduling animation update check after 5 seconds...");
+        ESP_LOGI(TAG, "Network is ready, animation updater initialized (awaiting MQTT trigger)");
         AnimationUpdater::GetInstance().Initialize();
-        
-        // Delay animation updater by 5 seconds after startup to ensure system initialization is complete
-        xTaskCreate([](void* parameter) {
-            vTaskDelay(pdMS_TO_TICKS(3000));
-            ESP_LOGI(TAG, "Triggering one-time animation update check after delay...");
-            AnimationUpdater::GetInstance().TriggerUpdateLoop();
-            vTaskDelete(NULL);
-        }, "delayed_anim_update", 4096, nullptr, 1, nullptr);
     } else {
-        ESP_LOGW(TAG, "Network not ready yet, skipping animation update check");
+        ESP_LOGW(TAG, "Network not ready yet, skipping animation updater initialization");
     }
 
     // Upload error log if available

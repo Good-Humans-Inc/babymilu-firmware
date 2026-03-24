@@ -2075,11 +2075,10 @@ bool animation_extract_gif_from_test_bin(const char* gif_name, uint8_t** data, s
     ESP_LOGI("animation", "test.bin header: %d files, checksum=0x%08X, length=%d", 
              file_count, checksum, data_length);
 
-    uint64_t table_size_u64 = (uint64_t)file_count * 44ULL;
-    uint64_t expected_total_size = 12ULL + table_size_u64 + (uint64_t)data_length;
-    if (expected_total_size > (uint64_t)actual_file_size) {
-        ESP_LOGE("animation", "test.bin truncated/corrupt: expected at least %llu bytes, actual %ld bytes",
-                 (unsigned long long)expected_total_size, actual_file_size);
+    uint32_t expected_total_size = 12 + data_length;
+    if (expected_total_size > (uint32_t)actual_file_size) {
+        ESP_LOGE("animation", "test.bin truncated/corrupt: expected at least %lu bytes, actual %ld bytes",
+                 (unsigned long)expected_total_size, actual_file_size);
         fclose(f);
         g_test_bin_incompatible = true;
         return false;
@@ -2130,28 +2129,10 @@ bool animation_extract_gif_from_test_bin(const char* gif_name, uint8_t** data, s
     // Calculate data section start (after header and file table)
     uint32_t table_size = file_count * 44; // 44 bytes per entry
     uint32_t data_start = 12 + table_size; // 12 byte header + table
-
-    // Determine payload start robustly: some files store offset at magic, others at GIF payload.
-    uint64_t base_offset = (uint64_t)data_start + (uint64_t)gif_offset;
-    uint64_t candidate_no_skip_end = base_offset + (uint64_t)gif_size;
-    uint64_t candidate_skip2_end = base_offset + 2ULL + (uint64_t)gif_size;
-    uint64_t file_size_u64 = (uint64_t)actual_file_size;
-    uint64_t payload_start = 0;
-
-    if (candidate_no_skip_end <= file_size_u64) {
-        payload_start = base_offset;
-    } else if (candidate_skip2_end <= file_size_u64) {
-        payload_start = base_offset + 2ULL;
-    } else {
-        ESP_LOGE("animation", "GIF entry out of range for %s: offset=%u size=%u file_size=%ld",
-                 gif_name, gif_offset, gif_size, actual_file_size);
-        fclose(f);
-        g_test_bin_incompatible = true;
-        return false;
-    }
-
-    if (fseek(f, (long)payload_start, SEEK_SET) != 0) {
-        ESP_LOGE("animation", "Failed to seek to GIF payload");
+    
+    // Seek to GIF data (skip magic bytes 0x5A5A)
+    if (fseek(f, data_start + gif_offset + 2, SEEK_SET) != 0) {
+        ESP_LOGE("animation", "Failed to seek to GIF data");
         fclose(f);
         g_test_bin_incompatible = true;
         return false;
