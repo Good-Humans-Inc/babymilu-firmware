@@ -88,6 +88,9 @@ static Animation_t sd_listening = {0};
 static Animation_t sd_smirk = {0};
 static Animation_t sd_wifi = {0};
 static Animation_t sd_battery = {0};
+// Set true when test.bin is present but corrupt/incompatible for GIF extraction.
+// In that case we must not parse it as frame-based mega animation.
+static bool g_test_bin_incompatible = false;
 
 // Initialize GIF fields
 #define INIT_ANIM(anim) do { \
@@ -408,6 +411,7 @@ void animation_init(void)
 void animation_load_sd_card_animations(void)
 {
     ESP_LOGI("animation", "Attempting to load animations from SD card...");
+    g_test_bin_incompatible = false;
     
     // Debug SD card status before attempting to load
     SdCard::DebugStatus();
@@ -435,6 +439,13 @@ void animation_load_sd_card_animations(void)
         ESP_LOGI("animation", "🎉 Successfully loaded GIF animations from test.bin!");
         ESP_LOGI("animation", "   - Using GIF format for animations");
         return; // Success with GIFs!
+    }
+
+    if (g_test_bin_incompatible) {
+        ESP_LOGE("animation", "test.bin is present but corrupt/incompatible for GIF parser.");
+        ESP_LOGE("animation", "Skipping frame-based fallback to avoid parsing GIF archive as LVGL frame file.");
+        ESP_LOGE("animation", "Please re-upload a valid test.bin from the marketing tool.");
+        return;
     }
     
     ESP_LOGI("animation", "GIFs not found, trying frame-based animations...");
@@ -543,7 +554,11 @@ void animation_cleanup_sd_card_animation(Animation_t* anim)
     // Free image data and descriptors
     // Note: Pointers may be NULL if already freed/reset by all_sd_card_imgs cleanup
     if (anim->spiffs_imgs) {
-        int len = anim->len > 0 ? anim->len : 32; // Use len if set, otherwise safe upper bound
+        int len = anim->len;
+        if (len < 0 || len > 256) {
+            ESP_LOGW("animation", "Skipping descriptor cleanup due to suspicious frame count: %d", len);
+            len = 0;
+        }
         for (int i = 0; i < len; i++) {
             // Only free if pointer is non-NULL (NULL means already handled by all_sd_card_imgs cleanup)
             if (anim->spiffs_imgs[i] != NULL) {
@@ -1350,6 +1365,9 @@ bool animation_load_all_from_sd_card(void)
             success = false;
             break;
         }
+        // Set len immediately so cleanup knows the true allocated pointer count
+        // even if this animation fails part-way through loading.
+        anim->len = frame_count;
         // Initialize all pointers to NULL to prevent accessing uninitialized memory
         for (int i = 0; i < frame_count; i++) {
             anim->spiffs_imgs[i] = NULL;
@@ -1941,6 +1959,28 @@ bool animation_extract_gif_from_test_bin(const char* gif_name, uint8_t** data, s
     f = fopen(test_bin_path, "rb");
     if (!f) {
         ESP_LOGE("animation", "Failed to open test.bin: %s", test_bin_path);
+        g_test_bin_incompatible = true;
+        return false;
+    }
+
+    // Get actual file size for integrity checks.
+    if (fseek(f, 0, SEEK_END) != 0) {
+        ESP_LOGE("animation", "Failed to seek test.bin end for size check");
+        fclose(f);
+        g_test_bin_incompatible = true;
+        return false;
+    }
+    long actual_file_size = ftell(f);
+    if (actual_file_size <= 0) {
+        ESP_LOGE("animation", "Invalid test.bin size: %ld", actual_file_size);
+        fclose(f);
+        g_test_bin_incompatible = true;
+        return false;
+    }
+    if (fseek(f, 0, SEEK_SET) != 0) {
+        ESP_LOGE("animation", "Failed to seek test.bin back to start");
+        fclose(f);
+        g_test_bin_incompatible = true;
         return false;
     }
     
@@ -1961,11 +2001,22 @@ bool animation_extract_gif_from_test_bin(const char* gif_name, uint8_t** data, s
         }
         
         header_read_failed = true;
+        g_test_bin_incompatible = true;
         return false;
     }
     
     ESP_LOGI("animation", "test.bin header: %d files, checksum=0x%08X, length=%d", 
              file_count, checksum, data_length);
+
+    uint64_t table_size_u64 = (uint64_t)file_count * 44ULL;
+    uint64_t expected_total_size = 12ULL + table_size_u64 + (uint64_t)data_length;
+    if (expected_total_size > (uint64_t)actual_file_size) {
+        ESP_LOGE("animation", "test.bin truncated/corrupt: expected at least %llu bytes, actual %ld bytes",
+                 (unsigned long long)expected_total_size, actual_file_size);
+        fclose(f);
+        g_test_bin_incompatible = true;
+        return false;
+    }
     
     // Read file table and find the GIF
     bool found_gif = false;
@@ -1984,6 +2035,7 @@ bool animation_extract_gif_from_test_bin(const char* gif_name, uint8_t** data, s
             fread(&height, sizeof(uint16_t), 1, f) != 1) {
             ESP_LOGE("animation", "Failed to read file table entry %d", i);
             fclose(f);
+            g_test_bin_incompatible = true;
             return false;
         }
         
@@ -2011,11 +2063,30 @@ bool animation_extract_gif_from_test_bin(const char* gif_name, uint8_t** data, s
     // Calculate data section start (after header and file table)
     uint32_t table_size = file_count * 44; // 44 bytes per entry
     uint32_t data_start = 12 + table_size; // 12 byte header + table
-    
-    // Seek to GIF data (skip magic bytes 0x5A5A)
-    if (fseek(f, data_start + gif_offset + 2, SEEK_SET) != 0) {
-        ESP_LOGE("animation", "Failed to seek to GIF data");
+
+    // Determine payload start robustly: some files store offset at magic, others at GIF payload.
+    uint64_t base_offset = (uint64_t)data_start + (uint64_t)gif_offset;
+    uint64_t candidate_no_skip_end = base_offset + (uint64_t)gif_size;
+    uint64_t candidate_skip2_end = base_offset + 2ULL + (uint64_t)gif_size;
+    uint64_t file_size_u64 = (uint64_t)actual_file_size;
+    uint64_t payload_start = 0;
+
+    if (candidate_no_skip_end <= file_size_u64) {
+        payload_start = base_offset;
+    } else if (candidate_skip2_end <= file_size_u64) {
+        payload_start = base_offset + 2ULL;
+    } else {
+        ESP_LOGE("animation", "GIF entry out of range for %s: offset=%u size=%u file_size=%ld",
+                 gif_name, gif_offset, gif_size, actual_file_size);
         fclose(f);
+        g_test_bin_incompatible = true;
+        return false;
+    }
+
+    if (fseek(f, (long)payload_start, SEEK_SET) != 0) {
+        ESP_LOGE("animation", "Failed to seek to GIF payload");
+        fclose(f);
+        g_test_bin_incompatible = true;
         return false;
     }
     
@@ -2033,6 +2104,7 @@ bool animation_extract_gif_from_test_bin(const char* gif_name, uint8_t** data, s
         free(*data);
         *data = NULL;
         fclose(f);
+        g_test_bin_incompatible = true;
         return false;
     }
     
@@ -2291,4 +2363,3 @@ bool animation_load_gifs_from_test_bin(void)
         return false;
     }
 }
-
