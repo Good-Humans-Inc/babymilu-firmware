@@ -1004,28 +1004,10 @@ void Application::Start()
 #endif
 
     // Protocol initialization strategy:
-    // - MQTT (primary): Always connected for control messages (ws_start, wake word, etc.)
-    // - WebSocket (on-demand): Created when needed for audio conversations
-    // 
-    // Both can be active simultaneously:
-    // - MQTT: Handles server-initiated conversations (receives ws_start, can handle MQTT+UDP audio)
-    // - WebSocket: Handles user-initiated conversations (button press) and server-initiated (via ws_start)
-    // 
-    // Audio routing: WebSocket takes priority when open, otherwise MQTT is used
-    if (ota_.HasMqttConfig())
-    {
-        protocol_ = std::make_unique<MqttProtocol>();
-    }
-    else if (ota_.HasWebsocketConfig())
-    {
-        // If only WebSocket is configured, use it as primary
-        protocol_ = std::make_unique<WebsocketProtocol>();
-    }
-    else
-    {
-        ESP_LOGW(TAG, "No protocol specified in the OTA config, using MQTT");
-        protocol_ = std::make_unique<MqttProtocol>();
-    }
+    // - MQTT is always primary control channel for marketing commands (play_url/llm/auto_update).
+    // - WebSocket is opened on-demand for conversation audio/chat.
+    // This guarantees marketing MQTT flows keep working even when OTA provides only WS config.
+    protocol_ = std::make_unique<MqttProtocol>();
     
     // WebSocket protocol will be created on-demand for audio conversations
     // MQTT stays connected for control messages even when WebSocket is active
