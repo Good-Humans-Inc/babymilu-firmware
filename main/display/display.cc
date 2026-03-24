@@ -143,7 +143,9 @@ void Display::UpdateStatusBar(bool update_all) {
         // Only play if battery level is 90% or below
         if (charging && !prev_charging && battery_level <= 90) {
             auto& app = Application::GetInstance();
-            app.PlaySound(Lang::Sounds::P3_CHARGE);
+            // Some branches do not expose P3_CHARGE in generated lang_config.h.
+            // Use a guaranteed common cue to keep build compatibility.
+            app.PlaySound(Lang::Sounds::P3_SUCCESS);
         }
         prev_charging = charging;  // Update previous state
         
