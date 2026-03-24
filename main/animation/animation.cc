@@ -91,6 +91,7 @@ static Animation_t sd_battery = {0};
 // Set true when test.bin is present but corrupt/incompatible for GIF extraction.
 // In that case we must not parse it as frame-based mega animation.
 static bool g_test_bin_incompatible = false;
+static TickType_t g_missing_anim_log_ticks[ANIMATION_NUM] = {0};
 
 // Initialize GIF fields
 #define INIT_ANIM(anim) do { \
@@ -107,6 +108,45 @@ static bool g_test_bin_incompatible = false;
 
 // Function to get the appropriate animation (SD card only)
 Animation_t* get_animation(int index) {
+    auto is_anim_ready = [](Animation_t* anim) -> bool {
+        if (!anim) {
+            return false;
+        }
+        if (anim->use_gif && anim->gif_data && anim->gif_data_size > 0) {
+            return true;
+        }
+        if (anim->use_spiffs && anim->imges && anim->len > 0) {
+            return true;
+        }
+        return false;
+    };
+
+    auto get_any_available_animation = [&]() -> Animation_t* {
+        Animation_t* candidates[] = {
+            &sd_normal, &sd_embarrass, &sd_fire, &sd_happy, &sd_inspiration,
+            &sd_shy, &sd_sleep, &sd_laugh, &sd_sad, &sd_silence,
+            &sd_listening, &sd_smirk, &sd_wifi, &sd_battery, &sd_cry
+        };
+        for (Animation_t* candidate : candidates) {
+            if (is_anim_ready(candidate)) {
+                return candidate;
+            }
+        }
+        return NULL;
+    };
+
+    auto log_missing_animation_throttled = [&](int missing_index, const char* fallback_name) {
+        if (missing_index < 0 || missing_index >= ANIMATION_NUM) {
+            return;
+        }
+        TickType_t now = xTaskGetTickCount();
+        if ((now - g_missing_anim_log_ticks[missing_index]) >= pdMS_TO_TICKS(10000)) {
+            g_missing_anim_log_ticks[missing_index] = now;
+            ESP_LOGW("animation", "Animation %s is unavailable, using fallback %s",
+                     get_animation_name(missing_index), fallback_name);
+        }
+    };
+
     // Check WiFi and battery status for normal animations
     if (index == ANIMATION_NORMAL) {
         // First check WiFi connection. When disconnected, only show WiFi animation
@@ -149,40 +189,75 @@ Animation_t* get_animation(int index) {
         }
     }
     
+    Animation_t* requested = NULL;
     switch(index) {
         case ANIMATION_NORMAL:
-            return animation_get_normal_animation();
+            requested = animation_get_normal_animation();
+            break;
         case ANIMATION_BLUSH:
-            return animation_get_embarrass_animation();
+            requested = animation_get_embarrass_animation();
+            break;
         case ANIMATION_ANGRY:
-            return animation_get_fire_animation();
+            requested = animation_get_fire_animation();
+            break;
         case ANIMATION_STARRY:
-            return animation_get_inspiration_animation();
+            requested = animation_get_inspiration_animation();
+            break;
         case ANIMATION_SHY:
-            return animation_get_shy_animation();
+            requested = animation_get_shy_animation();
+            break;
         case ANIMATION_SLEEP:
-            return animation_get_sleep_animation();
+            requested = animation_get_sleep_animation();
+            break;
         case ANIMATION_HEARTY:
-            return animation_get_happy_animation();
+            requested = animation_get_happy_animation();
+            break;
         case ANIMATION_LAUGH:
-            return animation_get_laugh_animation();
+            requested = animation_get_laugh_animation();
+            break;
         case ANIMATION_SAD:
-            return animation_get_sad_animation();
+            requested = animation_get_sad_animation();
+            break;
         case ANIMATION_SILENCE:
-            return animation_get_silence_animation();
+            requested = animation_get_silence_animation();
+            break;
         case ANIMATION_LISTENING:
-            return animation_get_listening_animation();
+            requested = animation_get_listening_animation();
+            break;
         case ANIMATION_SMIRK:
-            return animation_get_smirk_animation();
+            requested = animation_get_smirk_animation();
+            break;
         case ANIMATION_WIFI:
-            return animation_get_wifi_animation();
+            requested = animation_get_wifi_animation();
+            break;
         case ANIMATION_BATTERY:
-            return animation_get_battery_animation();
+            requested = animation_get_battery_animation();
+            break;
         case ANIMATION_CRY:
-            return animation_get_cry_animation();
+            requested = animation_get_cry_animation();
+            break;
         default:
-            return animation_get_normal_animation();
+            requested = animation_get_normal_animation();
+            break;
     }
+
+    if (is_anim_ready(requested)) {
+        return requested;
+    }
+
+    Animation_t* normal_fallback = animation_get_normal_animation();
+    if (is_anim_ready(normal_fallback)) {
+        log_missing_animation_throttled(index, "NORMAL");
+        return normal_fallback;
+    }
+
+    Animation_t* any_fallback = get_any_available_animation();
+    if (is_anim_ready(any_fallback)) {
+        log_missing_animation_throttled(index, "ANY_AVAILABLE");
+        return any_fallback;
+    }
+
+    return NULL;
 }
 
 // Animation array is no longer used - use get_animation() function instead
@@ -615,7 +690,6 @@ Animation_t* animation_get_embarrass_animation(void)
     if (sd_embarrass.use_spiffs && sd_embarrass.imges && sd_embarrass.len > 0) {
         return &sd_embarrass;
     }
-    ESP_LOGW("animation", "No embarrass animation available from SD card");
     return NULL;
 }
 
@@ -628,7 +702,6 @@ Animation_t* animation_get_fire_animation(void)
     if (sd_fire.use_spiffs && sd_fire.imges && sd_fire.len > 0) {
         return &sd_fire;
     }
-    ESP_LOGW("animation", "No fire animation available from SD card");
     return NULL;
 }
 
@@ -641,7 +714,6 @@ Animation_t* animation_get_happy_animation(void)
     if (sd_happy.use_spiffs && sd_happy.imges && sd_happy.len > 0) {
         return &sd_happy;
     }
-    ESP_LOGW("animation", "No happy animation available from SD card");
     return NULL;
 }
 
@@ -654,7 +726,6 @@ Animation_t* animation_get_inspiration_animation(void)
     if (sd_inspiration.use_spiffs && sd_inspiration.imges && sd_inspiration.len > 0) {
         return &sd_inspiration;
     }
-    ESP_LOGW("animation", "No inspiration animation available from SD card");
     return NULL;
 }
 
@@ -667,7 +738,6 @@ Animation_t* animation_get_shy_animation(void)
     if (sd_shy.use_spiffs && sd_shy.imges && sd_shy.len > 0) {
         return &sd_shy;
     }
-    ESP_LOGW("animation", "No shy animation available from SD card");
     return NULL;
 }
 
@@ -680,7 +750,6 @@ Animation_t* animation_get_sleep_animation(void)
     if (sd_sleep.use_spiffs && sd_sleep.imges && sd_sleep.len > 0) {
         return &sd_sleep;
     }
-    ESP_LOGW("animation", "No sleep animation available from SD card");
     return NULL;
 }
 
@@ -693,7 +762,6 @@ Animation_t* animation_get_laugh_animation(void)
     if (sd_laugh.use_spiffs && sd_laugh.imges && sd_laugh.len > 0) {
         return &sd_laugh;
     }
-    ESP_LOGW("animation", "No laugh animation available from SD card");
     return NULL;
 }
 
@@ -706,7 +774,6 @@ Animation_t* animation_get_sad_animation(void)
     if (sd_sad.use_spiffs && sd_sad.imges && sd_sad.len > 0) {
         return &sd_sad;
     }
-    ESP_LOGW("animation", "No sad animation available from SD card");
     return NULL;
 }
 
@@ -722,7 +789,6 @@ Animation_t* animation_get_cry_animation(void)
     if (sd_cry.use_spiffs && sd_cry.imges && sd_cry.len > 0) {
         return &sd_cry;
     }
-    ESP_LOGW("animation", "No cry animation available from SD card");
     return NULL;
 }
 
@@ -735,7 +801,6 @@ Animation_t* animation_get_silence_animation(void)
     if (sd_silence.use_spiffs && sd_silence.imges && sd_silence.len > 0) {
         return &sd_silence;
     }
-    ESP_LOGW("animation", "No silence animation available from SD card");
     return NULL;
 }
 
@@ -748,7 +813,6 @@ Animation_t* animation_get_listening_animation(void)
     if (sd_listening.use_spiffs && sd_listening.imges && sd_listening.len > 0) {
         return &sd_listening;
     }
-    ESP_LOGW("animation", "No listening animation available from SD card");
     return NULL;
 }
 
@@ -761,7 +825,6 @@ Animation_t* animation_get_smirk_animation(void)
     if (sd_smirk.use_spiffs && sd_smirk.imges && sd_smirk.len > 0) {
         return &sd_smirk;
     }
-    ESP_LOGW("animation", "No smirk animation available from SD card");
     return NULL;
 }
 
@@ -774,7 +837,6 @@ Animation_t* animation_get_battery_animation(void)
     if (sd_battery.use_spiffs && sd_battery.imges && sd_battery.len > 0) {
         return &sd_battery;
     }
-    ESP_LOGW("animation", "No battery animation available from SD card");
     return NULL;
 }
 
@@ -787,7 +849,6 @@ Animation_t* animation_get_wifi_animation(void)
     if (sd_wifi.use_spiffs && sd_wifi.imges && sd_wifi.len > 0) {
         return &sd_wifi;
     }
-    ESP_LOGW("animation", "No wifi animation available from SD card");
     return NULL;
 }
 

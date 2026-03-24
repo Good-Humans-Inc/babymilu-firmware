@@ -1235,10 +1235,17 @@ void Application::Start()
     audio_processor_->Initialize(codec);
     audio_processor_->OnOutput([this](std::vector<int16_t> &&data)
                                {
+        static int64_t last_preencode_drop_log_us = 0;
+        static int64_t last_postencode_drop_log_us = 0;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (audio_send_queue_.size() >= MAX_AUDIO_PACKETS_IN_QUEUE) {
-                ESP_LOGW(TAG, "Too many audio packets in queue, drop the newest packet");
+                int64_t now_us = esp_timer_get_time();
+                if (now_us - last_preencode_drop_log_us >= 2000000) {
+                    ESP_LOGW(TAG, "Audio send queue full (%d), dropping newest PCM packet",
+                             (int)audio_send_queue_.size());
+                    last_preencode_drop_log_us = now_us;
+                }
                 return;
             }
         }
@@ -1264,7 +1271,12 @@ void Application::Start()
 #endif
                 std::lock_guard<std::mutex> lock(mutex_);
                 if (audio_send_queue_.size() >= MAX_AUDIO_PACKETS_IN_QUEUE) {
-                    ESP_LOGW(TAG, "Too many audio packets in queue, drop the oldest packet");
+                    int64_t now_us = esp_timer_get_time();
+                    if (now_us - last_postencode_drop_log_us >= 2000000) {
+                        ESP_LOGW(TAG, "Audio send queue full (%d), dropping oldest Opus packet",
+                                 (int)audio_send_queue_.size());
+                        last_postencode_drop_log_us = now_us;
+                    }
                     audio_send_queue_.pop_front();
                 }
                 audio_send_queue_.emplace_back(std::move(packet));
