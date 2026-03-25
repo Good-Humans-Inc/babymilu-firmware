@@ -238,42 +238,15 @@ bool WebsocketProtocol::OpenAudioChannel() {
                         .payload = std::vector<uint8_t>(payload, payload + bp2->payload_size)
                     });
                 } else if (version_ == 3) {
-                    // Version 3: Server may send raw Opus frames or wrapped frames
-                    // Try to detect if it's a wrapped frame by checking for BinaryProtocol3 header
-                    // BinaryProtocol3 has: type (1 byte), reserved (1 byte), payload_size (2 bytes)
-                    if (len >= 4 && len < 10000) {
-                        // Check if it looks like a wrapped frame (small payload_size in first 2 bytes after type/reserved)
-                        uint16_t payload_size = ntohs(*(uint16_t*)(data + 2));
-                        if (payload_size > 0 && payload_size <= len - 4 && payload_size < 4000) {
-                            // Likely a wrapped frame
-                            BinaryProtocol3* bp3 = (BinaryProtocol3*)data;
-                            bp3->type = bp3->type;
-                            bp3->payload_size = ntohs(bp3->payload_size);
-                            auto payload = (uint8_t*)bp3->payload;
-                            on_incoming_audio_(AudioStreamPacket{
-                                .sample_rate = server_sample_rate_,
-                                .frame_duration = server_frame_duration_,
-                                .timestamp = 0,
-                                .payload = std::vector<uint8_t>(payload, payload + bp3->payload_size)
-                            });
-                        } else {
-                            // Likely a raw Opus frame
-                            on_incoming_audio_(AudioStreamPacket{
-                                .sample_rate = server_sample_rate_,
-                                .frame_duration = server_frame_duration_,
-                                .timestamp = 0,
-                                .payload = std::vector<uint8_t>((uint8_t*)data, (uint8_t*)data + len)
-                            });
-                        }
-                    } else {
-                        // Raw Opus frame
-                        on_incoming_audio_(AudioStreamPacket{
-                            .sample_rate = server_sample_rate_,
-                            .frame_duration = server_frame_duration_,
-                            .timestamp = 0,
-                            .payload = std::vector<uint8_t>((uint8_t*)data, (uint8_t*)data + len)
-                        });
-                    }
+                    // Version 3: Server sends raw Opus frames over WebSocket.
+                    // No wrapper detection — previous heuristic could false-positive
+                    // on random Opus byte patterns, corrupting ~0.1-0.5% of frames.
+                    on_incoming_audio_(AudioStreamPacket{
+                        .sample_rate = server_sample_rate_,
+                        .frame_duration = server_frame_duration_,
+                        .timestamp = 0,
+                        .payload = std::vector<uint8_t>((uint8_t*)data, (uint8_t*)data + len)
+                    });
                 } else {
                     on_incoming_audio_(AudioStreamPacket{
                         .sample_rate = server_sample_rate_,
