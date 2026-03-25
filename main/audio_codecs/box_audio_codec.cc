@@ -6,6 +6,14 @@
 
 #define TAG "BoxAudioCodec"
 
+static constexpr int kHardwareVolumeMax = 90;
+
+static int MapUiToHardwareVolume(int ui_volume) {
+    if (ui_volume <= 0) return 0;
+    if (ui_volume >= 100) return kHardwareVolumeMax;
+    return ui_volume * kHardwareVolumeMax / 100;
+}
+
 BoxAudioCodec::BoxAudioCodec(void* i2c_master_handle, int input_sample_rate, int output_sample_rate,
     gpio_num_t mclk, gpio_num_t bclk, gpio_num_t ws, gpio_num_t dout, gpio_num_t din,
     gpio_num_t pa_pin, uint8_t es8311_addr, uint8_t es7210_addr, bool input_reference) {
@@ -179,7 +187,9 @@ void BoxAudioCodec::CreateDuplexChannels(gpio_num_t mclk, gpio_num_t bclk, gpio_
 }
 
 void BoxAudioCodec::SetOutputVolume(int volume) {
-    ESP_ERROR_CHECK(esp_codec_dev_set_out_vol(output_dev_, volume));
+    int hw_volume = MapUiToHardwareVolume(volume);
+    ESP_LOGI(TAG, "Volume mapping: UI %d -> HW %d", volume, hw_volume);
+    ESP_ERROR_CHECK(esp_codec_dev_set_out_vol(output_dev_, hw_volume));
     AudioCodec::SetOutputVolume(volume);
 }
 
@@ -220,7 +230,7 @@ void BoxAudioCodec::EnableOutput(bool enable) {
             .mclk_multiple = 0,
         };
         ESP_ERROR_CHECK(esp_codec_dev_open(output_dev_, &fs));
-        ESP_ERROR_CHECK(esp_codec_dev_set_out_vol(output_dev_, output_volume_));
+        ESP_ERROR_CHECK(esp_codec_dev_set_out_vol(output_dev_, MapUiToHardwareVolume(output_volume_)));
     } else {
         ESP_ERROR_CHECK(esp_codec_dev_close(output_dev_));
     }
