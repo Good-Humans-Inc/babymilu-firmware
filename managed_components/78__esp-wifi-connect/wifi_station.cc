@@ -36,49 +36,6 @@ static std::string ToHexBytes(const char* input) {
 
 namespace {
 
-constexpr size_t kMaxSsidMatchDistance = 5;
-
-int BoundedSsidByteDistance(const uint8_t* lhs,
-                            size_t lhs_len,
-                            const uint8_t* rhs,
-                            size_t rhs_len,
-                            size_t max_distance) {
-    if (lhs == nullptr || rhs == nullptr) {
-        return -1;
-    }
-    if (lhs_len > 32 || rhs_len > 32) {
-        return -1;
-    }
-    if (lhs_len > rhs_len) {
-        return BoundedSsidByteDistance(rhs, rhs_len, lhs, lhs_len, max_distance);
-    }
-    if (rhs_len - lhs_len > max_distance) {
-        return -1;
-    }
-
-    int prev[33];
-    int curr[33];
-    for (size_t j = 0; j <= rhs_len; ++j) {
-        prev[j] = static_cast<int>(j);
-    }
-
-    for (size_t i = 1; i <= lhs_len; ++i) {
-        curr[0] = static_cast<int>(i);
-        int row_min = curr[0];
-        for (size_t j = 1; j <= rhs_len; ++j) {
-            const int substitution_cost = lhs[i - 1] == rhs[j - 1] ? 0 : 1;
-            curr[j] = std::min({prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + substitution_cost});
-            row_min = std::min(row_min, curr[j]);
-        }
-        if (row_min > static_cast<int>(max_distance)) {
-            return -1;
-        }
-        std::copy(curr, curr + rhs_len + 1, prev);
-    }
-
-    return prev[rhs_len] <= static_cast<int>(max_distance) ? prev[rhs_len] : -1;
-}
-
 std::string BytesToHex(const uint8_t* data, size_t len) {
     static const char kHex[] = "0123456789ABCDEF";
     std::string hex;
@@ -261,37 +218,65 @@ void WifiStation::HandleScanResult() {
 
     auto& ssid_manager = SsidManager::GetInstance();
     auto ssid_list = ssid_manager.GetSsidList();
+    const auto persisted_ssid_list = ssid_list;
 
-    // Debug: print stored credentials in raw hex-byte format.
-    std::string creds = "[";
+    // One-shot override used by switch_wifi_to: only affects this boot's
+    // connection attempt order and does not modify persisted credential order.
+    if (!preferred_ssid_once_.empty()) {
+        auto preferred_it = std::find_if(ssid_list.begin(), ssid_list.end(),
+            [this](const SsidItem& item) {
+                return item.ssid == preferred_ssid_once_;
+            });
+        if (preferred_it != ssid_list.end() && preferred_it != ssid_list.begin()) {
+            SsidItem preferred = *preferred_it;
+            ssid_list.erase(preferred_it);
+            ssid_list.insert(ssid_list.begin(), preferred);
+            ESP_LOGI(TAG, "Applying one-shot preferred SSID first: %s", preferred_ssid_once_.c_str());
+        } else if (preferred_it == ssid_list.end()) {
+            ESP_LOGW(TAG, "One-shot preferred SSID not found in saved list: %s", preferred_ssid_once_.c_str());
+        }
+        preferred_ssid_once_.clear();
+    }
+
+    // Debug: print persisted credentials from NVS (actual stored priority).
+    std::string persisted_creds = "[";
+    for (size_t i = 0; i < persisted_ssid_list.size(); ++i) {
+        if (i > 0) {
+            persisted_creds += ", ";
+        }
+        persisted_creds += "{\"ssid_hex\":[";
+        persisted_creds += ToHexBytes(persisted_ssid_list[i].ssid.c_str());
+        persisted_creds += "],\"pwd_hex\":[";
+        persisted_creds += ToHexBytes(persisted_ssid_list[i].password.c_str());
+        persisted_creds += "]}";
+    }
+    persisted_creds += "]";
+    ESP_LOGI(TAG, "Stored credentials (NVS persisted priority, hex): %s", persisted_creds.c_str());
+
+    // Debug: print effective credentials used for this boot's connection queue.
+    std::string effective_creds = "[";
     for (size_t i = 0; i < ssid_list.size(); ++i) {
         if (i > 0) {
-            creds += ", ";
+            effective_creds += ", ";
         }
-        creds += "{\"ssid_hex\":[";
-        creds += ToHexBytes(ssid_list[i].ssid.c_str());
-        creds += "],\"pwd_hex\":[";
-        creds += ToHexBytes(ssid_list[i].password.c_str());
-        creds += "]}";
+        effective_creds += "{\"ssid_hex\":[";
+        effective_creds += ToHexBytes(ssid_list[i].ssid.c_str());
+        effective_creds += "],\"pwd_hex\":[";
+        effective_creds += ToHexBytes(ssid_list[i].password.c_str());
+        effective_creds += "]}";
     }
-    creds += "]";
-    ESP_LOGI(TAG, "Stored credentials (priority order, hex): %s", creds.c_str());
+    effective_creds += "]";
+    ESP_LOGI(TAG, "Effective credentials for this boot (connection order, hex): %s", effective_creds.c_str());
 
     // Build connection queue by stored credential order (priority list),
-    // not by AP RSSI.
+    // not by AP RSSI. Use exact SSID byte match only.
     for (const auto& item : ssid_list) {
         wifi_ap_record_t* it = ap_records + ap_num;
-        size_t matched_distance = 0;
         for (auto ap_it = ap_records; ap_it != ap_records + ap_num; ++ap_it) {
             size_t scanned_ssid_len = strnlen(reinterpret_cast<const char*>(ap_it->ssid), sizeof(ap_it->ssid));
-            int distance = BoundedSsidByteDistance(ap_it->ssid,
-                                                   scanned_ssid_len,
-                                                   reinterpret_cast<const uint8_t*>(item.ssid.data()),
-                                                   item.ssid.size(),
-                                                   kMaxSsidMatchDistance);
-            if (distance >= 0) {
+            if (scanned_ssid_len == item.ssid.size() &&
+                memcmp(ap_it->ssid, item.ssid.data(), scanned_ssid_len) == 0) {
                 it = ap_it;
-                matched_distance = static_cast<size_t>(distance);
                 break;
             }
         }
@@ -309,11 +294,6 @@ void WifiStation::HandleScanResult() {
             LogSsidBytes("Stored SSID bytes",
                          reinterpret_cast<const uint8_t*>(item.ssid.data()),
                          item.ssid.size());
-            if (matched_distance > 0) {
-                ESP_LOGI(TAG,
-                         "Using fuzzy SSID match (distance=%u) with stored password",
-                         static_cast<unsigned>(matched_distance));
-            }
             WifiApRecord record = {
                 .ssid = std::string(reinterpret_cast<const char*>(ap_record.ssid), scanned_ssid_len),
                 .password = item.password,
@@ -385,6 +365,12 @@ uint8_t WifiStation::GetChannel() {
 
 bool WifiStation::IsConnected() {
     return xEventGroupGetBits(event_group_) & WIFI_EVENT_CONNECTED;
+}
+
+void WifiStation::SetPreferredSsidForNextConnect(const std::string& ssid) {
+    preferred_ssid_once_ = ssid;
+    ESP_LOGI(TAG, "Set one-shot preferred SSID: %s",
+             preferred_ssid_once_.empty() ? "<none>" : preferred_ssid_once_.c_str());
 }
 
 void WifiStation::SetPowerSaveMode(bool enabled) {

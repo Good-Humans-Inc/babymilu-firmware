@@ -30,6 +30,7 @@ public:
     std::string GetIpAddress() const { return ip_address_; }
     uint8_t GetChannel();
     void SetPowerSaveMode(bool enabled);
+    void SetPreferredSsidForNextConnect(const std::string& ssid);
 
     void OnConnect(std::function<void(const std::string& ssid)> on_connect);
     void OnConnected(std::function<void(const std::string& ssid)> on_connected);
@@ -56,6 +57,7 @@ private:
     std::function<void(const std::string& ssid)> on_connected_;
     std::function<void()> on_scan_begin_;
     std::vector<WifiApRecord> connect_queue_;
+    std::string preferred_ssid_once_;
 
     void HandleScanResult();
     void StartConnect();

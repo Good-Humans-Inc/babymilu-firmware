@@ -5,8 +5,10 @@
 #include "config.h"
 #include "ota.h"
 #include "animation/animation_updater.h"
+#include "ssid_manager.h"
 
 #include <esp_log.h>
+#include <esp_system.h>
 #include <ml307_mqtt.h>
 #include <ml307_udp.h>
 #include <cstring>
@@ -280,6 +282,33 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
                 board.EnterBleWifiConfigMode();
             });
             // Don't forward wifi_clear_credential to on_incoming_json_ as it's a protocol-level message
+        } else if (strcmp(type->valuestring, "switch_wifi_to") == 0) {
+            auto message = cJSON_GetObjectItem(root, "message");
+            if (!cJSON_IsString(message) || message->valuestring == nullptr || strlen(message->valuestring) == 0) {
+                ESP_LOGW(TAG, "switch_wifi_to ignored: missing or invalid message field");
+            } else {
+                std::string target_ssid = message->valuestring;
+                auto& ssid_manager = SsidManager::GetInstance();
+                bool matched = false;
+                for (const auto& item : ssid_manager.GetSsidList()) {
+                    if (item.ssid == target_ssid) {
+                        matched = true;
+                        break;
+                    }
+                }
+
+                if (!matched) {
+                    ESP_LOGI(TAG, "switch_wifi_to ignored: target SSID '%s' not found in saved credentials", target_ssid.c_str());
+                } else {
+                    ESP_LOGI(TAG, "switch_wifi_to: scheduling one-shot preferred SSID '%s' for next reboot", target_ssid.c_str());
+                    Settings wifi_settings("wifi", true);
+                    wifi_settings.SetString("next_boot_ssid", target_ssid);
+                    Application::GetInstance().Schedule([]() {
+                        esp_restart();
+                    });
+                }
+            }
+            // Don't forward switch_wifi_to to on_incoming_json_ as it's a protocol-level message
         } else {
             // Forward all other message types (including "listen", "tts", "stt", etc.) to Application handler
             ESP_LOGI(TAG, "Forwarding MQTT message type '%s' to Application::OnIncomingJson", type->valuestring);
