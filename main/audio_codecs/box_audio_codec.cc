@@ -209,7 +209,7 @@ void BoxAudioCodec::EnableInput(bool enable) {
             fs.channel_mask |= ESP_CODEC_DEV_MAKE_CHANNEL_MASK(1);
         }
         ESP_ERROR_CHECK(esp_codec_dev_open(input_dev_, &fs));
-        ESP_ERROR_CHECK(esp_codec_dev_set_in_channel_gain(input_dev_, ESP_CODEC_DEV_MAKE_CHANNEL_MASK(0), 40.0));  // Increased from 30.0 to 40.0 dB for better microphone sensitivity
+        ESP_ERROR_CHECK(esp_codec_dev_set_in_channel_gain(input_dev_, ESP_CODEC_DEV_MAKE_CHANNEL_MASK(0), 37.0));  // Tuned down from 40.0 dB to reduce low-frequency muddiness/clipping
     } else {
         ESP_ERROR_CHECK(esp_codec_dev_close(input_dev_));
     }
