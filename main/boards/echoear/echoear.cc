@@ -10,12 +10,14 @@
 #include "sd_card.h"
 #include "sd_card_startup.h"
 #include "power_save_timer.h"
+#include "talk_button_sequence.h"
 
 #include <wifi_station.h>
 #include <ssid_manager.h>
 #include "settings.h"
 #include <esp_log.h>
 #include <esp_random.h>
+#include <atomic>
 
 #include <driver/i2c_master.h>
 #include "i2c_device.h"
@@ -31,6 +33,8 @@
 #include <freertos/queue.h>
 #include <freertos/task.h>
 #include <string>
+#include <utility>
+#include <vector>
 
 // BMI270 includes
 #include "bmi270_api.h"
@@ -434,6 +438,39 @@ private:
     esp_timer_handle_t volume_message_timer_ = nullptr;  // Timer to clear volume message
     std::string previous_emotion_ = "normal";  // Store previous emotion string to restore
     int previous_volume_ = -1;  // Store volume before muting (for restore on unmute)
+    std::atomic<bool> talk_sequence_running_{false};
+
+    static void talk_button_sequence_task(void* arg) {
+        EchoEar* board = static_cast<EchoEar*>(arg);
+        if (board == nullptr) {
+            vTaskDelete(nullptr);
+            return;
+        }
+        Display* display = board->GetDisplay();
+        if (display != nullptr) {
+            std::vector<std::pair<std::string, int>> steps;
+            talk_button_sequence::LoadSteps(steps);
+            for (const auto& step : steps) {
+                display->SetEmotion(step.first.c_str());
+                vTaskDelay(pdMS_TO_TICKS(step.second));
+            }
+            display->SetEmotion("normal");
+        }
+        board->talk_sequence_running_.store(false);
+        vTaskDelete(nullptr);
+    }
+
+    void StartTalkButtonAnimationSequence() {
+        bool expected = false;
+        if (!talk_sequence_running_.compare_exchange_strong(expected, true)) {
+            return;
+        }
+        BaseType_t ok = xTaskCreate(talk_button_sequence_task, "talk_btn_seq", 4096, this, 5, nullptr);
+        if (ok != pdPASS) {
+            talk_sequence_running_.store(false);
+            ESP_LOGE(TAG, "[TOUCH] Failed to create talk_btn_seq task");
+        }
+    }
 
     void InitializeVolumeMessageTimer() {
         if (volume_message_timer_ != nullptr) {
@@ -585,17 +622,16 @@ private:
                     board.ResetWifiConfiguration();
                 }
                 if (board.power_save_timer_) {
-                    // If in sleep mode, just wake up and return to idle state
                     if (board.power_save_timer_->IsInSleepMode()) {
                         ESP_LOGI(TAG, "Touch detected during sleep mode - waking up");
                         board.power_save_timer_->WakeUp();
-                        // WakeUp() callback will set state to idle and show static_normal face
                     } else {
-                        // Normal operation: wake up and toggle chat state
                         board.power_save_timer_->WakeUp();
-                        app.ToggleChatState();
+                        if (!board.talk_sequence_running_.load()) {
+                            app.ToggleChatState();
+                        }
                     }
-                } else {
+                } else if (!board.talk_sequence_running_.load()) {
                     app.ToggleChatState();
                 }
             }
@@ -622,17 +658,16 @@ private:
                     board.ResetWifiConfiguration();
                 }
                 if (board.power_save_timer_) {
-                    // If in sleep mode, just wake up and return to idle state
                     if (board.power_save_timer_->IsInSleepMode()) {
                         ESP_LOGI(TAG, "Touch detected during sleep mode - waking up");
                         board.power_save_timer_->WakeUp();
-                        // WakeUp() callback will set state to idle and show static_normal face
                     } else {
-                        // Normal operation: wake up and toggle chat state
                         board.power_save_timer_->WakeUp();
-                        app.ToggleChatState();
+                        if (!board.talk_sequence_running_.load()) {
+                            app.ToggleChatState();
+                        }
                     }
-                } else {
+                } else if (!board.talk_sequence_running_.load()) {
                     app.ToggleChatState();
                 }
             }
@@ -890,48 +925,39 @@ private:
                 }
                 
                 if (event.state == TOUCH_STATE_ACTIVE) {
-                    // This is the heavy logic that used to live directly in the
-                    // touch_button_sensor callback. Running it here keeps the
-                    // driver callback lightweight and prevents it from blocking
-                    // higher-priority tasks such as audio streaming.
+                    if (board->talk_sequence_running_.load()) {
+                        continue;
+                    }
 
-                    // Wake up power save timer
                     if (board->power_save_timer_) {
                         board->power_save_timer_->WakeUp();
                     }
 
-                    // Stop any existing emotion reset timer
                     if (board->emotion_reset_timer_ != nullptr) {
                         esp_timer_stop(board->emotion_reset_timer_);
                     }
 
-                    // Store current emotion state - default to "normal" if unknown
-                    // (We can't easily detect the current emotion, so default to normal)
                     board->previous_emotion_ = "normal";
 
-                    // Randomly select one of three emotions
                     const char* emotions[] = {"angry", "happy", "embarressed"};
                     uint32_t random_index = esp_random() % 3;
                     const char* selected_emotion = emotions[random_index];
 
-                    // Set the random emotion on display
                     auto display = board->GetDisplay();
                     if (display != nullptr) {
                         display->SetEmotion(selected_emotion);
                         ESP_LOGI(TAG, "[TOUCH] Random emotion selected: %s", selected_emotion);
                     }
 
-                    // Calculate animation duration: frames * frame_delay (500ms per frame)
-                    // Animation frame counts: Fire(4), Smirk/Happy(4), Embarrassed(3)
-                    int frame_counts[] = {4, 4, 3};  // angry, happy, embarrassed
+                    int frame_counts[] = {4, 4, 3};
                     int frame_count = frame_counts[random_index];
-                    int64_t animation_duration_us = frame_count * 500 * 1000;  // frames * 500ms in microseconds
+                    int64_t animation_duration_us = frame_count * 500 * 1000;
 
-                    // Start timer to restore previous emotion after one animation cycle
                     if (board->emotion_reset_timer_ != nullptr) {
                         esp_timer_start_once(board->emotion_reset_timer_, animation_duration_us);
                         ESP_LOGI(TAG, "[TOUCH] Timer set to restore emotion '%s' after %lld ms (one cycle)",
-                                 board->previous_emotion_.c_str(), animation_duration_us / 1000);
+                                 board->previous_emotion_.c_str(),
+                                 static_cast<long long>(animation_duration_us / 1000));
                     }
                 } else {
                     // Logging disabled to avoid I2C contention
@@ -1372,8 +1398,8 @@ private:
     }
 
     void InitializePowerSaveTimer() {
-        // Create power save timer: -1 (no CPU freq limit), 30 seconds to sleep, -1 (no shutdown)
-        power_save_timer_ = new PowerSaveTimer(-1, 30, -1);
+        // Create power save timer: -1 (no CPU freq limit), 60 seconds to sleep, -1 (no shutdown)
+        power_save_timer_ = new PowerSaveTimer(-1, 60, -1);
         power_save_timer_->OnEnterSleepMode([this]() {
             // Check battery level to determine sleep behavior
             int battery_level = 0;
@@ -1403,16 +1429,16 @@ private:
                         display->SetEmotion("battery");
                     }
                 } else if (battery_level >= 25 && battery_level <= 40 && charging) {
-                    // 25-40%, charging: 30-sec powersaving mode + sleepy.gif
-                    ESP_LOGI(TAG, "30-sec power saving mode - battery %d%% (25-40%% range) and charging, setting brightness to 20 and switching to sleepy animation", battery_level);
+                    // 25-40%, charging: 60-sec powersaving mode + sleepy.gif
+                    ESP_LOGI(TAG, "60-sec power saving mode - battery %d%% (25-40%% range) and charging, setting brightness to 20 and switching to sleepy animation", battery_level);
                     GetBacklight()->SetBrightness(20, false);
                     auto display = GetDisplay();
                     if (display) {
                         display->SetEmotion("sleepy");
                     }
                 } else {
-                    // > 40%: 30-sec powersaving mode + sleepy.gif (regardless of charging)
-                    ESP_LOGI(TAG, "30-sec power saving mode - battery %d%% (>40%%), setting brightness to 20 and switching to sleepy animation", battery_level);
+                    // > 40%: 60-sec powersaving mode + sleepy.gif (regardless of charging)
+                    ESP_LOGI(TAG, "60-sec power saving mode - battery %d%% (>40%%), setting brightness to 20 and switching to sleepy animation", battery_level);
                     GetBacklight()->SetBrightness(20, false);
                     auto display = GetDisplay();
                     if (display) {
@@ -1420,8 +1446,8 @@ private:
                     }
                 }
             } else {
-                // Can't read battery - use default behavior (30-sec mode with sleepy)
-                ESP_LOGI(TAG, "30-sec power saving mode - battery level unknown, setting brightness to 20 and switching to sleepy animation");
+                // Can't read battery - use default behavior (60-sec mode with sleepy)
+                ESP_LOGI(TAG, "60-sec power saving mode - battery level unknown, setting brightness to 20 and switching to sleepy animation");
                 GetBacklight()->SetBrightness(20, false);
                 auto display = GetDisplay();
                 if (display) {
@@ -1584,24 +1610,12 @@ private:
 
     void InitializeButtons() {
         boot_button_.OnClick([this]() {
-            auto& app = Application::GetInstance();
-            if (app.GetDeviceState() == kDeviceStateStarting) {
-                ESP_LOGI(TAG, "Ignoring BOOT click during startup");
-                return;
-            }
             if (power_save_timer_) {
-                // If in sleep mode, wake up and directly start talking
-                if (power_save_timer_->IsInSleepMode()) {
-                    power_save_timer_->WakeUp();
-                    app.ToggleChatState();
-                } else {
-                    // Normal operation: wake up and toggle chat state
-                    power_save_timer_->WakeUp();
-                    app.ToggleChatState();
-                }
-            } else {
-                app.ToggleChatState();
+                power_save_timer_->WakeUp();
             }
+            StartTalkButtonAnimationSequence();
+            ESP_LOGI(TAG, "[BOOT] Playing talk sequence from %s/%s (chat not started)", SdCard::MountPoint(),
+                     talk_button_sequence::kSequenceFileName);
         });
 
         boot_button_.OnLongPress([this]() {
@@ -1636,6 +1650,10 @@ private:
     }
 
 public:
+    bool IsTalkAnimationSequenceActive() const override {
+        return talk_sequence_running_.load();
+    }
+
     EchoEar() : boot_button_(BOOT_BUTTON_GPIO, false, 5000, 0) {  // 5-second long press time
         InitializeI2c();
         InitializeBmi270();  // Initialize BMI270 after I2C bus is ready
@@ -1674,6 +1692,8 @@ public:
         return &audio_codec;
     }
     
+    virtual std::string GetBoardType() override { return "echoear"; }
+
     virtual Display* GetDisplay() override {
         return display_;
     }
@@ -1736,8 +1756,11 @@ public:
     }
 
     virtual void StartNetwork() override {
-        // Call parent's StartNetwork to proceed with normal WiFi initialization
-        WifiBoard::StartNetwork();
+        // Full WifiBoard::StartNetwork() blocks on connect/BLE. For showroom we skip that, but we must
+        // still call WifiStation::Start() so esp_netif_init() runs — otherwise lwIP has no tcpip thread
+        // and any HTTP (error log upload, MQTT, etc.) hits: assert tcpip_send_msg_wait_sem (Invalid mbox).
+        auto& wifi_station = WifiStation::GetInstance();
+        wifi_station.Start();
     }
 };
 

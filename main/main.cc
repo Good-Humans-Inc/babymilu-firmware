@@ -1,4 +1,5 @@
 #include <esp_log.h>
+#include <sdkconfig.h>
 #include <esp_err.h>
 #include <nvs.h>
 #include <nvs_flash.h>
@@ -94,6 +95,15 @@ extern "C" void app_main(void)
     }
     ESP_ERROR_CHECK(ret);
     ESP_LOGI(TAG, "NVS flash initialized successfully");
+
+#if defined(CONFIG_BOARD_TYPE_ECHOEAR)
+    esp_log_level_set("wifi", ESP_LOG_NONE);
+    esp_log_level_set("wifi_init", ESP_LOG_NONE);
+    esp_log_level_set("phy_init", ESP_LOG_NONE);
+    esp_log_level_set("phy", ESP_LOG_NONE);
+    esp_log_level_set("esp_netif", ESP_LOG_NONE);
+    esp_log_level_set("esp_netif_handlers", ESP_LOG_NONE);
+#endif
 
 #if !defined(CONFIG_BOARD_TYPE_ECHOEAR)
     ESP_LOGI(TAG, "=== Starting SD card initialization process ===");

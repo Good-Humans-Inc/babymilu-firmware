@@ -8,7 +8,6 @@
 #include "lvgl.h"
 #include "board.h"
 #include "display.h"
-#include "application.h"
 #include "sd_card.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -22,7 +21,6 @@
 #include <sys/stat.h>
 #include <errno.h>
 #include <unistd.h>  // For unlink() and access()
-#include <wifi_station.h>
 
 // Overlay pixel format magic number (0x4F50584C = "OPXL" in ASCII)
 #define OVERLAY_PIXELS_FORMAT 0x4F50584C
@@ -148,29 +146,8 @@ Animation_t* get_animation(int index) {
         }
     };
 
-    // Check WiFi and battery status for normal animations
+    // Check battery status for normal animations (WiFi-disconnected "no WiFi" face disabled).
     if (index == ANIMATION_NORMAL) {
-        // First check WiFi connection. When disconnected, only show WiFi animation
-        // in specific interaction states (audio testing / connecting).
-        auto& wifi_station = WifiStation::GetInstance();
-        if (!wifi_station.IsConnected()) {
-            auto& app = Application::GetInstance();
-            DeviceState state = app.GetDeviceState();
-            bool should_show_wifi_anim =
-                (state == kDeviceStateAudioTesting || state == kDeviceStateConnecting);
-
-            if (should_show_wifi_anim) {
-                Animation_t* wifi_anim = animation_get_wifi_animation();
-                if (wifi_anim != NULL &&
-                    (wifi_anim->use_gif || wifi_anim->use_spiffs)) {
-                    ESP_LOGI("animation", "WiFi disconnected in state %d, showing wifi animation instead of normal", state);
-                    return wifi_anim;
-                } else {
-                    ESP_LOGW("animation", "WiFi disconnected in state %d, but wifi animation unavailable, using normal", state);
-                }
-            }
-        }
-        
         // Then check battery level - if battery < 20%, show battery animation
         int battery_level = 100;
         bool charging = false, discharging = false;

@@ -637,6 +637,7 @@ void Application::ExitAudioTestingMode()
 
 void Application::ToggleChatState()
 {
+    auto &board = Board::GetInstance();
     if (device_state_ == kDeviceStateActivating)
     {
         SetDeviceState(kDeviceStateIdle);
@@ -644,6 +645,10 @@ void Application::ToggleChatState()
     }
     else if (device_state_ == kDeviceStateWifiConfiguring)
     {
+        if (board.GetBoardType() == "echoear") {
+            ESP_LOGI(TAG, "EchoEar: skip EnterAudioTestingMode from ToggleChatState");
+            return;
+        }
         EnterAudioTestingMode();
         return;
     }
@@ -661,37 +666,6 @@ void Application::ToggleChatState()
 
     if (device_state_ == kDeviceStateIdle)
     {
-        auto &wifi_station = WifiStation::GetInstance();
-        if (!wifi_station.IsConnected())
-        {
-            // Disconnected interaction UX:
-            // - First press: show WiFi face reminder and try connect flow.
-            // - Second press: exit reminder back to normal/idle.
-            if (wifi_error_reminder_active_)
-            {
-                auto display = Board::GetInstance().GetDisplay();
-                if (display != nullptr)
-                {
-                    display->SetEmotion("normal");
-                }
-                wifi_error_reminder_active_ = false;
-                return;
-            }
-
-            // If user starts interaction while disconnected, show WiFi animation as
-            // an immediate visual reminder of the network error condition.
-            auto display = Board::GetInstance().GetDisplay();
-            if (display != nullptr)
-            {
-                display->SetEmotion("wifi");
-            }
-            wifi_error_reminder_active_ = true;
-        }
-        else
-        {
-            wifi_error_reminder_active_ = false;
-        }
-
         Schedule([this]()
                  {
             auto* active_protocol = GetActiveProtocol();
@@ -773,6 +747,10 @@ void Application::StartListening()
     }
     else if (device_state_ == kDeviceStateWifiConfiguring)
     {
+        if (Board::GetInstance().GetBoardType() == "echoear") {
+            ESP_LOGI(TAG, "EchoEar: skip EnterAudioTestingMode from StartListening");
+            return;
+        }
         EnterAudioTestingMode();
         return;
     }
@@ -874,7 +852,9 @@ void Application::Start()
     }
     else
     {
-        ESP_LOGI(TAG, "WiFi board detected, setting opus encoder complexity to 0");
+        if (board.GetBoardType() != "echoear") {
+            ESP_LOGI(TAG, "WiFi board detected, setting opus encoder complexity to 0");
+        }
         opus_encoder_->SetComplexity(0);
     }
 
@@ -906,10 +886,12 @@ void Application::Start()
     // Only clear WiFi if no credentials exist (first boot or manual clearing)
     auto& ssid_manager = SsidManager::GetInstance();
     auto ssid_list = ssid_manager.GetSsidList();
-    if (ssid_list.empty()) {
-        ESP_LOGI(TAG, "No WiFi credentials found, nimBLE will start for configuration");
-    } else {
-        ESP_LOGI(TAG, "WiFi credentials found (%d networks), proceeding with normal startup", ssid_list.size());
+    if (board.GetBoardType() != "echoear") {
+        if (ssid_list.empty()) {
+            ESP_LOGI(TAG, "No WiFi credentials found, nimBLE will start for configuration");
+        } else {
+            ESP_LOGI(TAG, "WiFi credentials found (%d networks), proceeding with normal startup", ssid_list.size());
+        }
     }
 
     /* Wait for the network to be ready */
@@ -921,7 +903,9 @@ void Application::Start()
     // Check WiFi connection status and show message if not connected
     // Note: If no WiFi credentials exist, StartNetwork() will block in WiFi config mode,
     // so this code only runs if WiFi credentials exist but connection failed or is in progress
-    if (board.GetBoardType() != "ml307") {
+    if (board.GetBoardType() == "echoear") {
+        // No WiFi status / connect prompts logging on EchoEar
+    } else if (board.GetBoardType() != "ml307") {
         ESP_LOGI(TAG, "Checking WiFi connection status...");
         auto& wifi_station = WifiStation::GetInstance();
         bool is_connected = wifi_station.IsConnected();
@@ -929,30 +913,7 @@ void Application::Start()
         ESP_LOGI(TAG, "Device state: %d (kDeviceStateWifiConfiguring=%d)", device_state_, kDeviceStateWifiConfiguring);
         
         if (!is_connected) {
-            // Show message to guide user to connect WiFi (only if not already in config mode)
-            // If in config mode, the message is already shown in wifi_board.cc
-            if (device_state_ != kDeviceStateWifiConfiguring) {
-                ESP_LOGI(TAG, "Not in WiFi config mode, attempting to show WiFi connection message");
-                const char* wifi_message = "Connect me to wifi with BabyMilu App. Can't wait to meet you again.";
-                
-                // Try to use LcdDisplay::CreateSystemMessage if available
-                LcdDisplay* lcd_display = static_cast<LcdDisplay*>(display);
-                if (lcd_display != nullptr) {
-                    ESP_LOGI(TAG, "Display is LcdDisplay, using CreateSystemMessage");
-                    lcd_display->CreateSystemMessage(wifi_message);
-                }
-                
-                // Also try standard methods as fallback
-                display->SetChatMessage("system", wifi_message);
-                ESP_LOGI(TAG, "Called SetChatMessage with WiFi message");
-                
-                // Also try ShowNotification as fallback
-                vTaskDelay(pdMS_TO_TICKS(100));
-                display->ShowNotification(wifi_message, 0);
-                ESP_LOGI(TAG, "Called ShowNotification with WiFi message");
-            } else {
-                ESP_LOGI(TAG, "Already in WiFi config mode, message should be shown by wifi_board.cc");
-            }
+            ESP_LOGI(TAG, "WiFi not connected; skipping on-screen connect-WiFi prompts");
         } else {
             ESP_LOGI(TAG, "WiFi is connected, checking animation availability...");
             // WiFi is connected, check if animation is available
@@ -997,37 +958,53 @@ void Application::Start()
     // AnimationUpdater::GetInstance().Start();
 
     // Check for new firmware version or get the MQTT broker address
-    CheckNewVersion();
+    if (board.GetBoardType() == "echoear") {
+        xEventGroupSetBits(event_group_, CHECK_NEW_VERSION_DONE_EVENT);
+    } else {
+        CheckNewVersion();
+    }
 
     // Check for animation updates after network is confirmed ready
     // Only trigger once after startup when server connection is established
-    ESP_LOGI(TAG, "Checking if network is ready for animation update check...");
     auto& board_instance = Board::GetInstance();
     bool network_ready = false;
     
-    if (board_instance.GetBoardType() != "ml307") {
-        // For WiFi boards, check WiFi connection
+    if (board_instance.GetBoardType() == "echoear") {
+        auto& wifi_station = WifiStation::GetInstance();
+        network_ready = wifi_station.IsConnected();
+    } else if (board_instance.GetBoardType() != "ml307") {
+        ESP_LOGI(TAG, "Checking if network is ready for animation update check...");
         auto& wifi_station = WifiStation::GetInstance();
         network_ready = wifi_station.IsConnected();
         ESP_LOGI(TAG, "WiFi board - connection status: %s", network_ready ? "CONNECTED" : "NOT CONNECTED");
     } else {
-        // For ML307 boards, network is ready after CheckNewVersion() succeeds
-        // (CheckNewVersion makes HTTP requests, so network must be working)
+        ESP_LOGI(TAG, "Checking if network is ready for animation update check...");
         network_ready = true;
         ESP_LOGI(TAG, "ML307 board - assuming network ready after CheckNewVersion()");
     }
     
     if (network_ready) {
-        ESP_LOGI(TAG, "Network is ready, animation updater initialized (awaiting MQTT trigger)");
+        if (board_instance.GetBoardType() != "echoear") {
+            ESP_LOGI(TAG, "Network is ready, animation updater initialized (awaiting MQTT trigger)");
+        }
         AnimationUpdater::GetInstance().Initialize();
     } else {
-        ESP_LOGW(TAG, "Network not ready yet, skipping animation updater initialization");
+        if (board_instance.GetBoardType() != "echoear") {
+            ESP_LOGW(TAG, "Network not ready yet, skipping animation updater initialization");
+        }
     }
 
-    // Upload error log if available
-    ESP_LOGI(TAG, "Attempting to upload error log...");
-    esp_err_t upload_result = ErrorLogUploader::UploadErrorLog();
-    ESP_LOGI(TAG, "Error log upload attempt completed with result: %s", esp_err_to_name(upload_result));
+    // HTTP upload needs a working network stack (WiFi/Ethernet inited + connected). If StartNetwork
+    // was skipped (e.g. EchoEar showcase) or STA is down, lwIP tcpip mbox is invalid → assert in
+    // tcpip_send_msg_wait_sem if we open a socket here.
+    esp_err_t upload_result = ESP_OK;
+    if (network_ready) {
+        ESP_LOGI(TAG, "Attempting to upload error log...");
+        upload_result = ErrorLogUploader::UploadErrorLog();
+        ESP_LOGI(TAG, "Error log upload attempt completed with result: %s", esp_err_to_name(upload_result));
+    } else {
+        ESP_LOGI(TAG, "Network not ready, skipping error log upload");
+    }
     
     // After upload attempt (regardless of success/failure), enable error logging to SD card
     // This will capture all subsequent ESP errors and write them to /sdcard/err.txt
@@ -1100,6 +1077,10 @@ void Application::Start()
     protocol_->OnNetworkError([this](const std::string &message)
                               {
         SetDeviceState(kDeviceStateIdle);
+        if (Board::GetInstance().IsTalkAnimationSequenceActive()) {
+            ESP_LOGW(TAG, "Network error (UI deferred during talk sequence): %s", message.c_str());
+            return;
+        }
         // Use WiFi face for transport/connectivity failures so users get a
         // consistent network-error visual cue.
         Alert(Lang::Strings::ERROR, message.c_str(), "wifi", Lang::Sounds::P3_EXCLAMATION); });
@@ -1922,7 +1903,9 @@ void Application::SetDeviceState(DeviceState state)
     case kDeviceStateUnknown:
     case kDeviceStateIdle:
         display->SetStatus(Lang::Strings::STANDBY);
-        display->SetEmotion("normal");
+        if (!board.IsTalkAnimationSequenceActive()) {
+            display->SetEmotion("normal");
+        }
         audio_processor_->Stop();
         wake_word_->StartDetection();
         break;
@@ -2061,9 +2044,7 @@ void Application::SetDeviceState(DeviceState state)
         display->SetEmotion("normal");
         break;
     case kDeviceStateAudioTesting:
-        // In WiFi config flow, show WiFi animation only when talk button enters
-        // audio testing mode.
-        display->SetEmotion("wifi");
+        display->SetEmotion("normal");
         break;
     case kDeviceStateUpgrading:
     case kDeviceStateActivating:
@@ -2248,6 +2229,10 @@ void Application::OpenWebSocketConnection() {
         // Set up callbacks same as primary protocol
         websocket_protocol_->OnNetworkError([this](const std::string &message) {
             SetDeviceState(kDeviceStateIdle);
+            if (Board::GetInstance().IsTalkAnimationSequenceActive()) {
+                ESP_LOGW(TAG, "WebSocket error (UI deferred during talk sequence): %s", message.c_str());
+                return;
+            }
             // Mirror primary protocol behavior: show WiFi face on connectivity errors.
             Alert(Lang::Strings::ERROR, message.c_str(), "wifi", Lang::Sounds::P3_EXCLAMATION);
         });

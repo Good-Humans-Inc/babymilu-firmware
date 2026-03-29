@@ -1248,6 +1248,7 @@ void LcdDisplay::SetEmotion(const char *emotion)
         {ANIMATION_SLEEP, "sleepy"},
         {ANIMATION_SLEEP, "relaxed"},
         {ANIMATION_STARRY, "starry"},
+        {ANIMATION_HEARTY, "love"},
         {ANIMATION_CRY, "cry"},
         {ANIMATION_ANGRY, "angry"},
         {ANIMATION_LISTENING, "listening"},

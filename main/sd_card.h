@@ -40,6 +40,13 @@ public:
     static esp_err_t Eject();
 
     /**
+     * @brief VFS path for the SD card root (FAT root). Files you place next to test.bin on the
+     * card appear as MountPoint()/filename, e.g. /sdcard/talk.txt — there is no extra
+     * "sdcard" folder on the card; /sdcard is only the mount point inside the firmware.
+     */
+    static constexpr const char* MountPoint() { return "/sdcard"; }
+
+    /**
      * @brief Check if SD card is currently mounted
      * 
      * @return true if SD card is mounted, false otherwise

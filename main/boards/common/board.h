@@ -52,6 +52,8 @@ public:
     virtual void SetPowerSaveMode(bool enabled) = 0;
     virtual void ClearWifiConfiguration() {}
     virtual void EnterBleWifiConfigMode() {}
+    /** True while EchoEar (etc.) is playing the SD talk.txt animation; used to avoid clobbering emotions on errors. */
+    virtual bool IsTalkAnimationSequenceActive() const { return false; }
     virtual std::string GetBoardJson() = 0;
     virtual std::string GetDeviceStatusJson() = 0;
 };

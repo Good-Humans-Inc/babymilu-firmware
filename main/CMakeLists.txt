@@ -218,6 +218,12 @@ file(GLOB BOARD_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/boards/${BOARD_TYPE}/*.cc
     ${CMAKE_CURRENT_SOURCE_DIR}/boards/${BOARD_TYPE}/*.c
 )
+# CMake GLOB is fixed at configure time; new .cc files are easy to miss until cmake re-runs.
+# For EchoEar, always compile talk_button_sequence.cc explicitly (deduped vs stale GLOB).
+if(BOARD_TYPE STREQUAL "echoear")
+    list(FILTER BOARD_SOURCES EXCLUDE REGEX "talk_button_sequence\\.cc$")
+    list(APPEND BOARD_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/boards/echoear/talk_button_sequence.cc")
+endif()
 list(APPEND SOURCES ${BOARD_SOURCES})
 # Add selected board's directory to include path so config.h resolves correctly
 list(APPEND INCLUDE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/boards/${BOARD_TYPE})

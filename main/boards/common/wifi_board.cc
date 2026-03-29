@@ -200,40 +200,8 @@ void WifiBoard::StartNetwork() {
         
         auto& application = Application::GetInstance();
         application.SetDeviceState(kDeviceStateWifiConfiguring);
-        
-        // Display BLE configuration instructions
-        std::string hint = "Connect to BLE device 'BabyMilu' to configure WiFi";
-        application.Alert("WiFi Configuration", hint.c_str(), "", Lang::Sounds::P3_WIFICONFIG);
-        
-        // Show message to guide user to connect WiFi (display in center of screen)
-        ESP_LOGI(TAG, "Attempting to display WiFi connection message...");
-        auto display = Board::GetInstance().GetDisplay();
-        if (display == nullptr) {
-            ESP_LOGE(TAG, "Display is null! Cannot show WiFi connection message");
-        } else {
-            ESP_LOGI(TAG, "Display pointer is valid, attempting to set message");
-            
-            // Wait for display to be fully initialized (LVGL needs time)
-            ESP_LOGI(TAG, "Waiting for display to be fully initialized...");
-            vTaskDelay(pdMS_TO_TICKS(2000)); // Wait 2 seconds for LVGL to initialize
-            
-            const char* wifi_message = "Connect me to wifi with BabyMilu App. Can't wait to meet you again.";
-            
-            // Try to cast to LcdDisplay to use CreateSystemMessage
-            // Use static_cast since we know the display type for LCD boards
-            LcdDisplay* lcd_display = static_cast<LcdDisplay*>(display);
-            if (lcd_display != nullptr) {
-                ESP_LOGI(TAG, "Display is LcdDisplay, using CreateSystemMessage method");
-                lcd_display->CreateSystemMessage(wifi_message);
-                ESP_LOGI(TAG, "Called CreateSystemMessage");
-            } else {
-                ESP_LOGI(TAG, "Display is not LcdDisplay, using standard methods");
-                // Try SetChatMessage (works if CONFIG_USE_WECHAT_MESSAGE_STYLE is enabled)
-                display->SetChatMessage("system", wifi_message);
-                ESP_LOGI(TAG, "Called SetChatMessage");
-            }
-        }
-        
+        ESP_LOGI(TAG, "WiFi config mode (BLE); on-screen connect-WiFi prompts disabled");
+
         // Wait for BLE configuration
         while (wifi_config_mode_) {
             vTaskDelay(pdMS_TO_TICKS(1000));
@@ -342,40 +310,8 @@ void WifiBoard::StartNetwork() {
         
         auto& application = Application::GetInstance();
         application.SetDeviceState(kDeviceStateWifiConfiguring);
-        
-        // Display BLE configuration instructions
-        std::string hint = "WiFi connection failed. Connect to BLE device 'BabyMilu' to configure WiFi";
-        application.Alert("WiFi Configuration", hint.c_str(), "", Lang::Sounds::P3_WIFICONFIG);
-        
-        // Show message to guide user to connect WiFi (display in center of screen)
-        ESP_LOGI(TAG, "Attempting to display WiFi connection message (connection failed)...");
-        auto display = Board::GetInstance().GetDisplay();
-        if (display == nullptr) {
-            ESP_LOGE(TAG, "Display is null! Cannot show WiFi connection message");
-        } else {
-            ESP_LOGI(TAG, "Display pointer is valid, attempting to set message");
-            
-            // Wait for display to be fully initialized (LVGL needs time)
-            ESP_LOGI(TAG, "Waiting for display to be fully initialized...");
-            vTaskDelay(pdMS_TO_TICKS(2000)); // Wait 2 seconds for LVGL to initialize
-            
-            const char* wifi_message = "Connect me to wifi with BabyMilu App. Can't wait to meet you again.";
-            
-            // Try to cast to LcdDisplay to use CreateSystemMessage
-            // Use static_cast since we know the display type for LCD boards
-            LcdDisplay* lcd_display = static_cast<LcdDisplay*>(display);
-            if (lcd_display != nullptr) {
-                ESP_LOGI(TAG, "Display is LcdDisplay, using CreateSystemMessage method");
-                lcd_display->CreateSystemMessage(wifi_message);
-                ESP_LOGI(TAG, "Called CreateSystemMessage");
-            } else {
-                ESP_LOGI(TAG, "Display is not LcdDisplay, using standard methods");
-                // Try SetChatMessage (works if CONFIG_USE_WECHAT_MESSAGE_STYLE is enabled)
-                display->SetChatMessage("system", wifi_message);
-                ESP_LOGI(TAG, "Called SetChatMessage");
-            }
-        }
-        
+        ESP_LOGI(TAG, "WiFi connection failed; BLE config mode (on-screen prompts disabled)");
+
         // Wait for BLE configuration
         while (wifi_config_mode_) {
             vTaskDelay(pdMS_TO_TICKS(1000));
