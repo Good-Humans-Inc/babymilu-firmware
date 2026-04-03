@@ -1203,6 +1203,7 @@ void LcdDisplay::CreateOverlayMessage(const char* message)
     lv_label_set_long_mode(overlay_text_, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_font(overlay_text_, fonts_.text_font, 0);
     lv_obj_set_style_text_color(overlay_text_, current_theme_.system_text, 0);
+    lv_obj_set_style_text_align(overlay_text_, LV_TEXT_ALIGN_CENTER, 0);
 
     lv_coord_t text_width = lv_txt_get_width(message, strlen(message), fonts_.text_font, 0);
     lv_coord_t max_width = LV_HOR_RES * 85 / 100 - 16;

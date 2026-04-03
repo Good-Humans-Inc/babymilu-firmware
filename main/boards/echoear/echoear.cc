@@ -489,11 +489,18 @@ private:
         int level = 0;
         bool charging = false, discharging = false;
         std::string message;
+        auto& wifi_station = WifiStation::GetInstance();
         if (GetBatteryLevel(level, charging, discharging)) {
             message = "battery: " + std::to_string(level) + "%";
             if (charging) message += " chrg";
         } else {
             message = "battery: N/A";
+        }
+        message += "\nnetwork: ";
+        if (wifi_station.IsConnected()) {
+            message += wifi_station.GetSsid();
+        } else {
+            message += "na";
         }
         display_->CreateOverlayMessage(message.c_str());
         esp_timer_stop(volume_message_timer_);

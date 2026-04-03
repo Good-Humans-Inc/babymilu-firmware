@@ -54,8 +54,8 @@ static void SaveCredentialAsLowestPriority(const std::string& ssid, const std::s
 
 static bool ConsumeNextBleCredentialLowestFlag() {
     Settings settings("wifi", true);
-    if (settings.GetInt("next_ble_cred_lowest") == 1) {
-        settings.SetInt("next_ble_cred_lowest", 0);
+    if (settings.GetInt("ble_cred_low") == 1) {
+        settings.SetInt("ble_cred_low", 0);
         return true;
     }
     return false;
@@ -257,7 +257,7 @@ void WifiBoard::StartNetwork() {
     auto& wifi_station = WifiStation::GetInstance();
     {
         Settings settings("wifi", true);
-        std::string preferred_ssid = settings.GetString("next_boot_ssid");
+        std::string preferred_ssid = settings.GetString("nxt_boot_ssid");
         if (!preferred_ssid.empty()) {
             bool exists = false;
             for (const auto& item : ssid_list) {
@@ -272,7 +272,7 @@ void WifiBoard::StartNetwork() {
             } else {
                 ESP_LOGW(TAG, "Ignoring one-shot preferred SSID not found in saved list: %s", preferred_ssid.c_str());
             }
-            settings.SetString("next_boot_ssid", "");
+            settings.SetString("nxt_boot_ssid", "");
         }
     }
 
@@ -520,7 +520,7 @@ void WifiBoard::EnterBleWifiConfigMode() {
     {
         Settings settings("wifi", true);
         settings.SetInt("force_ble_cfg", 1);
-        settings.SetInt("next_ble_cred_lowest", 1);
+        settings.SetInt("ble_cred_low", 1);
     }
 
     vTaskDelay(pdMS_TO_TICKS(300));
@@ -705,6 +705,8 @@ void WifiBoard::ParseWifiCredentials(const char* data) {
             if (ConsumeNextBleCredentialLowestFlag()) {
                 ESP_LOGI(TAG, "Saving BLE credential as lowest priority (one-shot rule)");
                 SaveCredentialAsLowestPriority(temp_ssid_, password);
+                Settings settings("wifi", true);
+                settings.SetString("nxt_boot_ssid", temp_ssid_);
             } else {
                 SsidManager::GetInstance().AddSsid(temp_ssid_, password);
             }
@@ -742,6 +744,8 @@ void WifiBoard::ParseWifiCredentials(const char* data) {
             if (ConsumeNextBleCredentialLowestFlag()) {
                 ESP_LOGI(TAG, "Saving BLE credential as lowest priority (one-shot rule)");
                 SaveCredentialAsLowestPriority(ssid, password);
+                Settings settings("wifi", true);
+                settings.SetString("nxt_boot_ssid", ssid);
             } else {
                 SsidManager::GetInstance().AddSsid(ssid, password);
             }
