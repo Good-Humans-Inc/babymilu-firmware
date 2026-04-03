@@ -42,6 +42,13 @@ Ota::~Ota() {
 }
 
 std::string Ota::GetCheckVersionUrl() {
+    Settings settings("ota", false);
+    auto custom_url = settings.GetString("cus_ota_url");
+    if (!custom_url.empty()) {
+        ESP_LOGI(TAG, "Using custom OTA URL from NVS: %s", custom_url.c_str());
+        return custom_url;
+    }
+
     const char* url = CONFIG_OTA_URL;
     if (url && strlen(url) > 0) {
         return std::string(url);

@@ -309,6 +309,20 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
                 }
             }
             // Don't forward switch_wifi_to to on_incoming_json_ as it's a protocol-level message
+        } else if (strcmp(type->valuestring, "set_ota_url") == 0) {
+            auto message = cJSON_GetObjectItem(root, "message");
+            if (!cJSON_IsString(message) || message->valuestring == nullptr || strlen(message->valuestring) == 0) {
+                ESP_LOGW(TAG, "set_ota_url ignored: missing or invalid message field");
+            } else {
+                std::string custom_ota_url = message->valuestring;
+                ESP_LOGI(TAG, "set_ota_url: saving custom OTA URL for next boot: %s", custom_ota_url.c_str());
+                Settings ota_settings("ota", true);
+                ota_settings.SetString("cus_ota_url", custom_ota_url);
+                Application::GetInstance().Schedule([]() {
+                    esp_restart();
+                });
+            }
+            // Don't forward set_ota_url to on_incoming_json_ as it's a protocol-level message
         } else {
             // Forward all other message types (including "listen", "tts", "stt", etc.) to Application handler
             ESP_LOGI(TAG, "Forwarding MQTT message type '%s' to Application::OnIncomingJson", type->valuestring);
