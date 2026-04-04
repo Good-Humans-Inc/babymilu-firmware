@@ -52,7 +52,7 @@ temperature_sensor_handle_t temp_sensor = NULL;
 static bool WaitForAnimationUpdaterCheckToFinish() {
     AnimationUpdater& updater = AnimationUpdater::GetInstance();
     const TickType_t wait_step = pdMS_TO_TICKS(500);
-    const int max_wait_for_start_steps = 40;   // 20 seconds max to observe updater start
+    const int max_wait_for_start_steps = 6;    // 3 seconds max to observe updater start
     const int max_wait_for_finish_steps = 240; // 120 seconds max to observe updater finish
 
     bool saw_running = false;
@@ -66,7 +66,7 @@ static bool WaitForAnimationUpdaterCheckToFinish() {
     }
 
     if (!saw_running) {
-        ESP_LOGW(TAG, "[FIRESTORE] Timed out waiting for animation updater to start; continuing with Firestore request");
+        ESP_LOGW(TAG, "[FIRESTORE] Timed out waiting 3 seconds for animation updater to start; continuing with Firestore request");
         return false;
     }
 

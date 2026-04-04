@@ -401,7 +401,12 @@ void AnimationUpdater::RemoteUpdateTask(void* parameter) {
 
 void AnimationUpdater::TriggerUpdateLoop() {
     ESP_LOGI(TAG, "Triggering update loop from remote request");
-    
+
+    if (is_running_.load()) {
+        ESP_LOGW(TAG, "Animation updater is already running, skipping duplicate remote trigger");
+        return;
+    }
+      
     // Check available heap memory before creating task
     size_t free_heap = esp_get_free_heap_size();
     size_t min_free_heap = esp_get_minimum_free_heap_size();
@@ -430,6 +435,7 @@ void AnimationUpdater::TriggerUpdateLoop() {
     );
     
     if (ret == pdPASS) {
+        is_running_.store(true);
         ESP_LOGI(TAG, "Remote update task created successfully with %u-byte stack",
                  (uint32_t)ANIMATION_UPDATER_STACK_SIZE);
     } else {
