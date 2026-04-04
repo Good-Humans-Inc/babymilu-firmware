@@ -302,7 +302,7 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
                 } else {
                     ESP_LOGI(TAG, "switch_wifi_to: scheduling one-shot preferred SSID '%s' for next reboot", target_ssid.c_str());
                     Settings wifi_settings("wifi", true);
-                    wifi_settings.SetString("next_boot_ssid", target_ssid);
+                    wifi_settings.SetString("nxt_boot_ssid", target_ssid);
                     Application::GetInstance().Schedule([]() {
                         esp_restart();
                     });

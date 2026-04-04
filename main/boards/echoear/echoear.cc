@@ -6,16 +6,20 @@
 #include "config.h"
 #include "iot/thing_manager.h"
 #include "backlight.h"
+#include "board.h"
+#include "animation/animation_updater.h"
 #include "animation/animation.h"
 #include "sd_card.h"
 #include "sd_card_startup.h"
 #include "power_save_timer.h"
+#include "system_info.h"
 
 #include <wifi_station.h>
 #include <ssid_manager.h>
 #include "settings.h"
 #include <esp_log.h>
 #include <esp_random.h>
+#include <cJSON.h>
 
 #include <driver/i2c_master.h>
 #include "i2c_device.h"
@@ -30,7 +34,10 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 #include <freertos/task.h>
+#include <algorithm>
+#include <memory>
 #include <string>
+#include <vector>
 
 // BMI270 includes
 #include "bmi270_api.h"
@@ -41,6 +48,172 @@
 LV_FONT_DECLARE(font_puhui_20_4);
 LV_FONT_DECLARE(font_awesome_20_4);
 temperature_sensor_handle_t temp_sensor = NULL;
+
+static bool WaitForAnimationUpdaterCheckToFinish() {
+    AnimationUpdater& updater = AnimationUpdater::GetInstance();
+    const TickType_t wait_step = pdMS_TO_TICKS(500);
+    const int max_wait_for_start_steps = 40;   // 20 seconds max to observe updater start
+    const int max_wait_for_finish_steps = 240; // 120 seconds max to observe updater finish
+
+    bool saw_running = false;
+    for (int i = 0; i < max_wait_for_start_steps; ++i) {
+        if (updater.IsRunning()) {
+            saw_running = true;
+            ESP_LOGI(TAG, "[FIRESTORE] Animation updater has started; waiting for check to finish");
+            break;
+        }
+        vTaskDelay(wait_step);
+    }
+
+    if (!saw_running) {
+        ESP_LOGW(TAG, "[FIRESTORE] Timed out waiting for animation updater to start; continuing with Firestore request");
+        return false;
+    }
+
+    for (int i = 0; i < max_wait_for_finish_steps; ++i) {
+        if (!updater.IsRunning()) {
+            ESP_LOGI(TAG, "[FIRESTORE] Animation updater check finished");
+            return true;
+        }
+        vTaskDelay(wait_step);
+    }
+
+    ESP_LOGW(TAG, "[FIRESTORE] Timed out waiting for animation updater to finish");
+    return false;
+}
+
+static void ApplyFirestoreWifiRanking(const std::string& response) {
+    cJSON* root = cJSON_Parse(response.c_str());
+    if (!root) {
+        ESP_LOGE(TAG, "[FIRESTORE] Failed to parse Firestore JSON response");
+        return;
+    }
+
+    cJSON* fields = cJSON_GetObjectItem(root, "fields");
+    cJSON* wifi_setting = fields ? cJSON_GetObjectItem(fields, "wifiSetting") : nullptr;
+    cJSON* wifi_map = wifi_setting ? cJSON_GetObjectItem(wifi_setting, "mapValue") : nullptr;
+    cJSON* wifi_fields = wifi_map ? cJSON_GetObjectItem(wifi_map, "fields") : nullptr;
+    cJSON* ranked_networks = wifi_fields ? cJSON_GetObjectItem(wifi_fields, "rankedNetworks") : nullptr;
+    cJSON* array_value = ranked_networks ? cJSON_GetObjectItem(ranked_networks, "arrayValue") : nullptr;
+    cJSON* values = array_value ? cJSON_GetObjectItem(array_value, "values") : nullptr;
+
+    if (!cJSON_IsArray(values)) {
+        ESP_LOGW(TAG, "[FIRESTORE] No wifiSetting.rankedNetworks array found in Firestore document");
+        cJSON_Delete(root);
+        return;
+    }
+
+    std::vector<std::string> ranked_ssids;
+    cJSON* value = nullptr;
+    cJSON_ArrayForEach(value, values) {
+        cJSON* string_value = cJSON_GetObjectItem(value, "stringValue");
+        if (cJSON_IsString(string_value) && string_value->valuestring != nullptr) {
+            ranked_ssids.emplace_back(string_value->valuestring);
+        }
+    }
+
+    cJSON_Delete(root);
+
+    if (ranked_ssids.empty()) {
+        ESP_LOGW(TAG, "[FIRESTORE] rankedNetworks exists but is empty");
+        return;
+    }
+
+    auto& ssid_manager = SsidManager::GetInstance();
+    const auto& current = ssid_manager.GetSsidList();
+    if (current.empty()) {
+        ESP_LOGW(TAG, "[FIRESTORE] No on-device WiFi credentials to reorder");
+        return;
+    }
+
+    std::vector<SsidItem> reordered;
+    reordered.reserve(current.size());
+
+    for (const auto& ranked_ssid : ranked_ssids) {
+        auto it = std::find_if(current.begin(), current.end(), [&ranked_ssid](const SsidItem& item) {
+            return item.ssid == ranked_ssid;
+        });
+        if (it != current.end()) {
+            reordered.push_back(*it);
+        }
+    }
+
+    for (const auto& item : current) {
+        auto it = std::find_if(reordered.begin(), reordered.end(), [&item](const SsidItem& ranked_item) {
+            return ranked_item.ssid == item.ssid;
+        });
+        if (it == reordered.end()) {
+            reordered.push_back(item);
+        }
+    }
+
+    bool order_changed = reordered.size() != current.size();
+    if (!order_changed) {
+        for (size_t i = 0; i < current.size(); ++i) {
+            if (current[i].ssid != reordered[i].ssid) {
+                order_changed = true;
+                break;
+            }
+        }
+    }
+
+    if (!order_changed) {
+        ESP_LOGI(TAG, "[FIRESTORE] WiFi credential order already matches Firestore ranking");
+        return;
+    }
+
+    ESP_LOGI(TAG, "[FIRESTORE] Reordering WiFi credentials to match Firestore ranking");
+    ssid_manager.Clear();
+    for (auto it = reordered.rbegin(); it != reordered.rend(); ++it) {
+        ssid_manager.AddSsid(it->ssid, it->password);
+    }
+
+    if (!reordered.empty()) {
+        ESP_LOGI(TAG, "[FIRESTORE] Highest priority WiFi is now: %s", reordered.front().ssid.c_str());
+    }
+}
+
+static void FetchFirestoreDeviceDocumentAndApplyRanking() {
+    std::string mac_address = SystemInfo::GetMacAddress();
+    std::string firestore_url =
+        "https://firestore.googleapis.com/v1/projects/composed-augury-469200-g6/"
+        "databases/(default)/documents/devices/" + mac_address + "/";
+
+    std::unique_ptr<Http> http(Board::GetInstance().CreateHttp());
+    if (!http) {
+        ESP_LOGE(TAG, "[FIRESTORE] Failed to create HTTP client");
+        return;
+    }
+
+    http->SetHeader("Accept", "application/json");
+    http->SetHeader("Accept-Encoding", "identity");
+    http->SetTimeout(10000);
+
+    ESP_LOGI(TAG, "[FIRESTORE] GET %s", firestore_url.c_str());
+    if (!http->Open("GET", firestore_url)) {
+        ESP_LOGE(TAG, "[FIRESTORE] Failed to open HTTPS connection");
+        return;
+    }
+
+    int status_code = http->GetStatusCode();
+    std::string response = http->ReadAll();
+    if (response.empty()) {
+        char buffer[256];
+        int bytes_read = 0;
+        while ((bytes_read = http->Read(buffer, sizeof(buffer))) > 0) {
+            response.append(buffer, bytes_read);
+        }
+    }
+    http->Close();
+
+    ESP_LOGI(TAG, "[FIRESTORE] Status: %d", status_code);
+
+    if (status_code == 200 && !response.empty()) {
+        ApplyFirestoreWifiRanking(response);
+    } else if (status_code == 200) {
+        ESP_LOGW(TAG, "[FIRESTORE] Empty response body");
+    }
+}
 
 static void SdAnimInitTask(void* /*arg*/) {
     ESP_LOGI(TAG, "[SD/ANIM] Background init task started on core %d", xPortGetCoreID());
@@ -55,6 +228,27 @@ static void SdAnimInitTask(void* /*arg*/) {
     ESP_LOGI(TAG, "[SD/ANIM] === Initializing animations ===");
     animation_init();
     ESP_LOGI(TAG, "[SD/ANIM] === Animations initialization completed ===");
+
+    auto& wifi_station = WifiStation::GetInstance();
+    const TickType_t wait_step = pdMS_TO_TICKS(500);
+    const int max_wait_steps = 40;  // 20 seconds max
+    bool wifi_ready = false;
+    for (int i = 0; i < max_wait_steps; ++i) {
+        if (wifi_station.IsConnected()) {
+            wifi_ready = true;
+            break;
+        }
+        vTaskDelay(wait_step);
+    }
+
+    if (wifi_ready) {
+        ESP_LOGI(TAG, "[FIRESTORE] WiFi connected");
+        WaitForAnimationUpdaterCheckToFinish();
+        ESP_LOGI(TAG, "[FIRESTORE] Requesting device document after animation updater check");
+        FetchFirestoreDeviceDocumentAndApplyRanking();
+    } else {
+        ESP_LOGW(TAG, "[FIRESTORE] WiFi was not ready within timeout, skipping device document request");
+    }
     
     vTaskDelete(NULL);
 }

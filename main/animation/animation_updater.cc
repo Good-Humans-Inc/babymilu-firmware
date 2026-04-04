@@ -19,6 +19,7 @@
 #include <dirent.h>
 
 #define TAG "AnimationUpdater"
+#define ANIMATION_UPDATER_STACK_SIZE 10240
 
 // Server version - should match the lambda function's SERVER_VERSION
 #define SERVER_VERSION "1.0.1"
@@ -72,7 +73,7 @@ void AnimationUpdater::Start() {
     BaseType_t ret = xTaskCreate(
         UpdateTask,
         "animation_updater",
-        12288,  // 12KB stack to accommodate HTTP/TLS and validation
+        ANIMATION_UPDATER_STACK_SIZE,
         this,
         1,     // Very low priority to avoid interfering with audio processing
         &update_task_handle_
@@ -409,26 +410,28 @@ void AnimationUpdater::TriggerUpdateLoop() {
              (uint32_t)free_heap, (uint32_t)min_free_heap, (uint32_t)largest_free_block);
     
     // Task creation requires contiguous memory, so check largest free block
-    size_t required_memory = 12288 + 1024; // Stack + overhead
+    size_t required_memory = ANIMATION_UPDATER_STACK_SIZE + 1024; // Stack + overhead
     if (largest_free_block < required_memory) {
-        ESP_LOGW(TAG, "Largest free block (%u bytes) too small for 12KB stack", 
-                 (uint32_t)largest_free_block);
+        ESP_LOGW(TAG, "Largest free block (%u bytes) too small for updater stack (%u bytes)", 
+                 (uint32_t)largest_free_block, (uint32_t)ANIMATION_UPDATER_STACK_SIZE);
     }
     
-    ESP_LOGI(TAG, "Attempting to create remote update task with 12KB stack...");
+    ESP_LOGI(TAG, "Attempting to create remote update task with %u-byte stack...",
+             (uint32_t)ANIMATION_UPDATER_STACK_SIZE);
     
     // Create a task to run UpdateLoop (since it calls vTaskDelete at the end)
     BaseType_t ret = xTaskCreate(
         RemoteUpdateTask,
         "remote_anim_update",
-        12288,
+        ANIMATION_UPDATER_STACK_SIZE,
         this,
         1,      // Low priority
         nullptr // Don't need to track the handle since task will delete itself
     );
     
     if (ret == pdPASS) {
-        ESP_LOGI(TAG, "Remote update task created successfully with 12KB stack");
+        ESP_LOGI(TAG, "Remote update task created successfully with %u-byte stack",
+                 (uint32_t)ANIMATION_UPDATER_STACK_SIZE);
     } else {
         // Log detailed error information
         free_heap = esp_get_free_heap_size();
@@ -2079,4 +2082,3 @@ void AnimationUpdater::SetCurrentVersion(const std::string& version) {
     SaveConfiguration();  // Save to NVS storage
     ESP_LOGI(TAG, "Animation version updated to: %s", version.c_str());
 }
-
