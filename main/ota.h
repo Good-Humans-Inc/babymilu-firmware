@@ -54,6 +54,8 @@ private:
     bool IsNewVersionAvailable(const std::string& currentVersion, const std::string& newVersion);
     std::string GetActivationPayload();
     Http* SetupHttp();
+    void IncrementCustomOtaRetry();
+    void ResetCustomOtaRetry();
 };
 
 #endif // _OTA_H

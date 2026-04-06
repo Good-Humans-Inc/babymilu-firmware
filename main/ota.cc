@@ -21,6 +21,12 @@
 #include <algorithm>
 
 #define TAG "Ota"
+namespace {
+constexpr const char* kOtaNamespace = "ota";
+constexpr const char* kCustomOtaUrlKey = "cus_ota_url";
+constexpr const char* kOtaRetryKey = "ota_retry";
+constexpr int kMaxCustomOtaRetry = 3;
+}
 
 
 Ota::Ota() {
@@ -42,8 +48,18 @@ Ota::~Ota() {
 }
 
 std::string Ota::GetCheckVersionUrl() {
-    Settings settings("ota", false);
-    auto custom_url = settings.GetString("cus_ota_url");
+    Settings settings(kOtaNamespace, true);
+    auto custom_url = settings.GetString(kCustomOtaUrlKey);
+    if (!custom_url.empty()) {
+        int retry_count = settings.GetInt(kOtaRetryKey, 0);
+        if (retry_count >= kMaxCustomOtaRetry) {
+            ESP_LOGW(TAG, "Custom OTA URL failed %d times, clearing it and falling back to default OTA URL", retry_count);
+            settings.EraseKey(kCustomOtaUrlKey);
+            settings.EraseKey(kOtaRetryKey);
+            custom_url.clear();
+        }
+    }
+
     if (!custom_url.empty()) {
         ESP_LOGI(TAG, "Using custom OTA URL from NVS: %s", custom_url.c_str());
         return custom_url;
@@ -104,12 +120,14 @@ bool Ota::CheckVersion() {
 
     if (!http->Open(method, url)) {
         ESP_LOGE(TAG, "Failed to open HTTP connection");
+        IncrementCustomOtaRetry();
         return false;
     }
 
     auto status_code = http->GetStatusCode();
     if (status_code != 200) {
         ESP_LOGE(TAG, "Failed to check version, status code: %d", status_code);
+        IncrementCustomOtaRetry();
         return false;
     }
 
@@ -125,8 +143,11 @@ bool Ota::CheckVersion() {
     cJSON *root = cJSON_Parse(data.c_str());
     if (root == NULL) {
         ESP_LOGE(TAG, "Failed to parse JSON response");
+        IncrementCustomOtaRetry();
         return false;
     }
+
+    ResetCustomOtaRetry();
 
     has_activation_code_ = false;
     has_activation_challenge_ = false;
@@ -264,6 +285,23 @@ bool Ota::CheckVersion() {
 
     cJSON_Delete(root);
     return true;
+}
+
+void Ota::IncrementCustomOtaRetry() {
+    Settings settings(kOtaNamespace, true);
+    auto custom_url = settings.GetString(kCustomOtaUrlKey);
+    if (custom_url.empty()) {
+        return;
+    }
+
+    int retry_count = settings.GetInt(kOtaRetryKey, 0) + 1;
+    settings.SetInt(kOtaRetryKey, retry_count);
+    ESP_LOGW(TAG, "Custom OTA URL failure count increased to %d", retry_count);
+}
+
+void Ota::ResetCustomOtaRetry() {
+    Settings settings(kOtaNamespace, true);
+    settings.EraseKey(kOtaRetryKey);
 }
 
 void Ota::MarkCurrentVersionValid() {

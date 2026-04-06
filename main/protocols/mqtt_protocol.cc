@@ -318,6 +318,7 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
                 ESP_LOGI(TAG, "set_ota_url: saving custom OTA URL for next boot: %s", custom_ota_url.c_str());
                 Settings ota_settings("ota", true);
                 ota_settings.SetString("cus_ota_url", custom_ota_url);
+                ota_settings.EraseKey("ota_retry");
                 Application::GetInstance().Schedule([]() {
                     esp_restart();
                 });

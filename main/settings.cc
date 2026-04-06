@@ -94,19 +94,31 @@ void Settings::SetInt(const std::string& key, int32_t value) {
 }
 
 void Settings::EraseKey(const std::string& key) {
+    if (nvs_handle_ == 0) {
+        ESP_LOGE(TAG, "NVS handle is invalid, cannot erase key '%s'", key.c_str());
+        return;
+    }
+
     if (read_write_) {
         auto ret = nvs_erase_key(nvs_handle_, key.c_str());
         if (ret != ESP_ERR_NVS_NOT_FOUND) {
             ESP_ERROR_CHECK(ret);
         }
+        dirty_ = true;
     } else {
         ESP_LOGW(TAG, "Namespace %s is not open for writing", ns_.c_str());
     }
 }
 
 void Settings::EraseAll() {
+    if (nvs_handle_ == 0) {
+        ESP_LOGE(TAG, "NVS handle is invalid, cannot erase namespace '%s'", ns_.c_str());
+        return;
+    }
+
     if (read_write_) {
         ESP_ERROR_CHECK(nvs_erase_all(nvs_handle_));
+        dirty_ = true;
     } else {
         ESP_LOGW(TAG, "Namespace %s is not open for writing", ns_.c_str());
     }
