@@ -1830,13 +1830,6 @@ void Application::SetDeviceState(DeviceState state)
     case kDeviceStateSpeaking: {
         display->SetStatus(Lang::Strings::SPEAKING);
         
-        // Set brightness to 100 when TTS starts
-        auto backlight = board.GetBacklight();
-        if (backlight) {
-            backlight->SetBrightness(100, true);
-            ESP_LOGI(TAG, "TTS started - brightness set to 100");
-        }
-
         // Record when speaking started for grace period
         speaking_start_time_us_ = esp_timer_get_time();
         vad_debounce_active_ = false; // Reset debounce state when entering speaking state

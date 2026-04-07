@@ -6,7 +6,7 @@
 
 #define TAG "BoxAudioCodec"
 
-static constexpr int kHardwareVolumeMax = 90;
+static constexpr int kHardwareVolumeMax = 80;
 
 static int MapUiToHardwareVolume(int ui_volume) {
     if (ui_volume <= 0) return 0;
