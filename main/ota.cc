@@ -25,7 +25,7 @@ namespace {
 constexpr const char* kOtaNamespace = "ota";
 constexpr const char* kCustomOtaUrlKey = "cus_ota_url";
 constexpr const char* kOtaRetryKey = "ota_retry";
-constexpr int kMaxCustomOtaRetry = 3;
+constexpr int kMaxCustomOtaRetry = 1;
 }
 
 
@@ -59,7 +59,6 @@ std::string Ota::GetCheckVersionUrl() {
             custom_url.clear();
         }
     }
-
     if (!custom_url.empty()) {
         ESP_LOGI(TAG, "Using custom OTA URL from NVS: %s", custom_url.c_str());
         return custom_url;
