@@ -604,6 +604,8 @@ private:
 };
 class EchoEar : public WifiBoard {
 private:
+    static constexpr uint8_t kFixedBrightness = 40;
+
     // I2C bus handles
     i2c_bus_handle_t shared_i2c_bus_handle_ = nullptr;  // For BMI270 (i2c_bus wrapper)
     i2c_master_bus_handle_t i2c_bus_;                   // For other I2C devices (traditional API)
@@ -628,6 +630,12 @@ private:
     esp_timer_handle_t volume_message_timer_ = nullptr;  // Timer to clear volume message
     std::string previous_emotion_ = "normal";  // Store previous emotion string to restore
     int previous_volume_ = -1;  // Store volume before muting (for restore on unmute)
+
+    void ApplyFixedBrightness(bool permanent = false) {
+        if (backlight_ != nullptr) {
+            backlight_->SetBrightness(kFixedBrightness, permanent);
+        }
+    }
 
     void InitializeVolumeMessageTimer() {
         if (volume_message_timer_ != nullptr) {
@@ -912,28 +920,12 @@ private:
                                     break;
                                     
                                 case Cst816s::GESTURE_SWIPE_LEFT: {
-                                    auto bl = board->GetBacklight();
-                                    if (bl != nullptr) {
-                                        int cur = bl->brightness();
-                                        int nb = cur + 10;
-                                        if (nb > 100) nb = 100;
-                                        bl->SetBrightness(nb, true);
-                                        ESP_LOGI(TAG, "[TOUCH] Swipe LEFT - Brightness: %d -> %d", cur, nb);
-                                        board->ShowBrightnessMessage(nb);
-                                    }
+                                    ESP_LOGI(TAG, "[TOUCH] Swipe LEFT ignored - brightness is locked at %d%%", kFixedBrightness);
                                     break;
                                 }
                                     
                                 case Cst816s::GESTURE_SWIPE_RIGHT: {
-                                    auto bl = board->GetBacklight();
-                                    if (bl != nullptr) {
-                                        int cur = bl->brightness();
-                                        int nb = cur - 10;
-                                        if (nb < 10) nb = 10;
-                                        bl->SetBrightness(nb, true);
-                                        ESP_LOGI(TAG, "[TOUCH] Swipe RIGHT - Brightness: %d -> %d", cur, nb);
-                                        board->ShowBrightnessMessage(nb);
-                                    }
+                                    ESP_LOGI(TAG, "[TOUCH] Swipe RIGHT ignored - brightness is locked at %d%%", kFixedBrightness);
                                     break;
                                 }
                                     
@@ -1569,7 +1561,7 @@ private:
         // Rotate display 180° (upside down)
         display_->SetDisplayRotation180(true);
         backlight_ = new PwmBacklight(DISPLAY_BACKLIGHT_PIN, DISPLAY_BACKLIGHT_OUTPUT_INVERT);
-        backlight_->RestoreBrightness();
+        ApplyFixedBrightness(true);
     }
 
     void InitializePowerSaveTimer() {
@@ -1589,32 +1581,32 @@ private:
                     return;
                 } else if (battery_level < 25 && charging) {
                     // < 25%, charging: always powersaving mode + sleepy.gif
-                    ESP_LOGI(TAG, "Always power saving mode - battery %d%% < 25%% and charging, setting brightness to 20 and switching to sleepy animation", battery_level);
-                    GetBacklight()->SetBrightness(20, false);
+                    ESP_LOGI(TAG, "Always power saving mode - battery %d%% < 25%% and charging, keeping brightness at %d and switching to sleepy animation", battery_level, kFixedBrightness);
+                    ApplyFixedBrightness();
                     auto display = GetDisplay();
                     if (display) {
                         display->SetEmotion("sleepy");
                     }
                 } else if (battery_level >= 25 && battery_level <= 40 && !charging) {
                     // 25-40%, not charging: always powersaving mode + battery.gif
-                    ESP_LOGI(TAG, "Always power saving mode - battery %d%% (25-40%% range) and not charging, setting brightness to 20 and switching to battery animation", battery_level);
-                    GetBacklight()->SetBrightness(20, false);
+                    ESP_LOGI(TAG, "Always power saving mode - battery %d%% (25-40%% range) and not charging, keeping brightness at %d and switching to battery animation", battery_level, kFixedBrightness);
+                    ApplyFixedBrightness();
                     auto display = GetDisplay();
                     if (display) {
                         display->SetEmotion("battery");
                     }
                 } else if (battery_level >= 25 && battery_level <= 40 && charging) {
                     // 25-40%, charging: 30-sec powersaving mode + sleepy.gif
-                    ESP_LOGI(TAG, "30-sec power saving mode - battery %d%% (25-40%% range) and charging, setting brightness to 20 and switching to sleepy animation", battery_level);
-                    GetBacklight()->SetBrightness(20, false);
+                    ESP_LOGI(TAG, "30-sec power saving mode - battery %d%% (25-40%% range) and charging, keeping brightness at %d and switching to sleepy animation", battery_level, kFixedBrightness);
+                    ApplyFixedBrightness();
                     auto display = GetDisplay();
                     if (display) {
                         display->SetEmotion("sleepy");
                     }
                 } else {
                     // > 40%: 30-sec powersaving mode + sleepy.gif (regardless of charging)
-                    ESP_LOGI(TAG, "30-sec power saving mode - battery %d%% (>40%%), setting brightness to 20 and switching to sleepy animation", battery_level);
-                    GetBacklight()->SetBrightness(20, false);
+                    ESP_LOGI(TAG, "30-sec power saving mode - battery %d%% (>40%%), keeping brightness at %d and switching to sleepy animation", battery_level, kFixedBrightness);
+                    ApplyFixedBrightness();
                     auto display = GetDisplay();
                     if (display) {
                         display->SetEmotion("sleepy");
@@ -1622,8 +1614,8 @@ private:
                 }
             } else {
                 // Can't read battery - use default behavior (30-sec mode with sleepy)
-                ESP_LOGI(TAG, "30-sec power saving mode - battery level unknown, setting brightness to 20 and switching to sleepy animation");
-                GetBacklight()->SetBrightness(20, false);
+                ESP_LOGI(TAG, "30-sec power saving mode - battery level unknown, keeping brightness at %d and switching to sleepy animation", kFixedBrightness);
+                ApplyFixedBrightness();
                 auto display = GetDisplay();
                 if (display) {
                     display->SetEmotion("sleepy");
@@ -1649,7 +1641,7 @@ private:
                 if (always_powersaving) {
                     ESP_LOGI(TAG, "Always power saving mode active - immediately re-entering sleep mode");
                     // Immediately re-apply sleep settings
-                    GetBacklight()->SetBrightness(20, false);
+                    ApplyFixedBrightness();
                     auto display = GetDisplay();
                     if (display) {
                         if (battery_level < 25 && charging) {
@@ -1662,8 +1654,8 @@ private:
                 }
             }
 
-            ESP_LOGI(TAG, "Exiting sleep mode - restoring brightness and animation");
-            GetBacklight()->RestoreBrightness();
+            ESP_LOGI(TAG, "Exiting sleep mode - restoring fixed brightness (%d%%) and animation", kFixedBrightness);
+            ApplyFixedBrightness();
 
             // Small delay to allow I2C bus and other peripherals to stabilize after wake
             vTaskDelay(pdMS_TO_TICKS(100));
@@ -1711,7 +1703,7 @@ private:
                         // If just entered always powersaving mode, immediately apply sleep settings
                         if (!was_always_powersaving) {
                             ESP_LOGI(TAG, "[BATTERY] Entered always power saving mode - applying sleep settings immediately");
-                            board->GetBacklight()->SetBrightness(20, false);
+                            board->ApplyFixedBrightness();
                             auto display = board->GetDisplay();
                             if (display) {
                                 if (battery_level < 25 && charging) {
@@ -1724,7 +1716,7 @@ private:
                         // If in always powersaving mode and not in sleep mode, force it
                         if (board->power_save_timer_ && !board->power_save_timer_->IsInSleepMode()) {
                             ESP_LOGI(TAG, "[BATTERY] Always power saving mode - ensuring sleep settings applied");
-                            board->GetBacklight()->SetBrightness(20, false);
+                            board->ApplyFixedBrightness();
                             auto display = board->GetDisplay();
                             if (display) {
                                 if (battery_level < 25 && charging) {
@@ -1737,8 +1729,8 @@ private:
                     } else if (was_always_powersaving) {
                         // Exited always powersaving mode - restore normal brightness if not in timer-based sleep mode
                         if (board->power_save_timer_ && !board->power_save_timer_->IsInSleepMode()) {
-                            ESP_LOGI(TAG, "[BATTERY] Exited always power saving mode - restoring brightness");
-                            board->GetBacklight()->RestoreBrightness();
+                            ESP_LOGI(TAG, "[BATTERY] Exited always power saving mode - restoring fixed brightness (%d%%)", kFixedBrightness);
+                            board->ApplyFixedBrightness();
                         }
                     }
                     
@@ -1887,6 +1879,10 @@ public:
         return backlight_;
     }
 
+    virtual bool ShouldShowWifiStatusMessages() override {
+        return false;
+    }
+
     virtual bool GetBatteryLevel(int &level, bool& charging, bool& discharging) override {
         if (charge_ == nullptr || !charge_->IsAvailable()) {
             return false;
@@ -1946,4 +1942,3 @@ public:
 volatile uint32_t EchoEar::touch_event_count_ = 0;
 
 DECLARE_BOARD(EchoEar);
-

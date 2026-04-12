@@ -754,11 +754,12 @@ void Application::Start()
         bool is_connected = wifi_station.IsConnected();
         ESP_LOGI(TAG, "WiFi connection status: %s", is_connected ? "CONNECTED" : "NOT CONNECTED");
         ESP_LOGI(TAG, "Device state: %d (kDeviceStateWifiConfiguring=%d)", device_state_, kDeviceStateWifiConfiguring);
+        const bool show_wifi_status_messages = board.ShouldShowWifiStatusMessages();
         
         if (!is_connected) {
             // Show message to guide user to connect WiFi (only if not already in config mode)
             // If in config mode, the message is already shown in wifi_board.cc
-            if (device_state_ != kDeviceStateWifiConfiguring) {
+            if (device_state_ != kDeviceStateWifiConfiguring && show_wifi_status_messages) {
                 ESP_LOGI(TAG, "Not in WiFi config mode, attempting to show WiFi connection message");
                 const char* wifi_message = "Connect me to wifi with BabyMilu App. Can't wait to meet you again.";
                 
@@ -777,8 +778,10 @@ void Application::Start()
                 vTaskDelay(pdMS_TO_TICKS(100));
                 display->ShowNotification(wifi_message, 0);
                 ESP_LOGI(TAG, "Called ShowNotification with WiFi message");
-            } else {
+            } else if (device_state_ == kDeviceStateWifiConfiguring) {
                 ESP_LOGI(TAG, "Already in WiFi config mode, message should be shown by wifi_board.cc");
+            } else {
+                ESP_LOGI(TAG, "WiFi status messages are suppressed for this board");
             }
         } else {
             ESP_LOGI(TAG, "WiFi is connected, checking animation availability...");
@@ -789,7 +792,7 @@ void Application::Start()
                 ESP_LOGI(TAG, "Animation available: len=%d", current_anim->len);
             }
             
-            if (current_anim == NULL || current_anim->len == 0) {
+            if ((current_anim == NULL || current_anim->len == 0) && show_wifi_status_messages) {
                 ESP_LOGI(TAG, "No animation available, showing connected message");
                 // No animation available, show connected message (display in center of screen)
                 const char* connected_message = "Connected! I am traveling over :D";
@@ -809,6 +812,8 @@ void Application::Start()
                 vTaskDelay(pdMS_TO_TICKS(100));
                 display->ShowNotification(connected_message, 0);
                 ESP_LOGI(TAG, "Called ShowNotification with connected message");
+            } else if (current_anim == NULL || current_anim->len == 0) {
+                ESP_LOGI(TAG, "Connected status message suppressed for this board");
             } else {
                 ESP_LOGI(TAG, "Animation is available, not showing connected message");
             }

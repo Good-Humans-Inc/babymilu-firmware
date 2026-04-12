@@ -226,20 +226,24 @@ void WifiBoard::StartNetwork() {
             ESP_LOGI(TAG, "Waiting for display to be fully initialized...");
             vTaskDelay(pdMS_TO_TICKS(2000)); // Wait 2 seconds for LVGL to initialize
             
-            const char* wifi_message = "Connect me to wifi with BabyMilu App. Can't wait to meet you again.";
-            
-            // Try to cast to LcdDisplay to use CreateSystemMessage
-            // Use static_cast since we know the display type for LCD boards
-            LcdDisplay* lcd_display = static_cast<LcdDisplay*>(display);
-            if (lcd_display != nullptr) {
-                ESP_LOGI(TAG, "Display is LcdDisplay, using CreateSystemMessage method");
-                lcd_display->CreateSystemMessage(wifi_message);
-                ESP_LOGI(TAG, "Called CreateSystemMessage");
+            if (ShouldShowWifiStatusMessages()) {
+                const char* wifi_message = "Connect me to wifi with BabyMilu App. Can't wait to meet you again.";
+                
+                // Try to cast to LcdDisplay to use CreateSystemMessage
+                // Use static_cast since we know the display type for LCD boards
+                LcdDisplay* lcd_display = static_cast<LcdDisplay*>(display);
+                if (lcd_display != nullptr) {
+                    ESP_LOGI(TAG, "Display is LcdDisplay, using CreateSystemMessage method");
+                    lcd_display->CreateSystemMessage(wifi_message);
+                    ESP_LOGI(TAG, "Called CreateSystemMessage");
+                } else {
+                    ESP_LOGI(TAG, "Display is not LcdDisplay, using standard methods");
+                    // Try SetChatMessage (works if CONFIG_USE_WECHAT_MESSAGE_STYLE is enabled)
+                    display->SetChatMessage("system", wifi_message);
+                    ESP_LOGI(TAG, "Called SetChatMessage");
+                }
             } else {
-                ESP_LOGI(TAG, "Display is not LcdDisplay, using standard methods");
-                // Try SetChatMessage (works if CONFIG_USE_WECHAT_MESSAGE_STYLE is enabled)
-                display->SetChatMessage("system", wifi_message);
-                ESP_LOGI(TAG, "Called SetChatMessage");
+                ESP_LOGI(TAG, "WiFi status message suppressed for this board");
             }
         }
         
@@ -388,20 +392,24 @@ void WifiBoard::StartNetwork() {
             ESP_LOGI(TAG, "Waiting for display to be fully initialized...");
             vTaskDelay(pdMS_TO_TICKS(2000)); // Wait 2 seconds for LVGL to initialize
             
-            const char* wifi_message = "Connect me to wifi with BabyMilu App. Can't wait to meet you again.";
-            
-            // Try to cast to LcdDisplay to use CreateSystemMessage
-            // Use static_cast since we know the display type for LCD boards
-            LcdDisplay* lcd_display = static_cast<LcdDisplay*>(display);
-            if (lcd_display != nullptr) {
-                ESP_LOGI(TAG, "Display is LcdDisplay, using CreateSystemMessage method");
-                lcd_display->CreateSystemMessage(wifi_message);
-                ESP_LOGI(TAG, "Called CreateSystemMessage");
+            if (ShouldShowWifiStatusMessages()) {
+                const char* wifi_message = "Connect me to wifi with BabyMilu App. Can't wait to meet you again.";
+                
+                // Try to cast to LcdDisplay to use CreateSystemMessage
+                // Use static_cast since we know the display type for LCD boards
+                LcdDisplay* lcd_display = static_cast<LcdDisplay*>(display);
+                if (lcd_display != nullptr) {
+                    ESP_LOGI(TAG, "Display is LcdDisplay, using CreateSystemMessage method");
+                    lcd_display->CreateSystemMessage(wifi_message);
+                    ESP_LOGI(TAG, "Called CreateSystemMessage");
+                } else {
+                    ESP_LOGI(TAG, "Display is not LcdDisplay, using standard methods");
+                    // Try SetChatMessage (works if CONFIG_USE_WECHAT_MESSAGE_STYLE is enabled)
+                    display->SetChatMessage("system", wifi_message);
+                    ESP_LOGI(TAG, "Called SetChatMessage");
+                }
             } else {
-                ESP_LOGI(TAG, "Display is not LcdDisplay, using standard methods");
-                // Try SetChatMessage (works if CONFIG_USE_WECHAT_MESSAGE_STYLE is enabled)
-                display->SetChatMessage("system", wifi_message);
-                ESP_LOGI(TAG, "Called SetChatMessage");
+                ESP_LOGI(TAG, "WiFi status message suppressed for this board");
             }
         }
         
