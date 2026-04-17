@@ -28,6 +28,74 @@
 #define OVERLAY_PIXELS_FORMAT 0x4F50584C
 #define OVERLAY_ENTRY_SIZE_BYTES 6  // uint16 x, uint16 y, uint16 color
 
+// Minimum plausible size for a valid animation bundle. Anything smaller is
+// almost certainly a failed/partial download — auto-updater will redownload.
+#define TEST_BIN_MIN_SIZE_BYTES (512u * 1024u)   // 0.5 MB
+
+// Cheap structural check of /sdcard/test.bin. Returns true only if:
+//   - file exists and is >= TEST_BIN_MIN_SIZE_BYTES
+//   - the 12-byte bundle header reads OK
+//   - header is internally consistent with actual file size
+// Any failure here means we skip all animation loading this boot.
+static bool animation_test_bin_looks_valid(void) {
+    if (!SdCard::IsMounted()) return false;
+
+    char path[512] = {0};
+    DIR* dir = opendir("/sdcard");
+    if (!dir) return false;
+    struct dirent* e;
+    while ((e = readdir(dir)) != NULL) {
+        if (e->d_type == DT_REG && strcasecmp(e->d_name, "test.bin") == 0) {
+            snprintf(path, sizeof(path), "/sdcard/%s", e->d_name);
+            break;
+        }
+    }
+    closedir(dir);
+    if (path[0] == '\0') {
+        ESP_LOGW("animation", "test.bin not found; skip animation loading");
+        return false;
+    }
+
+    struct stat st;
+    if (stat(path, &st) != 0 || st.st_size < (off_t)TEST_BIN_MIN_SIZE_BYTES) {
+        ESP_LOGW("animation",
+                 "test.bin too small or unreadable (%ld bytes, min %u); skip animation loading",
+                 (long)st.st_size, (unsigned)TEST_BIN_MIN_SIZE_BYTES);
+        return false;
+    }
+
+    FILE* f = fopen(path, "rb");
+    if (!f) return false;
+    uint32_t file_count = 0, checksum = 0, data_length = 0;
+    bool ok = fread(&file_count,  sizeof(uint32_t), 1, f) == 1
+           && fread(&checksum,    sizeof(uint32_t), 1, f) == 1
+           && fread(&data_length, sizeof(uint32_t), 1, f) == 1;
+    fclose(f);
+    if (!ok) {
+        ESP_LOGW("animation", "Failed to read test.bin header; skip animation loading");
+        return false;
+    }
+
+    // Header layout (mirrors AnimationUpdater::IsValidGifTestBin):
+    //   12-byte header (file_count, checksum, combined_length)
+    //   file_count * 44-byte file table
+    //   data section
+    // combined_length already includes the file table, so the whole file
+    // should be exactly 12 + combined_length bytes. Also require enough
+    // space to actually hold the file table.
+    uint64_t min_needed = 12ull + (uint64_t)file_count * 44ull;
+    uint64_t expected_total = 12ull + (uint64_t)data_length;
+    if (file_count == 0 || file_count > 20 ||
+        (uint64_t)st.st_size < min_needed ||
+        (uint64_t)st.st_size < expected_total) {
+        ESP_LOGW("animation",
+                 "test.bin header inconsistent (file_count=%u, combined_length=%u, file_size=%ld); skip animation loading",
+                 (unsigned)file_count, (unsigned)data_length, (long)st.st_size);
+        return false;
+    }
+    return true;
+}
+
 /**
  * Apply overlay pixels to a base frame and create a new RGB565 frame
  * @param base_frame The base frame (RGB565 format)
@@ -428,7 +496,13 @@ void animation_load_sd_card_animations(void)
     INIT_ANIM(sd_smirk);
     INIT_ANIM(sd_wifi);
     INIT_ANIM(sd_battery);
-    
+
+    if (!animation_test_bin_looks_valid()) {
+        ESP_LOGW("animation",
+                 "test.bin invalid/missing; skipping animation load (auto-updater will retry)");
+        return;
+    }
+
     // First, try to load GIFs from test.bin
     ESP_LOGI("animation", "Trying to load GIF animations from test.bin...");
     if (animation_load_gifs_from_test_bin()) {
@@ -436,9 +510,22 @@ void animation_load_sd_card_animations(void)
         ESP_LOGI("animation", "   - Using GIF format for animations");
         return; // Success with GIFs!
     }
-    
+
+    // Preflight already confirmed test.bin is a GIF-bundle format file. If
+    // GIF extraction still failed, the data section is corrupt. The
+    // frame-based mega loader parses the exact same file as a completely
+    // different format (magic 0x4C56474C) and has been observed to
+    // crash (LoadProhibited in apply_overlay_to_frame) during cleanup on
+    // malformed input. Skip all frame-based fallbacks and let the
+    // auto-updater redownload a fresh test.bin.
+    ESP_LOGW("animation",
+             "GIF bundle appears corrupt; skipping frame-based fallbacks to avoid crash (auto-updater will retry)");
+    return;
+
+    // Unreachable legacy fallback retained for reference only:
+#if 0
     ESP_LOGI("animation", "GIFs not found, trying frame-based animations...");
-    
+
     // Try to load ALL animations from SD card mega file (frame-based)
     if (animation_load_all_from_sd_card()) {
         ESP_LOGI("animation", "🎉 Successfully loaded ALL animations from SD card!");
@@ -504,6 +591,7 @@ void animation_load_sd_card_animations(void)
         ESP_LOGW("animation", "   - To use SD card animations, place test.bin on the SD card");
         ESP_LOGW("animation", "   - Or place individual .bin files on the SD card");
     }
+#endif
 }
 
 
@@ -2033,6 +2121,7 @@ bool animation_extract_gif_from_test_bin(const char* gif_name, uint8_t** data, s
         free(*data);
         *data = NULL;
         fclose(f);
+        header_read_failed = true;
         return false;
     }
     
