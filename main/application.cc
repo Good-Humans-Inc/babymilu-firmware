@@ -1993,14 +1993,23 @@ bool Application::CanEnterSleepMode()
 
 void Application::SendMcpMessage(const std::string &payload)
 {
-    ESP_LOGI(TAG, "SendMcpMessage: Scheduling MCP message send, payload_size=%zu bytes", payload.length());
+    ESP_LOGI(TAG, "SendMcpMessage: Scheduling MCP message send, payload_size=%u bytes", (unsigned)payload.length());
     Schedule([this, payload]()
              {
-        if (protocol_) {
-            ESP_LOGI(TAG, "SendMcpMessage: Executing scheduled send, protocol available");
-            protocol_->SendMcpMessage(payload);
+        // Route the reply back over the same channel the MCP request arrived on.
+        // When a voice session is active the request came in over the WebSocket
+        // secondary protocol, and the reply MUST go back out through it (the
+        // WebSocket carries the real conversation session_id). Falling through
+        // to the primary (MQTT) would send the reply with an empty session_id
+        // and the server would drop it, so tools/list would never register.
+        Protocol* active = GetActiveProtocol();
+        if (active) {
+            const bool via_ws = (websocket_protocol_ && active == websocket_protocol_.get());
+            ESP_LOGI(TAG, "SendMcpMessage: Executing scheduled send via %s protocol",
+                     via_ws ? "WebSocket" : "primary");
+            active->SendMcpMessage(payload);
         } else {
-            ESP_LOGW(TAG, "SendMcpMessage: Protocol not available, cannot send MCP message");
+            ESP_LOGW(TAG, "SendMcpMessage: No active protocol, cannot send MCP message");
         } });
 }
 
@@ -2208,6 +2217,22 @@ void Application::OpenWebSocketConnection() {
                 } else {
                     ESP_LOGW(TAG, "Received listen message without valid state field");
                 }
+#if CONFIG_IOT_PROTOCOL_MCP
+            } else if (strcmp(type->valuestring, "mcp") == 0) {
+                ESP_LOGI(TAG, "OnIncomingJson (WebSocket): Received MCP message");
+                auto payload = cJSON_GetObjectItem(root, "payload");
+                if (cJSON_IsObject(payload)) {
+                    char* payload_str = cJSON_PrintUnformatted(payload);
+                    if (payload_str) {
+                        ESP_LOGI(TAG, "OnIncomingJson (WebSocket): MCP payload: %s", payload_str);
+                        cJSON_free(payload_str);
+                    }
+                    ESP_LOGI(TAG, "OnIncomingJson (WebSocket): Forwarding MCP payload to McpServer::ParseMessage");
+                    McpServer::GetInstance().ParseMessage(payload);
+                } else {
+                    ESP_LOGW(TAG, "OnIncomingJson (WebSocket): MCP message missing or invalid payload");
+                }
+#endif
             }
             // Add other message type handlers as needed
         });

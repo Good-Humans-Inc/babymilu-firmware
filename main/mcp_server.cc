@@ -327,7 +327,7 @@ void McpServer::ReplyResult(int id, const std::string& result) {
     payload += std::to_string(id) + ",\"result\":";
     payload += result;
     payload += "}";
-    ESP_LOGI(TAG, "ReplyResult: Sending MCP response, id=%d, payload_size=%zu bytes", id, payload.length());
+    ESP_LOGI(TAG, "ReplyResult: Sending MCP response, id=%d, payload_size=%u bytes", id, (unsigned)payload.length());
     if (payload.length() < 500) {
         ESP_LOGI(TAG, "ReplyResult: Payload preview: %s", payload.c_str());
     } else {
@@ -347,7 +347,7 @@ void McpServer::ReplyError(int id, const std::string& message) {
 }
 
 void McpServer::GetToolsList(int id, const std::string& cursor) {
-    ESP_LOGI(TAG, "tools/list: Request received, id=%d, cursor='%s', total_tools=%zu", id, cursor.c_str(), tools_.size());
+    ESP_LOGI(TAG, "tools/list: Request received, id=%d, cursor='%s', total_tools=%u", id, cursor.c_str(), (unsigned)tools_.size());
     const int max_payload_size = 8000;
     std::string json = "{\"tools\":[";
     
@@ -380,7 +380,7 @@ void McpServer::GetToolsList(int id, const std::string& cursor) {
         ++it;
     }
     
-    ESP_LOGI(TAG, "tools/list: Built JSON with %zu tools, current_size=%zu", tools_added, json.length());
+    ESP_LOGI(TAG, "tools/list: Built JSON with %u tools, current_size=%u", (unsigned)tools_added, (unsigned)json.length());
     
     if (json.back() == ',') {
         json.pop_back();
@@ -399,7 +399,7 @@ void McpServer::GetToolsList(int id, const std::string& cursor) {
         json += "],\"nextCursor\":\"" + next_cursor + "\"}";
     }
     
-    ESP_LOGI(TAG, "tools/list: Final response size=%zu bytes, has_next_cursor=%s", json.length(), next_cursor.empty() ? "false" : "true");
+    ESP_LOGI(TAG, "tools/list: Final response size=%u bytes, has_next_cursor=%s", (unsigned)json.length(), next_cursor.empty() ? "false" : "true");
     if (json.length() < 500) {
         ESP_LOGI(TAG, "tools/list: Response preview: %s", json.c_str());
     } else {
