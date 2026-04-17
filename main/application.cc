@@ -756,30 +756,13 @@ void Application::Start()
         ESP_LOGI(TAG, "Device state: %d (kDeviceStateWifiConfiguring=%d)", device_state_, kDeviceStateWifiConfiguring);
         
         if (!is_connected) {
-            // Show message to guide user to connect WiFi (only if not already in config mode)
-            // If in config mode, the message is already shown in wifi_board.cc
-            if (device_state_ != kDeviceStateWifiConfiguring) {
-                ESP_LOGI(TAG, "Not in WiFi config mode, attempting to show WiFi connection message");
-                const char* wifi_message = "Connect me to wifi with BabyMilu App. Can't wait to meet you again.";
-                
-                // Try to use LcdDisplay::CreateSystemMessage if available
-                LcdDisplay* lcd_display = static_cast<LcdDisplay*>(display);
-                if (lcd_display != nullptr) {
-                    ESP_LOGI(TAG, "Display is LcdDisplay, using CreateSystemMessage");
-                    lcd_display->CreateSystemMessage(wifi_message);
-                }
-                
-                // Also try standard methods as fallback
-                display->SetChatMessage("system", wifi_message);
-                ESP_LOGI(TAG, "Called SetChatMessage with WiFi message");
-                
-                // Also try ShowNotification as fallback
-                vTaskDelay(pdMS_TO_TICKS(100));
-                display->ShowNotification(wifi_message, 0);
-                ESP_LOGI(TAG, "Called ShowNotification with WiFi message");
-            } else {
-                ESP_LOGI(TAG, "Already in WiFi config mode, message should be shown by wifi_board.cc");
-            }
+            // This branch only runs when WiFi credentials already exist but
+            // the connection is not up yet (or failed). In that case we do NOT
+            // show the "Connect me to wifi with BabyMilu App..." onboarding
+            // message -- wifi.gif stays on screen instead. The onboarding
+            // message is shown only for brand-new devices with no credentials,
+            // which is handled inside WifiBoard::StartNetwork().
+            ESP_LOGI(TAG, "WiFi not connected but credentials exist; keeping wifi.gif on screen");
         } else {
             ESP_LOGI(TAG, "WiFi is connected, checking animation availability...");
             // WiFi is connected, check if animation is available
