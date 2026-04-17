@@ -675,6 +675,27 @@ private:
         ESP_ERROR_CHECK(esp_timer_start_once(volume_message_timer_, 1000 * 1000));
     }
 
+    // Toggle mute / unmute. Saves the pre-mute volume so unmute can restore it.
+    // Shared by the physical BOOT button long-press and the touchscreen long-press.
+    void ToggleMute() {
+        auto codec = GetAudioCodec();
+        if (!codec) return;
+
+        int current_volume = codec->output_volume();
+        if (current_volume == 0) {
+            int restore_volume = (previous_volume_ > 0) ? previous_volume_ : 50;
+            codec->SetOutputVolume(restore_volume);
+            ESP_LOGI(TAG, "Volume restored from mute: %d", restore_volume);
+            previous_volume_ = -1;
+            ShowVolumeMessage(restore_volume);
+        } else {
+            previous_volume_ = current_volume;
+            codec->SetOutputVolume(0);
+            ESP_LOGI(TAG, "Volume muted (saved: %d)", previous_volume_);
+            ShowVolumeMessage(0);
+        }
+    }
+
     void ShowBatteryMessage() {
         if (display_ == nullptr) {
             return;
@@ -854,6 +875,10 @@ private:
         }
     }
 
+    // Software gesture classifier.
+    // We ignore the CST816S chip's internal gesture register (too sensitive,
+    // mid-stroke firing, easy left/up mix-ups) and classify ourselves from
+    // raw (x, y) coordinates on finger-up. See proposal A+C+D+E.
     static void touch_event_task(void* arg)
     {
         EchoEar* board = static_cast<EchoEar*>(arg);
@@ -863,134 +888,163 @@ private:
             return;
         }
 
-        uint32_t dummy;
-        static bool last_touch_state = false;
-        static Cst816s::GestureType last_gesture = Cst816s::GESTURE_NONE;
+        // Tunables - tweak here if gestures still feel off.
+        constexpr int     MIN_SWIPE_PX     = 40;   // min finger travel to count as a swipe
+        constexpr int     AXIS_RATIO_NUM   = 18;   // dominant axis must be >= 1.8x the other
+        constexpr int     AXIS_RATIO_DEN   = 10;
+        constexpr int64_t LONG_PRESS_MS    = 800;   // hold duration for battery/network overlay
+        constexpr int64_t MUTE_LONG_PRESS_MS = 5000; // hold duration (>=) for mute/unmute toggle
+        constexpr int     LONG_PRESS_DRIFT = 15;    // max finger wobble allowed during a hold (px)
+        constexpr int64_t COOLDOWN_MS      = 350;  // ignore any new gesture within this window
+        constexpr int64_t RAPID_REPEAT_MS  = 600;  // same-direction swipe within this = 2x step
+        constexpr int     STEP_SLOW        = 10;   // always 10% per step (rapid repeat no longer accelerates)
+        constexpr int     STEP_FAST        = 10;
 
+        // Per-stroke state
+        bool    in_stroke = false;
+        int     x0 = 0, y0 = 0;
+        int     last_x = 0, last_y = 0;
+        int     max_drift = 0;
+        int64_t t0_ms = 0;
+
+        // Cross-stroke state (for rapid-repeat acceleration + cooldown)
+        int64_t last_fire_ms = 0;
+        int     last_axis = 0;   // 0=none, 1=horiz, 2=vert
+        int     last_dir  = 0;   // -1 or +1
+
+        uint32_t dummy;
         while (true) {
-            // Wait for touch events from ISR
-            if (xQueueReceive(board->touch_event_queue_, &dummy, portMAX_DELAY) == pdTRUE) {
-                // Read touch coordinates and gestures from CST816S
-                if (board->cst816s_ != nullptr) {
-                    board->cst816s_->UpdateTouchPoint();
-                    auto touch_point = board->cst816s_->GetTouchPoint();
-                    
-                    // Read gesture register
-                    Cst816s::GestureType gesture = board->cst816s_->ReadGesture();
-                    
-                    // Process gestures (swipe up/down for volume control)
-                    if (gesture != Cst816s::GESTURE_NONE && gesture != last_gesture) {
-                        if (board->power_save_timer_) {
-                            board->power_save_timer_->WakeUp();
+            if (xQueueReceive(board->touch_event_queue_, &dummy, portMAX_DELAY) != pdTRUE) {
+                continue;
+            }
+            if (board->cst816s_ == nullptr) {
+                continue;
+            }
+
+            board->cst816s_->UpdateTouchPoint();
+            auto tp = board->cst816s_->GetTouchPoint();
+            int64_t now_ms = esp_timer_get_time() / 1000;
+
+            if (tp.num > 0 && tp.x >= 0 && tp.y >= 0) {
+                int x = (tp.x < DISPLAY_WIDTH)  ? tp.x : (DISPLAY_WIDTH  - 1);
+                int y = (tp.y < DISPLAY_HEIGHT) ? tp.y : (DISPLAY_HEIGHT - 1);
+
+                if (!in_stroke) {
+                    // Finger just went down - start a new stroke and wake the device.
+                    in_stroke = true;
+                    x0 = last_x = x;
+                    y0 = last_y = y;
+                    max_drift = 0;
+                    t0_ms = now_ms;
+                    ESP_LOGI(TAG, "[TOUCH] Touch pressed at (%d, %d)", x, y);
+                    if (board->power_save_timer_) {
+                        if (board->power_save_timer_->IsInSleepMode()) {
+                            ESP_LOGI(TAG, "Touch detected during sleep mode - waking up");
                         }
-                        auto codec = board->GetAudioCodec();
-                        if (codec != nullptr) {
-                            int current_volume = codec->output_volume();
-                            int new_volume = current_volume;
-                            auto show_volume = [board](int volume) {
-                                if (board == nullptr) {
-                                    return;
-                                }
-                                board->ShowVolumeMessage(volume);
-                            };
-                            
-                            switch (gesture) {
-                                case Cst816s::GESTURE_SWIPE_UP:
-                                    new_volume = current_volume - 10;  // Decrease by 10
-                                    if (new_volume < 0) new_volume = 0;
-                                    codec->SetOutputVolume(new_volume);
-                                    ESP_LOGI(TAG, "[TOUCH] Swipe UP detected - Volume: %d -> %d", current_volume, new_volume);
-                                    show_volume(new_volume);
-                                    break;
-                                    
-                                case Cst816s::GESTURE_SWIPE_DOWN:
-                                    new_volume = current_volume + 10;  // Increase by 10
-                                    if (new_volume > 100) new_volume = 100;
-                                    codec->SetOutputVolume(new_volume);
-                                    ESP_LOGI(TAG, "[TOUCH] Swipe DOWN detected - Volume: %d -> %d", current_volume, new_volume);
-                                    show_volume(new_volume);
-                                    break;
-                                    
-                                case Cst816s::GESTURE_SWIPE_LEFT: {
-                                    auto bl = board->GetBacklight();
-                                    if (bl != nullptr) {
-                                        int cur = bl->brightness();
-                                        int nb = cur + 10;
-                                        if (nb > 100) nb = 100;
-                                        bl->SetBrightness(nb, true);
-                                        ESP_LOGI(TAG, "[TOUCH] Swipe LEFT - Brightness: %d -> %d", cur, nb);
-                                        board->ShowBrightnessMessage(nb);
-                                    }
-                                    break;
-                                }
-                                    
-                                case Cst816s::GESTURE_SWIPE_RIGHT: {
-                                    auto bl = board->GetBacklight();
-                                    if (bl != nullptr) {
-                                        int cur = bl->brightness();
-                                        int nb = cur - 10;
-                                        if (nb < 10) nb = 10;
-                                        bl->SetBrightness(nb, true);
-                                        ESP_LOGI(TAG, "[TOUCH] Swipe RIGHT - Brightness: %d -> %d", cur, nb);
-                                        board->ShowBrightnessMessage(nb);
-                                    }
-                                    break;
-                                }
-                                    
-                                case Cst816s::GESTURE_SINGLE_TAP:
-                                    ESP_LOGI(TAG, "[TOUCH] Single tap detected");
-                                    break;
-                                    
-                                case Cst816s::GESTURE_DOUBLE_TAP:
-                                    ESP_LOGI(TAG, "[TOUCH] Double tap detected");
-                                    break;
-                                    
-                                case Cst816s::GESTURE_LONG_PRESS:
-                                    ESP_LOGI(TAG, "[TOUCH] Long press detected - showing battery");
-                                    board->ShowBatteryMessage();
-                                    break;
-                                    
-                                default:
-                                    break;
-                            }
-                        }
-                        last_gesture = gesture;
-                    } else if (gesture == Cst816s::GESTURE_NONE) {
-                        last_gesture = Cst816s::GESTURE_NONE;
+                        board->power_save_timer_->WakeUp();
                     }
-                    
-                    // Process touch coordinates
-                    if (touch_point.num > 0 && touch_point.x >= 0 && touch_point.y >= 0) {
-                        // Touch is active - clamp coordinates to display bounds
-                        int x = (touch_point.x < DISPLAY_WIDTH) ? touch_point.x : (DISPLAY_WIDTH - 1);
-                        int y = (touch_point.y < DISPLAY_HEIGHT) ? touch_point.y : (DISPLAY_HEIGHT - 1);
-                        
-                        if (!last_touch_state) {
-                            ESP_LOGI(TAG, "[TOUCH] Touch pressed at (%d, %d)", x, y);
-                            if (board->power_save_timer_) {
-                                // If in sleep mode, just wake up and return to idle state
-                                if (board->power_save_timer_->IsInSleepMode()) {
-                                    ESP_LOGI(TAG, "Touch detected during sleep mode - waking up");
-                                    board->power_save_timer_->WakeUp();
-                                    // WakeUp() callback will set state to idle and show static_normal face
-                                } else {
-                                    // Normal operation: wake up (ToggleChatState will be called on release if needed)
-                                    board->power_save_timer_->WakeUp();
-                                }
-                            }
-                        }
-                        last_touch_state = true;
-                        
-                        // TODO: Feed touch coordinates to LVGL here
-                        // For now, we're just logging the coordinates
-                        // Proper LVGL integration would require creating a custom esp_lcd_touch driver
-                        // or using a different approach to feed data to LVGL
+                } else {
+                    // Still dragging - update drift using Chebyshev distance (cheap, no sqrt).
+                    int adx = x - x0; if (adx < 0) adx = -adx;
+                    int ady = y - y0; if (ady < 0) ady = -ady;
+                    int drift = (adx > ady) ? adx : ady;
+                    if (drift > max_drift) max_drift = drift;
+                    last_x = x;
+                    last_y = y;
+                }
+            } else if (in_stroke) {
+                // Finger just lifted - classify the stroke exactly once.
+                in_stroke = false;
+                int dx = last_x - x0;
+                int dy = last_y - y0;
+                int adx = (dx < 0) ? -dx : dx;
+                int ady = (dy < 0) ? -dy : dy;
+                int64_t duration_ms = now_ms - t0_ms;
+                ESP_LOGI(TAG, "[TOUCH] Touch released dx=%d dy=%d dur=%dms drift=%d",
+                         dx, dy, (int)duration_ms, max_drift);
+
+                // Global cooldown - any new gesture must be clearly separate in time.
+                if (now_ms - last_fire_ms < COOLDOWN_MS) {
+                    ESP_LOGI(TAG, "[TOUCH] Gesture suppressed by cooldown");
+                    continue;
+                }
+
+                // LONG PRESS: held long, finger barely moved. Two tiers:
+                //   >= 5000 ms -> toggle mute (volume-only feedback, no battery overlay)
+                //   >= 800 ms  -> show battery/network overlay (no volume change)
+                if (duration_ms >= LONG_PRESS_MS && max_drift < LONG_PRESS_DRIFT) {
+                    if (duration_ms >= MUTE_LONG_PRESS_MS) {
+                        ESP_LOGI(TAG, "[TOUCH] Very long press (>=5s) - toggling mute");
+                        board->ToggleMute();
                     } else {
-                        // Touch released
-                        if (last_touch_state) {
-                            ESP_LOGI(TAG, "[TOUCH] Touch released");
-                        }
-                        last_touch_state = false;
+                        ESP_LOGI(TAG, "[TOUCH] Long press detected - showing battery");
+                        board->ShowBatteryMessage();
+                    }
+                    last_fire_ms = now_ms;
+                    last_axis = 0;
+                    last_dir  = 0;
+                    continue;
+                }
+
+                // SWIPE: needs minimum travel AND one axis must clearly dominate.
+                if (adx < MIN_SWIPE_PX && ady < MIN_SWIPE_PX) {
+                    // Tap or idle touch - nothing to do.
+                    continue;
+                }
+
+                int axis = 0;
+                int dir  = 0;
+                if (adx * AXIS_RATIO_DEN >= ady * AXIS_RATIO_NUM) {
+                    axis = 1;                    // horizontal (brightness)
+                    dir  = (dx > 0) ? +1 : -1;
+                } else if (ady * AXIS_RATIO_DEN >= adx * AXIS_RATIO_NUM) {
+                    axis = 2;                    // vertical (volume)
+                    dir  = (dy > 0) ? +1 : -1;
+                } else {
+                    ESP_LOGI(TAG, "[TOUCH] Ambiguous diagonal swipe - ignored");
+                    continue;
+                }
+
+                // Rapid same-direction repeat -> bigger step.
+                int step = STEP_SLOW;
+                if (axis == last_axis && dir == last_dir &&
+                    (now_ms - last_fire_ms) < RAPID_REPEAT_MS) {
+                    step = STEP_FAST;
+                }
+
+                if (axis == 2) {
+                    // Vertical: preserve original mapping (UP=decrease, DOWN=increase).
+                    auto codec = board->GetAudioCodec();
+                    if (codec != nullptr) {
+                        int cur = codec->output_volume();
+                        int delta = (dir < 0) ? -step : +step;
+                        int nv = cur + delta;
+                        if (nv < 0)   nv = 0;
+                        if (nv > 100) nv = 100;
+                        codec->SetOutputVolume(nv);
+                        ESP_LOGI(TAG, "[TOUCH] Swipe %s - Volume: %d -> %d (step %d)",
+                                 dir < 0 ? "UP" : "DOWN", cur, nv, step);
+                        board->ShowVolumeMessage(nv);
+                        last_fire_ms = now_ms;
+                        last_axis = axis;
+                        last_dir  = dir;
+                    }
+                } else {
+                    // Horizontal: preserve original mapping (LEFT=increase, RIGHT=decrease).
+                    auto bl = board->GetBacklight();
+                    if (bl != nullptr) {
+                        int cur = bl->brightness();
+                        int delta = (dir < 0) ? +step : -step;
+                        int nb = cur + delta;
+                        if (nb < 10)  nb = 10;
+                        if (nb > 100) nb = 100;
+                        bl->SetBrightness(nb, true);
+                        ESP_LOGI(TAG, "[TOUCH] Swipe %s - Brightness: %d -> %d (step %d)",
+                                 dir < 0 ? "LEFT" : "RIGHT", cur, nb, step);
+                        board->ShowBrightnessMessage(nb);
+                        last_fire_ms = now_ms;
+                        last_axis = axis;
+                        last_dir  = dir;
                     }
                 }
             }
@@ -1806,24 +1860,7 @@ private:
         });
 
         boot_button_.OnLongPress([this]() {
-            auto codec = GetAudioCodec();
-            if (!codec) return;
-
-            int current_volume = codec->output_volume();
-            if (current_volume == 0) {
-                // Already muted - restore previous volume
-                int restore_volume = (previous_volume_ > 0) ? previous_volume_ : 50;  // Default to 50 if no previous volume
-                codec->SetOutputVolume(restore_volume);
-                ESP_LOGI(TAG, "Volume restored from mute: %d", restore_volume);
-                previous_volume_ = -1;  // Reset
-                ShowVolumeMessage(restore_volume);
-            } else {
-                // Not muted - save current volume and mute
-                previous_volume_ = current_volume;
-                codec->SetOutputVolume(0);
-                ESP_LOGI(TAG, "Volume muted (saved: %d)", previous_volume_);
-                ShowVolumeMessage(0);
-            }
+            ToggleMute();
         });
 
          gpio_config_t power_gpio_config = {
