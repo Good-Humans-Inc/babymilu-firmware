@@ -16,7 +16,11 @@
 #include <ssid_manager.h>
 #include "settings.h"
 #include <esp_log.h>
+#include <esp_netif.h>
 #include <esp_random.h>
+#include <esp_wifi.h>
+#include <esp_bt_device.h>
+#include <esp_system.h>
 
 #include <driver/i2c_master.h>
 #include "i2c_device.h"
@@ -31,7 +35,9 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 #include <freertos/task.h>
+#include <algorithm>
 #include <string>
+#include <ctime>
 
 // BMI270 includes
 #include "bmi270_api.h"
@@ -53,17 +59,26 @@ static void SdAnimInitTask(void* /*arg*/) {
         ESP_LOGI(TAG, "[SD/ANIM] SD card already mounted, skipping startup");
     }
 
-    // SD present => show red dot in the center.
-    if (SdCard::IsMounted()) {
+    const bool sd_present = SdCard::IsDetected() || SdCard::IsMounted();
+    if (FactoryTest::IsFactoryTestMode()) {
+        FactoryTest::Controller::GetInstance().OnSdSample(sd_present);
+    }
+
+    // SD present => show red dot in the center during factory mode.
+    if (sd_present && FactoryTest::IsFactoryTestMode()) {
         auto* display = Board::GetInstance().GetDisplay();
         if (display != nullptr) {
             display->ShowFactorySdDot(true);
         }
     }
     
-    ESP_LOGI(TAG, "[SD/ANIM] === Initializing animations ===");
-    animation_init();
-    ESP_LOGI(TAG, "[SD/ANIM] === Animations initialization completed ===");
+    if (!FactoryTest::IsFactoryTestMode()) {
+        ESP_LOGI(TAG, "[SD/ANIM] === Initializing animations ===");
+        animation_init();
+        ESP_LOGI(TAG, "[SD/ANIM] === Animations initialization completed ===");
+    } else {
+        ESP_LOGI(TAG, "[SD/ANIM] Skipping animation init in factory mode");
+    }
     
     vTaskDelete(NULL);
 }
@@ -445,6 +460,11 @@ private:
     esp_timer_handle_t touch_message_timer_ = nullptr;   // Timer to clear "touched" overlay
     std::string previous_emotion_ = "normal";  // Store previous emotion string to restore
     int previous_volume_ = -1;  // Store volume before muting (for restore on unmute)
+    bool factory_audio_recording_ = false;
+    bool factory_exit_requested_ = false;
+    bool factory_ble_advertising_ = false;
+    int64_t talk_button_down_ms_ = 0;
+    int64_t factory_audio_record_started_ms_ = 0;
 
     void InitializeVolumeMessageTimer() {
         if (volume_message_timer_ != nullptr) {
@@ -475,10 +495,137 @@ private:
         display_->CreateOverlayMessage(message.c_str());
         if (volume == 0) {
             esp_timer_stop(volume_message_timer_);
+            if (FactoryTest::IsFactoryTestMode()) {
+                FactoryTest::Controller::GetInstance().OnVolumeChanged(volume);
+            }
             return;
         }
         esp_timer_stop(volume_message_timer_);
         ESP_ERROR_CHECK(esp_timer_start_once(volume_message_timer_, 1000 * 1000));
+        if (FactoryTest::IsFactoryTestMode()) {
+            FactoryTest::Controller::GetInstance().OnVolumeChanged(volume);
+        }
+    }
+
+    static void FactoryAutoChecksTask(void* arg) {
+        EchoEar* board = static_cast<EchoEar*>(arg);
+        if (board == nullptr) {
+            vTaskDelete(nullptr);
+            return;
+        }
+
+        auto& controller = FactoryTest::Controller::GetInstance();
+
+        int level = 0;
+        bool charging = false;
+        bool discharging = false;
+        controller.OnBatterySample(board->GetBatteryLevel(level, charging, discharging), level);
+        controller.OnSdSample(SdCard::IsDetected() || SdCard::IsMounted());
+
+        const bool bt_ok = board->StartFactoryBleAdvertising();
+        controller.OnBluetoothTestFinished(bt_ok, bt_ok ? "ADV" : "INIT FAIL");
+
+        std::string wifi_detail;
+        const bool wifi_ok = board->RunFactoryWifiQuickCheck(wifi_detail);
+        controller.OnWifiTestFinished(wifi_ok, wifi_detail.c_str());
+
+        vTaskDelete(nullptr);
+    }
+
+    static void FactoryPlaybackCompleteTask(void* arg) {
+        EchoEar* board = static_cast<EchoEar*>(arg);
+        if (board == nullptr) {
+            vTaskDelete(nullptr);
+            return;
+        }
+
+        int64_t playback_delay_ms = 1200;
+        if (board->factory_audio_record_started_ms_ > 0) {
+            const int64_t recorded_ms = (esp_timer_get_time() / 1000) - board->factory_audio_record_started_ms_;
+            playback_delay_ms = std::max<int64_t>(1200, std::min<int64_t>(recorded_ms + 300, 10000));
+        }
+        vTaskDelay(pdMS_TO_TICKS(playback_delay_ms));
+        FactoryTest::Controller::GetInstance().OnAudioPlaybackFinished();
+        vTaskDelete(nullptr);
+    }
+
+    bool StartFactoryBleAdvertising() {
+        if (factory_ble_advertising_) {
+            return true;
+        }
+        if (!ble_server_init("BabyMilu", nullptr, nullptr, nullptr)) {
+            return false;
+        }
+        if (!ble_server_start_advertising()) {
+            ble_server_deinit();
+            return false;
+        }
+        factory_ble_advertising_ = true;
+        return true;
+    }
+
+    bool RunFactoryWifiQuickCheck(std::string& detail) {
+        detail = "INIT FAIL";
+
+        esp_err_t ret = esp_netif_init();
+        if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+            return false;
+        }
+
+        esp_netif_t* sta_netif = esp_netif_create_default_wifi_sta();
+
+        wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+        ret = esp_wifi_init(&cfg);
+        if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+            if (sta_netif != nullptr) {
+                esp_netif_destroy(sta_netif);
+            }
+            return false;
+        }
+
+        uint8_t mac[6] = {0};
+        ret = esp_read_mac(mac, ESP_MAC_WIFI_STA);
+        if (ret != ESP_OK) {
+            detail = "MAC FAIL";
+            esp_wifi_deinit();
+            if (sta_netif != nullptr) {
+                esp_netif_destroy(sta_netif);
+            }
+            return false;
+        }
+
+        ret = esp_wifi_set_mode(WIFI_MODE_STA);
+        if (ret == ESP_OK) {
+            ret = esp_wifi_start();
+        }
+        if (ret == ESP_OK) {
+            wifi_scan_config_t scan_cfg = {};
+            ret = esp_wifi_scan_start(&scan_cfg, true);
+        }
+
+        const bool ok = (ret == ESP_OK);
+        detail = ok ? "SCAN OK" : "SCAN FAIL";
+
+        esp_wifi_stop();
+        esp_wifi_deinit();
+        if (sta_netif != nullptr) {
+            esp_netif_destroy(sta_netif);
+        }
+        return ok;
+    }
+
+    void ExitFactoryMode() {
+        if (factory_exit_requested_) {
+            return;
+        }
+        factory_exit_requested_ = true;
+        if (factory_ble_advertising_) {
+            ble_server_stop_advertising();
+            ble_server_deinit();
+            factory_ble_advertising_ = false;
+        }
+        FactoryTest::SetFactoryMode(false);
+        esp_restart();
     }
 
     void InitializeTouchMessageTimer() {
@@ -742,6 +889,9 @@ private:
                                     
                                 case Cst816s::GESTURE_LONG_PRESS:
                                     ESP_LOGI(TAG, "[TOUCH] Long press detected");
+                                    if (FactoryTest::IsFactoryTestMode()) {
+                                        FactoryTest::Controller::GetInstance().OnTouchscreenLongPress();
+                                    }
                                     break;
                                     
                                 default:
@@ -761,6 +911,9 @@ private:
                         
                         if (!last_touch_state) {
                             ESP_LOGI(TAG, "[TOUCH] Touch pressed at (%d, %d)", x, y);
+                            if (FactoryTest::IsFactoryTestMode()) {
+                                FactoryTest::Controller::GetInstance().OnTouchDetected();
+                            }
                             if (board->power_save_timer_) {
                                 // If in sleep mode, just wake up and return to idle state
                                 if (board->power_save_timer_->IsInSleepMode()) {
@@ -1229,7 +1382,7 @@ private:
         float pos_x = center_x;
         float pos_y = center_y;
 
-        {
+        if (!FactoryTest::IsFactoryTestMode()) {
             DisplayLockGuard lock(board->display_);
             board->imu_square_ = lv_obj_create(lv_scr_act());
             lv_obj_remove_style_all(board->imu_square_);
@@ -1241,8 +1394,8 @@ private:
             lv_obj_clear_flag(board->imu_square_, LV_OBJ_FLAG_SCROLLABLE);
             lv_obj_add_flag(board->imu_square_, LV_OBJ_FLAG_FLOATING);
             lv_obj_move_foreground(board->imu_square_);
+            ESP_LOGI(TAG, "[BMI270] Green square created at center (%d, %d)", (int)pos_x, (int)pos_y);
         }
-        ESP_LOGI(TAG, "[BMI270] Green square created at center (%d, %d)", (int)pos_x, (int)pos_y);
 
         struct bmi2_sens_data sensor_data = {0};
         // At ±4G range, 1G ≈ 8192 raw. Map so ~30° tilt reaches screen edge.
@@ -1259,7 +1412,9 @@ private:
                 if (pos_y < 0) pos_y = 0;
                 if (pos_y > screen_h - sq_size) pos_y = screen_h - sq_size;
 
-                {
+                if (FactoryTest::IsFactoryTestMode()) {
+                    FactoryTest::Controller::GetInstance().OnBmiDotMoved((int)pos_x, (int)pos_y);
+                } else {
                     DisplayLockGuard lock(board->display_);
                     if (board->imu_square_) {
                         lv_obj_set_pos(board->imu_square_, (int)pos_x, (int)pos_y);
@@ -1599,7 +1754,47 @@ private:
     }
 
     void InitializeButtons() {
+        boot_button_.OnPressDown([this]() {
+            if (FactoryTest::IsFactoryTestMode()) {
+                talk_button_down_ms_ = esp_timer_get_time() / 1000;
+                factory_exit_requested_ = false;
+            }
+        });
+
+        boot_button_.OnPressUp([this]() {
+            talk_button_down_ms_ = 0;
+            factory_exit_requested_ = false;
+        });
+
         boot_button_.OnClick([this]() {
+            if (FactoryTest::IsFactoryTestMode()) {
+                auto& controller = FactoryTest::Controller::GetInstance();
+                auto& app = Application::GetInstance();
+
+                if (FactoryTest::GetTestState(FACTORY_TEST_AUDIO) == FACTORY_TEST_STATE_PASS) {
+                    return;
+                }
+
+                if (!factory_audio_recording_) {
+                    factory_audio_recording_ = true;
+                    factory_audio_record_started_ms_ = esp_timer_get_time() / 1000;
+                    controller.OnAudioRecordingStarted();
+                    app.StartFactoryAudioTest();
+                } else {
+                    factory_audio_recording_ = false;
+                    controller.OnAudioPlaybackTriggered();
+                    app.FinishFactoryAudioTest();
+                    xTaskCreatePinnedToCore(
+                        FactoryPlaybackCompleteTask,
+                        "factory_audio_done",
+                        4096,
+                        this,
+                        1,
+                        nullptr,
+                        1);
+                }
+                return;
+            }
             auto& app = Application::GetInstance();
             if (app.GetDeviceState() == kDeviceStateStarting) {
                 ESP_LOGI(TAG, "Ignoring BOOT click during startup");
@@ -1621,6 +1816,9 @@ private:
         });
 
         boot_button_.OnLongPress([this]() {
+            if (FactoryTest::IsFactoryTestMode()) {
+                return;
+            }
             auto codec = GetAudioCodec();
             if (!codec) return;
 
@@ -1641,6 +1839,24 @@ private:
             }
         });
 
+        boot_button_.OnLongPressHold([this]() {
+            if (!FactoryTest::IsFactoryTestMode() || talk_button_down_ms_ == 0 || factory_exit_requested_) {
+                return;
+            }
+
+            auto& controller = FactoryTest::Controller::GetInstance();
+            if (!controller.IsQrPageVisible()) {
+                return;
+            }
+
+            const int64_t held_ms = (esp_timer_get_time() / 1000) - talk_button_down_ms_;
+            if (controller.ShouldExitFactoryMode(held_ms)) {
+                ESP_LOGI(TAG, "[FACTORY] TALK held for %lld ms on QR page, exiting factory mode",
+                         static_cast<long long>(held_ms));
+                ExitFactoryMode();
+            }
+        });
+
          gpio_config_t power_gpio_config = {
             .pin_bit_mask = (BIT64(POWER_CTRL) ),
             .mode = GPIO_MODE_OUTPUT,
@@ -1652,7 +1868,7 @@ private:
     }
 
 public:
-    EchoEar() : boot_button_(BOOT_BUTTON_GPIO, false, 5000, 0) {  // 5-second long press time
+    EchoEar() : boot_button_(BOOT_BUTTON_GPIO, false, 5000, 0) {
         InitializeI2c();
         InitializeBmi270();  // Initialize BMI270 after I2C bus is ready
         InitializeCharge();
@@ -1661,7 +1877,9 @@ public:
         InitializeSpi();
         Initializest77916Display();
         InitializeButtons();
-        InitializePowerSaveTimer();
+        if (!FactoryTest::IsFactoryTestMode()) {
+            InitializePowerSaveTimer();
+        }
         InitializeEmotionResetTimer();
         ESP_LOGI(TAG, "[TOUCH] About to call InitializeTouchButton()");
         InitializeTouchButton();
@@ -1671,6 +1889,11 @@ public:
         // Pin to core 0 so WiFi (core 1 in your logs) can connect concurrently.
         ESP_LOGI(TAG, "[SD/ANIM] Starting background init task");
         xTaskCreatePinnedToCore(SdAnimInitTask, "sd_anim_init", 8192, nullptr, 1, nullptr, 0);
+
+        if (FactoryTest::IsFactoryTestMode()) {
+            FactoryTest::Controller::GetInstance().Start(display_, FACTORY_FIRMWARE_TAG, FACTORY_HW_TAG);
+            xTaskCreatePinnedToCore(FactoryAutoChecksTask, "factory_auto", 6144, this, 1, nullptr, 0);
+        }
     }
 
     virtual AudioCodec* GetAudioCodec() override {
@@ -1761,4 +1984,3 @@ public:
 volatile uint32_t EchoEar::touch_event_count_ = 0;
 
 DECLARE_BOARD(EchoEar);
-

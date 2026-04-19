@@ -85,6 +85,8 @@ public:
     bool IsAlarmModeActive() const { return is_alarm_mode_; }
     void SetAlarmMode(bool enabled) { is_alarm_mode_ = enabled; }
     BackgroundTask* GetBackgroundTask() const { return background_task_; }
+    void StartFactoryAudioTest();
+    void FinishFactoryAudioTest();
     void ClearWifiConfiguration();
     Protocol* GetActiveProtocol();  // Returns the protocol to use for audio (WebSocket if available, else primary)
     void OpenWebSocketConnection();  // Opens WebSocket connection for conversations

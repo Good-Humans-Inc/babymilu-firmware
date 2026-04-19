@@ -26,6 +26,7 @@ set(SOURCES "audio_codecs/audio_codec.cc"
             "sd_card.cc"
             "sd_card_startup.cc"
             "error_log_uploader.cc"
+            "factory_test.cc"
             "main.cc"
             )
 

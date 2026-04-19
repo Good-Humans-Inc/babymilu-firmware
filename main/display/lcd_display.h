@@ -41,6 +41,8 @@ protected:
     lv_obj_t* overlay_container_ = nullptr;
     lv_obj_t* overlay_bubble_ = nullptr;
     lv_obj_t* overlay_text_ = nullptr;
+    lv_obj_t* factory_qr_obj_ = nullptr;
+    lv_obj_t* factory_qr_hint_label_ = nullptr;
 
     // Factory test UI: red center dot when SD card is present
     lv_obj_t* factory_sd_dot_ = nullptr;
@@ -90,6 +92,10 @@ public:
     // Like CreateOverlayMessage but places it relative to the screen center.
     // Used for factory UI cues that must not overlap the center SD indicator.
     void CreateCenteredOverlayMessage(const char* message, lv_coord_t y_offset);
+
+    // Factory provisioning QR renderer.
+    bool RenderFactoryQr(const char* payload);
+    void ClearFactoryQr();
 };
 
 // RGB LCD显示器

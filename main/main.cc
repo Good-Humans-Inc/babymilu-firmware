@@ -12,6 +12,7 @@
 #include "animation.h"
 #include "sd_card.h"
 #include "sd_card_startup.h"
+#include "factory_test.h"
 
 #define TAG "main"
 
@@ -39,26 +40,26 @@ extern "C" void app_main(void)
         bool button_pressed = (gpio_get_level(PWR_BUTTON_GPIO) == 0);
         
         if (button_pressed) {
-            ESP_LOGI(TAG, "Power button is pressed, waiting for 5s long press to power on...");
+            ESP_LOGI(TAG, "Power button is pressed, waiting for 3s long press to power on...");
             
-            // Wait for 5 seconds, checking if button is still pressed
+            // Wait for 3 seconds, checking if button is still pressed
             int64_t start_time = esp_timer_get_time() / 1000; // milliseconds
             bool still_pressed = true;
             
-            while ((esp_timer_get_time() / 1000 - start_time) < 5000) {
+            while ((esp_timer_get_time() / 1000 - start_time) < 3000) {
                 vTaskDelay(pdMS_TO_TICKS(100)); // Check every 100ms
                 bool current_state = (gpio_get_level(PWR_BUTTON_GPIO) == 0);
                 
                 if (!current_state) {
-                    // Button released before 5s - go back to sleep
-                    ESP_LOGI(TAG, "Button released before 5s, going back to deep sleep");
+                    // Button released before 3s - go back to sleep
+                    ESP_LOGI(TAG, "Button released before 3s, going back to deep sleep");
                     still_pressed = false;
                     break;
                 }
             }
             
             if (still_pressed) {
-                ESP_LOGI(TAG, "5s long press detected - powering on device");
+                ESP_LOGI(TAG, "3s long press detected - powering on device");
                 // Continue with normal boot
             } else {
                 // Go back to deep sleep
@@ -94,6 +95,8 @@ extern "C" void app_main(void)
     }
     ESP_ERROR_CHECK(ret);
     ESP_LOGI(TAG, "NVS flash initialized successfully");
+
+    FactoryTest::MaybeLatchFactoryModeFromBootButton();
 
 #if !defined(CONFIG_BOARD_TYPE_ECHOEAR)
     ESP_LOGI(TAG, "=== Starting SD card initialization process ===");
