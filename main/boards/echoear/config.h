@@ -65,6 +65,9 @@
 // Touch threshold definitions
 #define LIGHT_TOUCH_THRESHOLD  (0.01)  // 0.0 - 1.0 range (lower = more sensitive)
 
+#define FACTORY_FIRMWARE_TAG   "FT1"
+#define FACTORY_HW_TAG         "V2"
+
 // BMI270 configuration
 #define BMI270_I2C_ADDR 0x68
 #define BMI270_INT_PIN GPIO_NUM_21  // Optional, not used in basic implementation
@@ -83,4 +86,3 @@
     }
 
 #endif // _BOARD_CONFIG_H_
-

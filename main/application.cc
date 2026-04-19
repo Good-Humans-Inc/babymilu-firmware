@@ -456,11 +456,21 @@ void Application::EnterAudioTestingMode()
 void Application::ExitAudioTestingMode()
 {
     ESP_LOGI(TAG, "Exiting audio testing mode");
-    SetDeviceState(kDeviceStateWifiConfiguring);
+    SetDeviceState(IsFactoryTestMode() ? kDeviceStateIdle : kDeviceStateWifiConfiguring);
     // Copy audio_testing_queue_ to audio_decode_queue_
     std::lock_guard<std::mutex> lock(mutex_);
     audio_decode_queue_ = std::move(audio_testing_queue_);
     audio_decode_cv_.notify_all();
+}
+
+void Application::StartFactoryAudioTest()
+{
+    EnterAudioTestingMode();
+}
+
+void Application::FinishFactoryAudioTest()
+{
+    ExitAudioTestingMode();
 }
 
 void Application::ToggleChatState()
@@ -729,6 +739,13 @@ void Application::Start()
 
     /* Start the clock timer to update the status bar */
     esp_timer_start_periodic(clock_timer_handle_, 1000000);
+
+    if (IsFactoryTestMode())
+    {
+        ESP_LOGI(TAG, "Factory mode active, skipping normal network / OTA / protocol startup");
+        SetDeviceState(kDeviceStateIdle);
+        return;
+    }
 
     /* Check if we should clear WiFi configuration to force nimBLE setup */
     // Only clear WiFi if no credentials exist (first boot or manual clearing)

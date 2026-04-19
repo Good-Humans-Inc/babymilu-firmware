@@ -21,6 +21,9 @@
 #if LV_USE_GIF
 #include <libs/gif/lv_gif.h>
 #endif
+#if LV_USE_QRCODE
+#include <libs/qrcode/lv_qrcode.h>
+#endif
 
 #define TAG "LcdDisplay"
 
@@ -1312,6 +1315,90 @@ void LcdDisplay::ClearOverlayMessage()
         overlay_container_ = nullptr;
         overlay_bubble_ = nullptr;
         overlay_text_ = nullptr;
+    }
+}
+
+bool LcdDisplay::RenderFactoryQr(const char* payload)
+{
+    if (payload == nullptr || strlen(payload) == 0) {
+        return false;
+    }
+    DisplayLockGuard lock(this);
+    auto screen = lv_screen_active();
+    if (screen == nullptr) {
+        return false;
+    }
+
+    // Remove legacy system message container if present.
+    static const char* SYSTEM_MSG_MARKER = "CreateSystemMessage";
+    uint32_t child_count = lv_obj_get_child_cnt(screen);
+    for (int32_t i = static_cast<int32_t>(child_count) - 1; i >= 0; --i) {
+        lv_obj_t *child = lv_obj_get_child(screen, i);
+        if (child == nullptr) {
+            continue;
+        }
+        void *user_data = lv_obj_get_user_data(child);
+        if (user_data != nullptr && strcmp((const char*)user_data, SYSTEM_MSG_MARKER) == 0) {
+            lv_obj_del(child);
+        }
+    }
+    if (overlay_container_ != nullptr) {
+        lv_obj_del(overlay_container_);
+        overlay_container_ = nullptr;
+        overlay_bubble_ = nullptr;
+        overlay_text_ = nullptr;
+    }
+
+#if LV_USE_QRCODE
+    // EchoEar uses a round screen; keep the square QR comfortably inside the visible circle.
+    // Smaller fixed size with extra margin avoids corner clipping.
+    constexpr int qr_size = 140;
+    if (factory_qr_obj_ == nullptr) {
+        factory_qr_obj_ = lv_qrcode_create(screen);
+    }
+    if (factory_qr_obj_ == nullptr) {
+        return false;
+    }
+
+    lv_qrcode_set_size(factory_qr_obj_, qr_size);
+    lv_qrcode_set_dark_color(factory_qr_obj_, lv_color_black());
+    lv_qrcode_set_light_color(factory_qr_obj_, lv_color_white());
+    if (lv_qrcode_update(factory_qr_obj_, payload, strlen(payload)) != LV_RESULT_OK) {
+        ESP_LOGE(TAG, "Failed to generate QR");
+        return false;
+    }
+    lv_obj_set_style_border_width(factory_qr_obj_, 2, 0);
+    lv_obj_set_style_border_color(factory_qr_obj_, lv_color_black(), 0);
+    lv_obj_set_style_bg_color(factory_qr_obj_, lv_color_white(), 0);
+    lv_obj_set_style_bg_opa(factory_qr_obj_, LV_OPA_COVER, 0);
+    lv_obj_clear_flag(factory_qr_obj_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_align(factory_qr_obj_, LV_ALIGN_CENTER, 0, -14);
+    lv_obj_move_foreground(factory_qr_obj_);
+
+    if (factory_qr_hint_label_ == nullptr) {
+        factory_qr_hint_label_ = lv_label_create(screen);
+        lv_obj_set_style_text_align(factory_qr_hint_label_, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_style_text_color(factory_qr_hint_label_, current_theme_.text, 0);
+    }
+    lv_label_set_text(factory_qr_hint_label_, "Scan to Register\nLong press TALK to exit");
+    lv_obj_clear_flag(factory_qr_hint_label_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_align(factory_qr_hint_label_, LV_ALIGN_BOTTOM_MID, 0, -18);
+    lv_obj_move_foreground(factory_qr_hint_label_);
+    return true;
+#else
+    CreateSystemMessage("QR unsupported in this build");
+    return false;
+#endif
+}
+
+void LcdDisplay::ClearFactoryQr()
+{
+    DisplayLockGuard lock(this);
+    if (factory_qr_obj_ != nullptr) {
+        lv_obj_add_flag(factory_qr_obj_, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (factory_qr_hint_label_ != nullptr) {
+        lv_obj_add_flag(factory_qr_hint_label_, LV_OBJ_FLAG_HIDDEN);
     }
 }
 
