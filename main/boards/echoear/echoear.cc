@@ -232,6 +232,39 @@ static void FetchFirestoreDeviceDocumentAndApplyRanking() {
     }
 }
 
+// Show /sdcard/test.bin's startup.gif on the LCD as soon as the SD card is
+// mounted, before animation_init() runs. Pulls the GIF straight out of
+// test.bin via animation_extract_gif_from_test_bin() (which doesn't depend
+// on animation_init having completed). The buffer is intentionally kept
+// alive for the whole boot: LVGL's lv_gif keeps the data pointer for as
+// long as it is the active source, and animation_init() will later swap to
+// normal.gif when the device reaches kDeviceStateIdle.
+static void ShowStartupGifFromTestBin() {
+    static uint8_t* s_startup_gif_data = nullptr;
+    static size_t s_startup_gif_size = 0;
+    if (s_startup_gif_data != nullptr) {
+        return;  // Already shown this boot
+    }
+    if (!SdCard::IsMounted()) {
+        return;
+    }
+    auto* display = Board::GetInstance().GetDisplay();
+    if (display == nullptr) {
+        return;
+    }
+    if (!animation_extract_gif_from_test_bin("startup.gif",
+                                             &s_startup_gif_data,
+                                             &s_startup_gif_size)) {
+        ESP_LOGW(TAG, "[SD/ANIM] startup.gif not found in test.bin, skipping startup screen");
+        s_startup_gif_data = nullptr;
+        s_startup_gif_size = 0;
+        return;
+    }
+    ESP_LOGI(TAG, "[SD/ANIM] Playing startup.gif (%u bytes) from test.bin",
+             (unsigned)s_startup_gif_size);
+    display->SetEmotionGif(s_startup_gif_data, s_startup_gif_size);
+}
+
 static void SdAnimInitTask(void* /*arg*/) {
     ESP_LOGI(TAG, "[SD/ANIM] Background init task started on core %d", xPortGetCoreID());
     s_firestore_startup_done.store(false);
@@ -242,7 +275,11 @@ static void SdAnimInitTask(void* /*arg*/) {
     } else {
         ESP_LOGI(TAG, "[SD/ANIM] SD card already mounted, skipping startup");
     }
-    
+
+    // Play startup.gif as soon as SD is up, before the slower
+    // animation_init() pulls the rest of test.bin into RAM.
+    ShowStartupGifFromTestBin();
+
     ESP_LOGI(TAG, "[SD/ANIM] === Initializing animations ===");
     animation_init();
     ESP_LOGI(TAG, "[SD/ANIM] === Animations initialization completed ===");

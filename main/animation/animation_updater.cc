@@ -1970,9 +1970,10 @@ bool AnimationUpdater::ValidateGifMegaAnimationFileFromDisk(const char* file_pat
     ESP_LOGI(TAG, "GIF test.bin header: file_count=%u, checksum=0x%08X, combined_length=%u", 
              file_count, checksum, combined_length);
     
-    // Validate file_count is reasonable (1-20 files expected, typically 13)
-    if (file_count == 0 || file_count > 20) {
-        ESP_LOGE(TAG, "Invalid file_count in header: %u (expected 1-20, typically 13)", file_count);
+    // Validate file_count is reasonable (1-21 files expected: 20 emotion
+    // gifs + startup.gif).
+    if (file_count == 0 || file_count > 21) {
+        ESP_LOGE(TAG, "Invalid file_count in header: %u (expected 1-21)", file_count);
         fclose(f);
         return false;
     }
