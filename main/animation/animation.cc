@@ -85,7 +85,8 @@ static bool animation_test_bin_looks_valid(void) {
     // space to actually hold the file table.
     uint64_t min_needed = 12ull + (uint64_t)file_count * 44ull;
     uint64_t expected_total = 12ull + (uint64_t)data_length;
-    if (file_count == 0 || file_count > 20 ||
+    // Cap matches packer EXPECTED_GIFS length (20 emotion gifs + startup.gif).
+    if (file_count == 0 || file_count > 21 ||
         (uint64_t)st.st_size < min_needed ||
         (uint64_t)st.st_size < expected_total) {
         ESP_LOGW("animation",
