@@ -1959,13 +1959,13 @@ public:
         if (level < 0) level = 0;
         if (level > 100) level = 100;
         
-        // Log battery status every 15 seconds
+        // Log as E so the SD error-log hook captures battery telemetry in err.txt.
         static int64_t last_log_time = 0;
         int64_t current_time = esp_timer_get_time() / 1000; // Convert to milliseconds
         const int64_t LOG_INTERVAL_MS = 15000; // 15 seconds
         
         if (current_time - last_log_time >= LOG_INTERVAL_MS) {
-            ESP_LOGI(TAG, "[BATTERY] Voltage: %d mV, Current: %d mA, Level: %d%%, Charging: %s, Discharging: %s",
+            ESP_LOGE(TAG, "[BATTERY] Voltage: %d mV, Current: %d mA, Level: %d%%, Charging: %s, Discharging: %s",
                      voltage_mv, current_ma, level, charging ? "yes" : "no", discharging ? "yes" : "no");
             last_log_time = current_time;
         }
