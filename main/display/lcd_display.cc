@@ -25,7 +25,7 @@
 #define TAG "LcdDisplay"
 
 // Color definitions for dark theme
-#define DARK_BACKGROUND_COLOR lv_color_hex(0x121212)       // Dark background
+#define DARK_BACKGROUND_COLOR lv_color_hex(0x000000)       // Complete black background
 #define DARK_TEXT_COLOR lv_color_white()                   // White text
 #define DARK_CHAT_BACKGROUND_COLOR lv_color_hex(0x1E1E1E)  // Slightly lighter than background
 #define DARK_USER_BUBBLE_COLOR lv_color_hex(0x1A6C37)      // Dark green
@@ -78,19 +78,8 @@ LcdDisplay::LcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_handle_
     width_ = width;
     height_ = height;
 
-    // Load theme from settings
-    Settings settings("display", false);
-    current_theme_name_ = settings.GetString("theme", "light");
-
-    // Update the theme
-    if (current_theme_name_ == "dark")
-    {
-        current_theme_ = DARK_THEME;
-    }
-    else if (current_theme_name_ == "light")
-    {
-        current_theme_ = LIGHT_THEME;
-    }
+    current_theme_name_ = "dark";
+    current_theme_ = DARK_THEME;
 }
 
 SpiLcdDisplay::SpiLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_handle_t panel,
@@ -99,8 +88,8 @@ SpiLcdDisplay::SpiLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_h
     : LcdDisplay(panel_io, panel, fonts, width, height)
 {
 
-    // draw white
-    std::vector<uint16_t> buffer(width_, 0xFFFF);
+    // draw black before LVGL starts so startup GIF edges never reveal white panel memory
+    std::vector<uint16_t> buffer(width_, 0x0000);
     for (int y = 0; y < height_; y++)
     {
         esp_lcd_panel_draw_bitmap(panel_, 0, y, width_, y + 1, buffer.data());
@@ -169,8 +158,8 @@ RgbLcdDisplay::RgbLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_h
     : LcdDisplay(panel_io, panel, fonts, width, height)
 {
 
-    // draw white
-    std::vector<uint16_t> buffer(width_, 0xFFFF);
+    // draw black before LVGL starts so startup GIF edges never reveal white panel memory
+    std::vector<uint16_t> buffer(width_, 0x0000);
     for (int y = 0; y < height_; y++)
     {
         esp_lcd_panel_draw_bitmap(panel_, 0, y, width_, y + 1, buffer.data());
@@ -343,6 +332,7 @@ void LcdDisplay::SetupUI()
     lv_obj_set_style_text_font(screen, fonts_.text_font, 0);
     lv_obj_set_style_text_color(screen, current_theme_.text, 0);
     lv_obj_set_style_bg_color(screen, current_theme_.background, 0);
+    lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, 0);
 
     /* Container */
     container_ = lv_obj_create(screen);
@@ -352,6 +342,7 @@ void LcdDisplay::SetupUI()
     lv_obj_set_style_border_width(container_, 0, 0);
     lv_obj_set_style_pad_row(container_, 0, 0);
     lv_obj_set_style_bg_color(container_, current_theme_.background, 0);
+    lv_obj_set_style_bg_opa(container_, LV_OPA_COVER, 0);
     lv_obj_set_style_border_color(container_, current_theme_.border, 0);
 
     /* Status bar - COMMENTED OUT FOR FULL IMAGE SCALING */
@@ -369,7 +360,8 @@ void LcdDisplay::SetupUI()
     lv_obj_set_width(content_, LV_HOR_RES);
     lv_obj_set_flex_grow(content_, 1);
     lv_obj_set_style_pad_all(content_, 0, 0);  // REMOVE ALL PADDING FOR FULL SCREEN
-    lv_obj_set_style_bg_color(content_, current_theme_.chat_background, 0); // Background for chat area
+    lv_obj_set_style_bg_color(content_, current_theme_.background, 0); // Background for full-screen animations
+    lv_obj_set_style_bg_opa(content_, LV_OPA_COVER, 0);
     lv_obj_set_style_border_color(content_, current_theme_.border, 0);      // Border color for chat area
 
     // Minimal overlay labels while status bar is disabled
@@ -850,6 +842,7 @@ void LcdDisplay::SetupUI()
     lv_obj_set_style_text_font(screen, fonts_.text_font, 0);
     lv_obj_set_style_text_color(screen, current_theme_.text, 0);
     lv_obj_set_style_bg_color(screen, current_theme_.background, 0);
+    lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, 0);
 
     /* Container */
     container_ = lv_obj_create(screen);
@@ -859,6 +852,7 @@ void LcdDisplay::SetupUI()
     lv_obj_set_style_border_width(container_, 0, 0);
     lv_obj_set_style_pad_row(container_, 0, 0);
     lv_obj_set_style_bg_color(container_, current_theme_.background, 0);
+    lv_obj_set_style_bg_opa(container_, LV_OPA_COVER, 0);
     lv_obj_set_style_border_color(container_, current_theme_.border, 0);
 
     /* Status bar - COMMENTED OUT FOR FULL IMAGE SCALING */
@@ -877,7 +871,8 @@ void LcdDisplay::SetupUI()
     lv_obj_set_width(content_, LV_HOR_RES);
     lv_obj_set_flex_grow(content_, 1);
     lv_obj_set_style_pad_all(content_, 0, 0);  // Remove padding to maximize space
-    lv_obj_set_style_bg_color(content_, current_theme_.chat_background, 0);
+    lv_obj_set_style_bg_color(content_, current_theme_.background, 0);
+    lv_obj_set_style_bg_opa(content_, LV_OPA_COVER, 0);
     lv_obj_set_style_border_color(content_, current_theme_.border, 0); // Border color for content
 
     // Minimal overlay labels while status bar is disabled
@@ -1357,6 +1352,19 @@ void LcdDisplay::SetEmotionGif(const uint8_t* gif_data, size_t gif_size)
         ESP_LOGE(TAG, "Invalid GIF data");
         return;
     }
+
+    auto screen = lv_screen_active();
+    lv_obj_set_style_bg_color(screen, current_theme_.background, 0);
+    lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, 0);
+    if (container_ != nullptr) {
+        lv_obj_set_style_bg_color(container_, current_theme_.background, 0);
+        lv_obj_set_style_bg_opa(container_, LV_OPA_COVER, 0);
+    }
+    if (content_ != nullptr) {
+        lv_obj_set_style_bg_color(content_, current_theme_.background, 0);
+        lv_obj_set_style_bg_opa(content_, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(content_, 0, 0);
+    }
     
     // Hide image widget if it exists
     if (emotion_label_ != nullptr) {
@@ -1370,13 +1378,18 @@ void LcdDisplay::SetEmotionGif(const uint8_t* gif_data, size_t gif_size)
         lv_obj_set_style_pad_all(emotion_gif_, 0, 0);
         lv_obj_set_style_margin_all(emotion_gif_, 0, 0);
         lv_obj_set_style_border_width(emotion_gif_, 0, 0);
-        lv_obj_set_style_bg_opa(emotion_gif_, LV_OPA_TRANSP, 0);
     }
     
     if (emotion_gif_ == nullptr) {
         ESP_LOGE(TAG, "Failed to create GIF widget");
         return;
     }
+
+    lv_obj_set_style_bg_color(emotion_gif_, current_theme_.background, 0);
+    lv_obj_set_style_bg_opa(emotion_gif_, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(emotion_gif_, 0, 0);
+    lv_obj_set_style_outline_width(emotion_gif_, 0, 0);
+    lv_obj_set_style_shadow_width(emotion_gif_, 0, 0);
     
     // Show GIF widget
     lv_obj_clear_flag(emotion_gif_, LV_OBJ_FLAG_HIDDEN);

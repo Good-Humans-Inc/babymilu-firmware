@@ -89,7 +89,7 @@ STARTUP_RESIZED_NAME = "startup_resized.gif"
 EXPECTED_GIF_SET = {name.lower() for name in EXPECTED_GIFS}
 STARTUP_PALETTE_COLORS = 32
 STARTUP_PALETTE_SAMPLE_EVERY = 15
-STARTUP_DISPOSAL = 1
+STARTUP_DISPOSAL = 2
 
 def get_gif_size(file_path):
     """Return the logical canvas size for a GIF, or None if it cannot be read."""
@@ -107,8 +107,11 @@ def build_startup_palette(input_path):
         for index, frame in enumerate(ImageSequence.Iterator(gif)):
             if index % STARTUP_PALETTE_SAMPLE_EVERY != 0:
                 continue
+            sample = Image.new('RGB', TARGET_SIZE, (0, 0, 0))
+            resized = frame.convert('RGBA').resize(TARGET_SIZE, Image.Resampling.LANCZOS)
+            sample.paste(resized, (0, 0), resized)
             samples.append(
-                frame.resize(TARGET_SIZE, Image.Resampling.LANCZOS).convert('RGB')
+                sample
             )
 
         if not samples:
@@ -205,24 +208,41 @@ def crop_gif(input_path, output_path):
 def resize_gif(input_path, output_path):
     """
     Resize-only path used for startup.gif: no crop is applied, frames are
-    just scaled to TARGET_SIZE and the output is re-encoded with GIF
-    optimization so the result is actually smaller than the source.
+    scaled to TARGET_SIZE and flattened onto a black canvas.
 
-    The input is often a heavily delta-compressed GIF. To avoid turning the
-    resized startup into hundreds of full-size frames, this uses one shared
-    palette and preserves do-not-dispose frame semantics so Pillow can emit
-    compact deltas.
+    Startup is shown before the regular animation system has settled. Store
+    every frame as a full-canvas redraw so the LCD's initial clear color cannot
+    leak through partial GIF frame updates around the round display edges.
     """
     try:
         palette = build_startup_palette(input_path)
         gif = Image.open(input_path)
         frames = []
         durations = []
+        background_index = 0
+
+        if palette is not None:
+            palette_data = palette.getpalette() or []
+            palette_entries = [
+                palette_data[i:i + 3]
+                for i in range(0, min(len(palette_data), 256 * 3), 3)
+                if len(palette_data[i:i + 3]) == 3
+            ]
+            if palette_entries:
+                background_index = min(
+                    range(len(palette_entries)),
+                    key=lambda idx: sum(palette_entries[idx])
+                )
 
         for frame in ImageSequence.Iterator(gif):
-            resized_frame = frame.resize(TARGET_SIZE, Image.Resampling.LANCZOS)
+            resized_frame = Image.new('RGB', TARGET_SIZE, (0, 0, 0))
+            source_frame = frame.convert('RGBA').resize(
+                TARGET_SIZE,
+                Image.Resampling.LANCZOS
+            )
+            resized_frame.paste(source_frame, (0, 0), source_frame)
             if palette is not None:
-                resized_frame = resized_frame.convert('RGB').quantize(
+                resized_frame = resized_frame.quantize(
                     palette=palette,
                     dither=Image.Dither.NONE,
                 )
@@ -249,23 +269,21 @@ def resize_gif(input_path, output_path):
             'append_images': frames[1:],
             'duration': durations,
             'loop': gif.info.get('loop', 0),
-            'optimize': True,
+            'optimize': False,
             'disposal': STARTUP_DISPOSAL,
+            'background': background_index,
         }
-        if 'transparency' in gif.info:
-            save_kwargs['transparency'] = gif.info['transparency']
 
         frames[0].save(output_path, **save_kwargs)
 
         try:
             in_size = os.path.getsize(input_path)
             out_size = os.path.getsize(output_path)
-            arrow = "<=" if out_size <= in_size else ">"
-            print(f"[OK] Resized (no crop) + optimized: "
+            print(f"[OK] Resized (no crop) + full-frame encoded: "
                   f"{os.path.basename(input_path)} -> {os.path.basename(output_path)} "
-                  f"({in_size:,} {arrow} {out_size:,} bytes)")
+                  f"({in_size:,} -> {out_size:,} bytes)")
         except OSError:
-            print(f"[OK] Resized (no crop) + optimized: "
+            print(f"[OK] Resized (no crop) + full-frame encoded: "
                   f"{os.path.basename(input_path)} -> {os.path.basename(output_path)}")
         return True
 
