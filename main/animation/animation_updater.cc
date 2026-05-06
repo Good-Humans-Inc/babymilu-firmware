@@ -44,6 +44,25 @@ static std::string AppendCacheBuster(const std::string& url) {
     return out;
 }
 
+static BaseType_t CreateUpdaterTaskWithRetry(TaskFunction_t task_func, const char* name,
+                                             void* parameter, TaskHandle_t* handle,
+                                             uint32_t* stack_size_used) {
+    const uint32_t stack_sizes[] = {ANIMATION_UPDATER_STACK_SIZE, 8192, 6144};
+    BaseType_t ret = pdFAIL;
+    for (uint32_t stack_size : stack_sizes) {
+        ESP_LOGI(TAG, "Attempting to create %s task with %u-byte stack...", name, stack_size);
+        ret = xTaskCreate(task_func, name, stack_size, parameter, 1, handle);
+        if (ret == pdPASS) {
+            if (stack_size_used != nullptr) {
+                *stack_size_used = stack_size;
+            }
+            return ret;
+        }
+        ESP_LOGW(TAG, "Failed to create %s task with %u-byte stack", name, stack_size);
+    }
+    return ret;
+}
+
 void AnimationUpdater::Initialize() {
     ESP_LOGI(TAG, "Initializing Animation Updater");
     
@@ -69,14 +88,13 @@ void AnimationUpdater::Start() {
     
     ESP_LOGI(TAG, "Starting animation updater");
     
-    // Create background task
-    BaseType_t ret = xTaskCreate(
+    uint32_t stack_size_used = 0;
+    BaseType_t ret = CreateUpdaterTaskWithRetry(
         UpdateTask,
         "animation_updater",
-        ANIMATION_UPDATER_STACK_SIZE,
         this,
-        1,     // Very low priority to avoid interfering with audio processing
-        &update_task_handle_
+        &update_task_handle_,
+        &stack_size_used
     );
     
     if (ret != pdPASS) {
@@ -84,7 +102,7 @@ void AnimationUpdater::Start() {
         return;
     }
     
-    ESP_LOGI(TAG, "Animation updater task created successfully");
+    ESP_LOGI(TAG, "Animation updater task created successfully with %u-byte stack", stack_size_used);
     
     is_running_.store(true);
     ESP_LOGI(TAG, "Animation updater started successfully");
@@ -421,23 +439,20 @@ void AnimationUpdater::TriggerUpdateLoop() {
                  (uint32_t)largest_free_block, (uint32_t)ANIMATION_UPDATER_STACK_SIZE);
     }
     
-    ESP_LOGI(TAG, "Attempting to create remote update task with %u-byte stack...",
-             (uint32_t)ANIMATION_UPDATER_STACK_SIZE);
-    
     // Create a task to run UpdateLoop (since it calls vTaskDelete at the end)
-    BaseType_t ret = xTaskCreate(
+    uint32_t stack_size_used = 0;
+    BaseType_t ret = CreateUpdaterTaskWithRetry(
         RemoteUpdateTask,
         "remote_anim_update",
-        ANIMATION_UPDATER_STACK_SIZE,
         this,
-        1,      // Low priority
-        nullptr // Don't need to track the handle since task will delete itself
+        nullptr, // Don't need to track the handle since task will delete itself
+        &stack_size_used
     );
     
     if (ret == pdPASS) {
         is_running_.store(true);
         ESP_LOGI(TAG, "Remote update task created successfully with %u-byte stack",
-                 (uint32_t)ANIMATION_UPDATER_STACK_SIZE);
+                 stack_size_used);
     } else {
         // Log detailed error information
         free_heap = esp_get_free_heap_size();
