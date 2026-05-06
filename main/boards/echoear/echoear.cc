@@ -35,6 +35,7 @@
 #include <freertos/queue.h>
 #include <freertos/task.h>
 #include <algorithm>
+#include <atomic>
 #include <memory>
 #include <string>
 #include <vector>
@@ -48,11 +49,27 @@
 LV_FONT_DECLARE(font_puhui_20_4);
 LV_FONT_DECLARE(font_awesome_20_4);
 temperature_sensor_handle_t temp_sensor = NULL;
+float tsens_value;
+static std::atomic<bool> s_firestore_startup_done{false};
+
+static void ChipTemperatureLogTask(void* /*arg*/) {
+    while (true) {
+        float chip_temperature = 0.0f;
+        esp_err_t ret = temperature_sensor_get_celsius(temp_sensor, &chip_temperature);
+        if (ret == ESP_OK) {
+            tsens_value = chip_temperature;
+            ESP_LOGE(TAG, "[TEMP] Chip temperature: %.1f C", chip_temperature);
+        } else {
+            ESP_LOGW(TAG, "[TEMP] Failed to read chip temperature: %s", esp_err_to_name(ret));
+        }
+        vTaskDelay(pdMS_TO_TICKS(20000));
+    }
+}
 
 static bool WaitForAnimationUpdaterCheckToFinish() {
     AnimationUpdater& updater = AnimationUpdater::GetInstance();
     const TickType_t wait_step = pdMS_TO_TICKS(500);
-    const int max_wait_for_start_steps = 6;    // 3 seconds max to observe updater start
+    const int max_wait_for_start_steps = 120;  // 60 seconds max to observe updater start
     const int max_wait_for_finish_steps = 240; // 120 seconds max to observe updater finish
 
     bool saw_running = false;
@@ -66,7 +83,7 @@ static bool WaitForAnimationUpdaterCheckToFinish() {
     }
 
     if (!saw_running) {
-        ESP_LOGW(TAG, "[FIRESTORE] Timed out waiting 3 seconds for animation updater to start; continuing with Firestore request");
+        ESP_LOGW(TAG, "[FIRESTORE] Timed out waiting for animation updater to start; continuing with Firestore request");
         return false;
     }
 
@@ -217,6 +234,7 @@ static void FetchFirestoreDeviceDocumentAndApplyRanking() {
 
 static void SdAnimInitTask(void* /*arg*/) {
     ESP_LOGI(TAG, "[SD/ANIM] Background init task started on core %d", xPortGetCoreID());
+    s_firestore_startup_done.store(false);
     
     if (!SdCard::IsMounted()) {
         esp_err_t ret = SdCardStartup::ProcessStartup();
@@ -249,7 +267,8 @@ static void SdAnimInitTask(void* /*arg*/) {
     } else {
         ESP_LOGW(TAG, "[FIRESTORE] WiFi was not ready within timeout, skipping device document request");
     }
-    
+
+    s_firestore_startup_done.store(true);
     vTaskDelete(NULL);
 }
 static const st77916_lcd_init_cmd_t vendor_specific_init_yysj[] = {
@@ -438,7 +457,6 @@ static const st77916_lcd_init_cmd_t vendor_specific_init_yysj[] = {
     {0x11, (uint8_t []){}, 0, 0},
     {0x00, (uint8_t []){}, 0, 120},
 };
-float tsens_value;
 
 // Application-level event generated from GPIO7 touch button events.
 // This is used to move heavy work (display/emotion changes) out of the
@@ -764,6 +782,17 @@ private:
         temperature_sensor_config_t temp_sensor_config = TEMPERATURE_SENSOR_CONFIG_DEFAULT(10, 50);
         ESP_ERROR_CHECK(temperature_sensor_install(&temp_sensor_config, &temp_sensor));
         ESP_ERROR_CHECK(temperature_sensor_enable(temp_sensor));
+        BaseType_t temp_task_ret = xTaskCreatePinnedToCore(
+            ChipTemperatureLogTask,
+            "chip_temp_log",
+            3 * 1024,
+            nullptr,
+            1,
+            nullptr,
+            0);
+        if (temp_task_ret != pdPASS) {
+            ESP_LOGW(TAG, "[TEMP] Failed to start chip temperature log task");
+        }
         
         ESP_LOGI(TAG, "[BMI270] I2C bus initialization complete");
     }
@@ -1892,7 +1921,11 @@ public:
         // Start SD card + animation init in background to allow WiFi startup in parallel.
         // Pin to core 0 so WiFi (core 1 in your logs) can connect concurrently.
         ESP_LOGI(TAG, "[SD/ANIM] Starting background init task");
-        xTaskCreatePinnedToCore(SdAnimInitTask, "sd_anim_init", 8192, nullptr, 1, nullptr, 0);
+        BaseType_t task_ret = xTaskCreatePinnedToCore(SdAnimInitTask, "sd_anim_init", 8192, nullptr, 1, nullptr, 0);
+        if (task_ret != pdPASS) {
+            ESP_LOGW(TAG, "[SD/ANIM] Failed to start background init task");
+            s_firestore_startup_done.store(true);
+        }
     }
 
     virtual AudioCodec* GetAudioCodec() override {
@@ -1971,6 +2004,19 @@ public:
         }
         
         return true;
+    }
+
+    virtual void WaitForStartupNetworkTasks() override {
+        if (s_firestore_startup_done.load()) {
+            return;
+        }
+
+        ESP_LOGI(TAG, "[FIRESTORE] Waiting for startup Firestore request before server connection");
+        const TickType_t wait_step = pdMS_TO_TICKS(500);
+        while (!s_firestore_startup_done.load()) {
+            vTaskDelay(wait_step);
+        }
+        ESP_LOGI(TAG, "[FIRESTORE] Startup Firestore request finished");
     }
 
     virtual void StartNetwork() override {
