@@ -1,4 +1,4 @@
-#include "animation_updater.h"
+﻿#include "animation_updater.h"
 #include "board.h"
 #include "system_info.h"
 #include "animation.h"
@@ -17,6 +17,7 @@
 #include <sys/stat.h>
 #include <errno.h>
 #include <dirent.h>
+#include <strings.h>
 
 #define TAG "AnimationUpdater"
 #define ANIMATION_UPDATER_STACK_SIZE 10240
@@ -254,6 +255,36 @@ std::string AnimationUpdater::BuildMegaDownloadUrl() {
     return std::string("https://storage.googleapis.com/milu-public/device_bin/") + mac_encoded + "/test.bin";
 }
 
+std::string AnimationUpdater::BuildStartupWavDownloadUrl() {
+    const std::string mega_url = BuildMegaDownloadUrl();
+    if (mega_url.empty()) {
+        return "";
+    }
+
+    size_t last_slash = mega_url.find_last_of('/');
+    if (last_slash == std::string::npos || last_slash + 1 >= mega_url.size()) {
+        return "";
+    }
+
+    std::string folder = mega_url.substr(0, last_slash + 1);
+    return folder + "startup.wav";
+}
+
+std::string AnimationUpdater::BuildStartupGifDownloadUrl() {
+    const std::string mega_url = BuildMegaDownloadUrl();
+    if (mega_url.empty()) {
+        return "";
+    }
+
+    size_t last_slash = mega_url.find_last_of('/');
+    if (last_slash == std::string::npos || last_slash + 1 >= mega_url.size()) {
+        return "";
+    }
+
+    std::string folder = mega_url.substr(0, last_slash + 1);
+    return folder + "startup.gif";
+}
+
 bool AnimationUpdater::GetRemoteContentLength(const std::string& url, size_t &out_length) {
     try {
         auto& board = Board::GetInstance();
@@ -312,6 +343,304 @@ size_t AnimationUpdater::GetLocalMegaFileSize(const char* file_path) {
     long size = ftell(f);
     fclose(f);
     return size < 0 ? 0 : (size_t)size;
+}
+
+size_t AnimationUpdater::GetLocalFileSize(const char* file_path) {
+    FILE* f = fopen(file_path, "rb");
+    if (!f) {
+        return 0;
+    }
+    if (fseek(f, 0, SEEK_END) != 0) {
+        fclose(f);
+        return 0;
+    }
+    long size = ftell(f);
+    fclose(f);
+    return size < 0 ? 0 : (size_t)size;
+}
+
+bool AnimationUpdater::GetRemoteStartupWavMetadata(const std::string& url,
+                                                  size_t& out_content_length,
+                                                  std::string& out_etag,
+                                                  std::string& out_last_modified) {
+    try {
+        auto& board = Board::GetInstance();
+        auto http = std::unique_ptr<Http>(board.CreateHttp());
+        if (!http) {
+            ESP_LOGE(TAG, "Failed to create HTTP client for startup.wav metadata request");
+            return false;
+        }
+
+        http->SetHeader("User-Agent", "Xiaozhi-Startup-Audio-Updater/1.0");
+        http->SetHeader("Accept", "application/octet-stream");
+        http->SetHeader("Accept-Encoding", "identity");
+        http->SetTimeout(30000);
+
+        bool opened = http->Open("HEAD", url);
+        if (!opened) {
+            ESP_LOGW(TAG, "HEAD not supported for startup.wav, falling back to GET for metadata");
+            opened = http->Open("GET", url);
+        }
+        if (!opened) {
+            ESP_LOGE(TAG, "Failed to open startup.wav metadata request");
+            return false;
+        }
+
+        int status_code = http->GetStatusCode();
+        if (status_code != 200) {
+            ESP_LOGW(TAG, "startup.wav metadata request returned status %d", status_code);
+            http->Close();
+            return false;
+        }
+
+        out_content_length = http->GetBodyLength();
+        out_etag = http->GetResponseHeader("ETag");
+        if (out_etag.empty()) {
+            out_etag = http->GetResponseHeader("etag");
+        }
+        out_last_modified = http->GetResponseHeader("Last-Modified");
+        if (out_last_modified.empty()) {
+            out_last_modified = http->GetResponseHeader("last-modified");
+        }
+
+        http->Close();
+        if (out_content_length == 0 && out_etag.empty() && out_last_modified.empty()) {
+            return false;
+        }
+        return true;
+    } catch (...) {
+        ESP_LOGE(TAG, "Exception in GetRemoteStartupWavMetadata");
+        return false;
+    }
+}
+
+bool AnimationUpdater::GetRemoteStartupGifMetadata(const std::string& url,
+                                                  size_t& out_content_length,
+                                                  std::string& out_etag,
+                                                  std::string& out_last_modified) {
+    try {
+        auto& board = Board::GetInstance();
+        auto http = std::unique_ptr<Http>(board.CreateHttp());
+        if (!http) {
+            ESP_LOGE(TAG, "Failed to create HTTP client for startup.gif metadata request");
+            return false;
+        }
+
+        http->SetHeader("User-Agent", "Xiaozhi-Startup-Gif-Updater/1.0");
+        http->SetHeader("Accept", "application/octet-stream");
+        http->SetHeader("Accept-Encoding", "identity");
+        http->SetTimeout(30000);
+
+        bool opened = http->Open("HEAD", url);
+        if (!opened) {
+            ESP_LOGW(TAG, "HEAD not supported for startup.gif, falling back to GET for metadata");
+            opened = http->Open("GET", url);
+        }
+        if (!opened) {
+            ESP_LOGE(TAG, "Failed to open startup.gif metadata request");
+            return false;
+        }
+
+        int status_code = http->GetStatusCode();
+        if (status_code != 200) {
+            ESP_LOGW(TAG, "startup.gif metadata request returned status %d", status_code);
+            http->Close();
+            return false;
+        }
+
+        out_content_length = http->GetBodyLength();
+        out_etag = http->GetResponseHeader("ETag");
+        if (out_etag.empty()) {
+            out_etag = http->GetResponseHeader("etag");
+        }
+        out_last_modified = http->GetResponseHeader("Last-Modified");
+        if (out_last_modified.empty()) {
+            out_last_modified = http->GetResponseHeader("last-modified");
+        }
+
+        http->Close();
+        if (out_content_length == 0 && out_etag.empty() && out_last_modified.empty()) {
+            return false;
+        }
+        return true;
+    } catch (...) {
+        ESP_LOGE(TAG, "Exception in GetRemoteStartupGifMetadata");
+        return false;
+    }
+}
+
+bool AnimationUpdater::LoadStartupWavMetadata(size_t& out_size,
+                                             std::string& out_etag,
+                                             std::string& out_last_modified) {
+    constexpr const char* kStartupWavMetadataPath = "/sdcard/startup.wav.meta";
+    FILE* file = fopen(kStartupWavMetadataPath, "rb");
+    if (!file) {
+        return false;
+    }
+
+    if (fseek(file, 0, SEEK_END) != 0) {
+        fclose(file);
+        return false;
+    }
+    long file_size = ftell(file);
+    if (file_size <= 0) {
+        fclose(file);
+        return false;
+    }
+    rewind(file);
+
+    std::string payload;
+    payload.resize(file_size);
+    size_t read = fread(payload.data(), 1, static_cast<size_t>(file_size), file);
+    fclose(file);
+    if (read != static_cast<size_t>(file_size)) {
+        return false;
+    }
+
+    cJSON* root = cJSON_Parse(payload.c_str());
+    if (!root) {
+        ESP_LOGW(TAG, "Failed to parse startup.wav metadata JSON");
+        return false;
+    }
+
+    cJSON* size_json = cJSON_GetObjectItem(root, "size");
+    cJSON* etag_json = cJSON_GetObjectItem(root, "etag");
+    cJSON* last_modified_json = cJSON_GetObjectItem(root, "last_modified");
+
+    bool ok = false;
+    if (cJSON_IsNumber(size_json)) {
+        out_size = static_cast<size_t>(size_json->valuedouble);
+        if (out_size > 0) {
+            out_etag = cJSON_IsString(etag_json) ? etag_json->valuestring : "";
+            out_last_modified = cJSON_IsString(last_modified_json) ? last_modified_json->valuestring : "";
+            ok = true;
+        }
+    }
+
+    cJSON_Delete(root);
+    return ok;
+}
+
+bool AnimationUpdater::LoadStartupGifMetadata(size_t& out_size,
+                                             std::string& out_etag,
+                                             std::string& out_last_modified) {
+    constexpr const char* kStartupGifMetadataPath = "/sdcard/startup.gif.meta";
+    FILE* file = fopen(kStartupGifMetadataPath, "rb");
+    if (!file) {
+        return false;
+    }
+
+    if (fseek(file, 0, SEEK_END) != 0) {
+        fclose(file);
+        return false;
+    }
+    long file_size = ftell(file);
+    if (file_size <= 0) {
+        fclose(file);
+        return false;
+    }
+    rewind(file);
+
+    std::string payload;
+    payload.resize(file_size);
+    size_t read = fread(payload.data(), 1, static_cast<size_t>(file_size), file);
+    fclose(file);
+    if (read != static_cast<size_t>(file_size)) {
+        return false;
+    }
+
+    cJSON* root = cJSON_Parse(payload.c_str());
+    if (!root) {
+        ESP_LOGW(TAG, "Failed to parse startup.gif metadata JSON");
+        return false;
+    }
+
+    cJSON* size_json = cJSON_GetObjectItem(root, "size");
+    cJSON* etag_json = cJSON_GetObjectItem(root, "etag");
+    cJSON* last_modified_json = cJSON_GetObjectItem(root, "last_modified");
+
+    bool ok = false;
+    if (cJSON_IsNumber(size_json)) {
+        out_size = static_cast<size_t>(size_json->valuedouble);
+        if (out_size > 0) {
+            out_etag = cJSON_IsString(etag_json) ? etag_json->valuestring : "";
+            out_last_modified = cJSON_IsString(last_modified_json) ? last_modified_json->valuestring : "";
+            ok = true;
+        }
+    }
+
+    cJSON_Delete(root);
+    return ok;
+}
+
+bool AnimationUpdater::SaveStartupWavMetadata(size_t size,
+                                             const std::string& etag,
+                                             const std::string& last_modified) {
+    constexpr const char* kStartupWavMetadataPath = "/sdcard/startup.wav.meta";
+    cJSON* root = cJSON_CreateObject();
+    if (!root) {
+        return false;
+    }
+    cJSON_AddNumberToObject(root, "size", static_cast<double>(size));
+    cJSON_AddStringToObject(root, "etag", etag.empty() ? "" : etag.c_str());
+    cJSON_AddStringToObject(root, "last_modified", last_modified.empty() ? "" : last_modified.c_str());
+
+    char* payload = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (!payload) {
+        return false;
+    }
+
+    FILE* file = fopen(kStartupWavMetadataPath, "wb");
+    if (!file) {
+        free(payload);
+        return false;
+    }
+
+    size_t written = fwrite(payload, 1, strlen(payload), file);
+    fclose(file);
+    free(payload);
+
+    if (written != strlen(payload)) {
+        unlink(kStartupWavMetadataPath);
+        return false;
+    }
+    return true;
+}
+
+bool AnimationUpdater::SaveStartupGifMetadata(size_t size,
+                                             const std::string& etag,
+                                             const std::string& last_modified) {
+    constexpr const char* kStartupGifMetadataPath = "/sdcard/startup.gif.meta";
+    cJSON* root = cJSON_CreateObject();
+    if (!root) {
+        return false;
+    }
+    cJSON_AddNumberToObject(root, "size", static_cast<double>(size));
+    cJSON_AddStringToObject(root, "etag", etag.empty() ? "" : etag.c_str());
+    cJSON_AddStringToObject(root, "last_modified", last_modified.empty() ? "" : last_modified.c_str());
+
+    char* payload = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (!payload) {
+        return false;
+    }
+
+    FILE* file = fopen(kStartupGifMetadataPath, "wb");
+    if (!file) {
+        free(payload);
+        return false;
+    }
+
+    size_t written = fwrite(payload, 1, strlen(payload), file);
+    fclose(file);
+    free(payload);
+
+    if (written != strlen(payload)) {
+        unlink(kStartupGifMetadataPath);
+        return false;
+    }
+    return true;
 }
 
 // Helper function to read local file header (first 12 bytes: file_count, checksum, combined_length)
@@ -478,6 +807,33 @@ void AnimationUpdater::UpdateLoop() {
     std::string url = BuildMegaDownloadUrl();
     url = AppendCacheBuster(url);
     ESP_LOGI(TAG, "Checking for updates from: %s", url.c_str());
+
+    std::string startup_gif_url = BuildStartupGifDownloadUrl();
+    if (startup_gif_url.empty()) {
+        ESP_LOGW(TAG, "Could not build startup.gif URL from %s", url.c_str());
+    } else {
+        bool local_startup_gif_exists = (access("/sdcard/startup.gif", F_OK) == 0);
+        if (DownloadStartupGifFile(startup_gif_url)) {
+            ESP_LOGI(TAG, "startup.gif download succeeded in update loop");
+        } else {
+            if (local_startup_gif_exists) {
+                ESP_LOGW(TAG, "Optional startup.gif download failed in update loop from %s", startup_gif_url.c_str());
+            } else {
+                ESP_LOGW(TAG, "startup.gif missing locally and optional download could not complete in update loop; continuing updater flow");
+            }
+        }
+    }
+
+    std::string startup_wav_url = BuildStartupWavDownloadUrl();
+    if (startup_wav_url.empty()) {
+        ESP_LOGW(TAG, "Could not build startup.wav URL from %s", url.c_str());
+    } else {
+        if (DownloadStartupWavFile(startup_wav_url)) {
+            ESP_LOGI(TAG, "startup.wav download succeeded in update loop");
+        } else {
+            ESP_LOGW(TAG, "Optional startup.wav download failed in update loop from %s", startup_wav_url.c_str());
+        }
+    }
     
     // Ensure SD card is available
     if (!SdCard::IsMounted()) {
@@ -881,6 +1237,33 @@ bool AnimationUpdater::TestHttpsDownload() {
     std::string download_url = BuildMegaDownloadUrl();
     ESP_LOGI(TAG, "Fetching: %s", download_url.c_str());
 
+    std::string startup_gif_url = BuildStartupGifDownloadUrl();
+    if (startup_gif_url.empty()) {
+        ESP_LOGW(TAG, "Could not build startup.gif URL from %s", download_url.c_str());
+    } else {
+        bool local_startup_gif_exists = (access("/sdcard/startup.gif", F_OK) == 0);
+        if (DownloadStartupGifFile(startup_gif_url)) {
+            ESP_LOGI(TAG, "startup.gif download succeeded");
+        } else {
+            if (local_startup_gif_exists) {
+                ESP_LOGW(TAG, "Optional startup.gif download failed from %s", startup_gif_url.c_str());
+            } else {
+                ESP_LOGW(TAG, "startup.gif missing locally and optional download could not complete; continuing updater flow");
+            }
+        }
+    }
+
+    std::string startup_wav_url = BuildStartupWavDownloadUrl();
+    if (startup_wav_url.empty()) {
+        ESP_LOGW(TAG, "Could not build startup.wav URL from %s", download_url.c_str());
+    } else {
+        if (DownloadStartupWavFile(startup_wav_url)) {
+            ESP_LOGI(TAG, "startup.wav download succeeded");
+        } else {
+            ESP_LOGW(TAG, "Optional startup.wav download failed from %s", startup_wav_url.c_str());
+        }
+    }
+
     const char* local_file = "/sdcard/test.bin";
     
     uint32_t remote_file_count = 0, remote_checksum = 0, remote_combined_length = 0;
@@ -963,6 +1346,482 @@ bool AnimationUpdater::TestHttpsDownload() {
     }
     
     return success;
+}
+
+bool AnimationUpdater::DownloadStartupWavFile(const std::string& url) {
+    if (url.empty()) {
+        ESP_LOGW(TAG, "Startup WAV URL is empty, skip download");
+        return false;
+    }
+
+    constexpr const char* kLocalWavPath = "/sdcard/startup.wav";
+    constexpr const char* kLocalWavMetadataPath = "/sdcard/startup.wav.meta";
+    constexpr const char* kLocalWavFilename = "startup.wav";
+    const char* local_path = kLocalWavPath;
+    const char* filename = kLocalWavFilename;
+
+    size_t remote_size = 0;
+    std::string remote_etag;
+    std::string remote_last_modified;
+    bool has_remote_metadata = GetRemoteStartupWavMetadata(url, remote_size, remote_etag, remote_last_modified);
+    if (!has_remote_metadata) {
+        ESP_LOGW(TAG, "Could not read startup.wav metadata headers; proceeding without skip check");
+    }
+
+    if (has_remote_metadata) {
+        size_t local_file_size = GetLocalFileSize(kLocalWavPath);
+        bool local_file_exists = (access(kLocalWavPath, F_OK) == 0);
+        size_t local_meta_size = 0;
+        std::string local_meta_etag;
+        std::string local_meta_last_modified;
+        bool has_local_metadata = LoadStartupWavMetadata(local_meta_size, local_meta_etag, local_meta_last_modified);
+
+        bool should_skip_download = false;
+        std::string reason;
+
+        if (local_file_exists && local_file_size > 0) {
+            if (!remote_etag.empty() && !local_meta_etag.empty() &&
+                remote_etag == local_meta_etag) {
+                should_skip_download = true;
+                reason = "ETag matches";
+            } else if (!remote_last_modified.empty() && !local_meta_last_modified.empty() &&
+                       remote_last_modified == local_meta_last_modified) {
+                should_skip_download = true;
+                reason = "Last-Modified matches";
+            } else if (has_local_metadata &&
+                       local_meta_size > 0 &&
+                       remote_size > 0 &&
+                       local_meta_size == remote_size &&
+                       local_file_size == remote_size) {
+                should_skip_download = true;
+                reason = "size matches cached metadata";
+            } else if (!has_local_metadata &&
+                       remote_size > 0 &&
+                       local_file_size == remote_size) {
+                should_skip_download = true;
+                reason = "size matches local file";
+            }
+        } else if (local_file_exists) {
+            ESP_LOGW(TAG, "startup.wav exists but file size is 0, not using cache and redownloading");
+        }
+
+        if (should_skip_download) {
+            ESP_LOGI(TAG, "startup.wav is up-to-date (%s). Skipping download.", reason.c_str());
+            return true;
+        }
+    }
+
+    if (!SdCard::IsMounted()) {
+        ESP_LOGI(TAG, "SD card is not mounted. Initializing before startup.wav download.");
+        esp_err_t init_ret = SdCard::Initialize();
+        if (init_ret != ESP_OK) {
+            if (init_ret == ESP_ERR_NOT_SUPPORTED) {
+                ESP_LOGE(TAG, "SD card not supported on this board");
+            } else {
+                ESP_LOGE(TAG, "Failed to initialize SD card: %s", esp_err_to_name(init_ret));
+            }
+            return false;
+        }
+    }
+
+    auto& board = Board::GetInstance();
+    auto http = std::unique_ptr<Http>(board.CreateHttp());
+    if (!http) {
+        ESP_LOGE(TAG, "Failed to create HTTP client for startup.wav download");
+        return false;
+    }
+
+    http->SetHeader("User-Agent", "Xiaozhi-Startup-Audio-Updater/1.0");
+    http->SetHeader("Accept", "application/octet-stream");
+    http->SetHeader("Accept-Encoding", "identity");
+    http->SetTimeout(60000); // 60 seconds timeout
+
+    ESP_LOGI(TAG, "Downloading startup.wav from: %s", url.c_str());
+    if (!http->Open("GET", url)) {
+        ESP_LOGE(TAG, "Failed to open startup.wav download connection");
+        return false;
+    }
+
+    int status_code = http->GetStatusCode();
+    ESP_LOGI(TAG, "HTTP Status Code (startup.wav): %d", status_code);
+    if (status_code != 200) {
+        ESP_LOGE(TAG, "startup.wav download failed with status code: %d", status_code);
+        http->Close();
+        return false;
+    }
+
+    size_t content_length = http->GetBodyLength();
+    ESP_LOGI(TAG, "startup.wav Content-Length: %u", (unsigned int)content_length);
+    bool unknown_length = (content_length == 0);
+    if (unknown_length) {
+        ESP_LOGW(TAG, "startup.wav Content-Length is 0; will read until connection closes");
+    }
+
+    if (access(local_path, F_OK) == 0) {
+        ESP_LOGI(TAG, "Removing existing %s...", filename);
+        if (unlink(local_path) != 0) {
+            ESP_LOGW(TAG, "Failed to remove existing startup.wav file");
+        }
+    }
+
+    FILE* file = fopen(local_path, "wb");
+    if (!file) {
+        ESP_LOGE(TAG, "Failed to open file for writing: %s", local_path);
+        ESP_LOGE(TAG, "Error: %s", strerror(errno));
+        http->Close();
+        return false;
+    }
+
+    std::unique_ptr<char[]> buffer(new char[4096]);
+    const size_t buf_size = 4096;
+    size_t total_read = 0;
+    bool download_success = true;
+    uint32_t timeout_start = esp_timer_get_time() / 1000;
+    uint32_t timeout_duration = 120000; // 2 minutes total timeout
+    uint32_t last_read_time = timeout_start;
+    uint32_t read_timeout = 30000;      // 30s stall timeout
+
+    while (download_success) {
+        uint32_t current_time = esp_timer_get_time() / 1000;
+        if (current_time - timeout_start > timeout_duration) {
+            ESP_LOGE(TAG, "startup.wav download timeout after %u ms (read %u bytes)",
+                     timeout_duration, (unsigned int)total_read);
+            download_success = false;
+            break;
+        }
+
+        if (current_time - last_read_time > read_timeout) {
+            ESP_LOGE(TAG, "startup.wav download stalled for %u ms (read %u bytes so far)",
+                     current_time - last_read_time, (unsigned int)total_read);
+            download_success = false;
+            break;
+        }
+
+        int bytes_read = http->Read(buffer.get(), buf_size);
+        if (bytes_read > 0) {
+            size_t written = fwrite(buffer.get(), 1, bytes_read, file);
+            if (written != (size_t)bytes_read) {
+                ESP_LOGE(TAG, "Failed to write startup.wav data");
+                download_success = false;
+                break;
+            }
+
+            total_read += bytes_read;
+            last_read_time = esp_timer_get_time() / 1000;
+
+            if (total_read == 1024 || total_read % 16384 == 0) {
+                if (unknown_length) {
+                    ESP_LOGI(TAG, "startup.wav progress: %u bytes", (unsigned int)total_read);
+                } else {
+                    ESP_LOGI(TAG, "startup.wav progress: %u / %u bytes",
+                             (unsigned int)total_read, (unsigned int)content_length);
+                }
+            }
+            continue;
+        }
+
+        if (bytes_read == 0) {
+            ESP_LOGI(TAG, "startup.wav download stream completed, read %u bytes total", (unsigned int)total_read);
+            if (!unknown_length && total_read < content_length) {
+                ESP_LOGW(TAG, "startup.wav download ended early: read %u bytes, expected %u",
+                         (unsigned int)total_read, (unsigned int)content_length);
+            }
+            break;
+        }
+
+        ESP_LOGE(TAG, "HTTP Read() returned error for startup.wav: %d", bytes_read);
+        download_success = false;
+    }
+
+    fflush(file);
+    int fd = fileno(file);
+    if (fd >= 0) {
+        fsync(fd);
+    }
+    fclose(file);
+
+    if (!remote_etag.size()) {
+        remote_etag = http->GetResponseHeader("ETag");
+        if (remote_etag.empty()) {
+            remote_etag = http->GetResponseHeader("etag");
+        }
+    }
+    if (!remote_last_modified.size()) {
+        remote_last_modified = http->GetResponseHeader("Last-Modified");
+        if (remote_last_modified.empty()) {
+            remote_last_modified = http->GetResponseHeader("last-modified");
+        }
+    }
+    http->Close();
+
+    if (!download_success) {
+        ESP_LOGE(TAG, "Failed to download startup.wav, removing partial file");
+        unlink(local_path);
+        unlink(kLocalWavMetadataPath);
+        return false;
+    }
+
+    if (total_read == 0) {
+        ESP_LOGE(TAG, "Downloaded startup.wav is 0 bytes, removing");
+        unlink(local_path);
+        unlink(kLocalWavMetadataPath);
+        return false;
+    }
+
+    if (!unknown_length && total_read != content_length) {
+        ESP_LOGW(TAG, "startup.wav size mismatch after download: expected %u bytes, got %u bytes",
+                 (unsigned int)content_length, (unsigned int)total_read);
+    }
+    if (!SaveStartupWavMetadata(total_read, remote_etag, remote_last_modified)) {
+        ESP_LOGW(TAG, "Failed to save startup.wav metadata cache to %s", kLocalWavMetadataPath);
+    } else {
+        ESP_LOGI(TAG, "Saved startup.wav metadata cache: size=%u, etag=%s, last_modified=%s",
+                 (unsigned int)total_read,
+                 remote_etag.empty() ? "(empty)" : remote_etag.c_str(),
+                 remote_last_modified.empty() ? "(empty)" : remote_last_modified.c_str());
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(200));
+    ESP_LOGI(TAG, "startup.wav downloaded successfully: %s (%u bytes)", kLocalWavFilename, (unsigned int)total_read);
+    return true;
+}
+
+bool AnimationUpdater::DownloadStartupGifFile(const std::string& url) {
+    if (url.empty()) {
+        ESP_LOGW(TAG, "Startup GIF URL is empty, skip download");
+        return false;
+    }
+
+    constexpr const char* kLocalGifPath = "/sdcard/startup.gif";
+    constexpr const char* kLocalGifMetadataPath = "/sdcard/startup.gif.meta";
+    constexpr const char* kLocalGifFilename = "startup.gif";
+    const char* local_path = kLocalGifPath;
+    const char* filename = kLocalGifFilename;
+
+    size_t remote_size = 0;
+    std::string remote_etag;
+    std::string remote_last_modified;
+    bool has_remote_metadata = GetRemoteStartupGifMetadata(url, remote_size, remote_etag, remote_last_modified);
+    if (!has_remote_metadata) {
+        ESP_LOGW(TAG, "Could not read startup.gif metadata headers; proceeding without skip check");
+    }
+
+    if (has_remote_metadata) {
+        size_t local_file_size = GetLocalFileSize(kLocalGifPath);
+        bool local_file_exists = (access(kLocalGifPath, F_OK) == 0);
+        size_t local_meta_size = 0;
+        std::string local_meta_etag;
+        std::string local_meta_last_modified;
+        bool has_local_metadata = LoadStartupGifMetadata(local_meta_size, local_meta_etag, local_meta_last_modified);
+
+        bool should_skip_download = false;
+        std::string reason;
+
+        if (local_file_exists && local_file_size > 0) {
+            if (!remote_etag.empty() && !local_meta_etag.empty() &&
+                remote_etag == local_meta_etag) {
+                should_skip_download = true;
+                reason = "ETag matches";
+            } else if (!remote_last_modified.empty() && !local_meta_last_modified.empty() &&
+                       remote_last_modified == local_meta_last_modified) {
+                should_skip_download = true;
+                reason = "Last-Modified matches";
+            } else if (has_local_metadata &&
+                       local_meta_size > 0 &&
+                       remote_size > 0 &&
+                       local_meta_size == remote_size &&
+                       local_file_size == remote_size) {
+                should_skip_download = true;
+                reason = "size matches cached metadata";
+            } else if (!has_local_metadata &&
+                       remote_size > 0 &&
+                       local_file_size == remote_size) {
+                should_skip_download = true;
+                reason = "size matches local file";
+            }
+        } else if (local_file_exists) {
+            ESP_LOGW(TAG, "startup.gif exists but file size is 0, not using cache and redownloading");
+        }
+
+        if (should_skip_download) {
+            ESP_LOGI(TAG, "startup.gif is up-to-date (%s). Skipping download.", reason.c_str());
+            return true;
+        }
+    }
+
+    if (!SdCard::IsMounted()) {
+        ESP_LOGI(TAG, "SD card is not mounted. Initializing before startup.gif download.");
+        esp_err_t init_ret = SdCard::Initialize();
+        if (init_ret != ESP_OK) {
+            if (init_ret == ESP_ERR_NOT_SUPPORTED) {
+                ESP_LOGE(TAG, "SD card is not supported on this board");
+            } else {
+                ESP_LOGE(TAG, "Failed to initialize SD card: %s", esp_err_to_name(init_ret));
+            }
+            return false;
+        }
+    }
+
+    auto& board = Board::GetInstance();
+    auto http = std::unique_ptr<Http>(board.CreateHttp());
+    if (!http) {
+        ESP_LOGE(TAG, "Failed to create HTTP client for startup.gif download");
+        return false;
+    }
+
+    http->SetHeader("User-Agent", "Xiaozhi-Startup-Gif-Updater/1.0");
+    http->SetHeader("Accept", "application/octet-stream");
+    http->SetHeader("Accept-Encoding", "identity");
+    http->SetTimeout(60000); // 60 seconds timeout
+
+    ESP_LOGI(TAG, "Downloading startup.gif from: %s", url.c_str());
+    if (!http->Open("GET", url)) {
+        ESP_LOGE(TAG, "Failed to open startup.gif download connection");
+        return false;
+    }
+
+    int status_code = http->GetStatusCode();
+    ESP_LOGI(TAG, "HTTP Status Code (startup.gif): %d", status_code);
+    if (status_code != 200) {
+        ESP_LOGE(TAG, "startup.gif download failed with status code: %d", status_code);
+        http->Close();
+        return false;
+    }
+
+    size_t content_length = http->GetBodyLength();
+    ESP_LOGI(TAG, "startup.gif Content-Length: %u", (unsigned int)content_length);
+    bool unknown_length = (content_length == 0);
+    if (unknown_length) {
+        ESP_LOGW(TAG, "startup.gif Content-Length is 0; will read until connection closes");
+    }
+
+    if (access(local_path, F_OK) == 0) {
+        ESP_LOGI(TAG, "Removing existing %s...", filename);
+        if (unlink(local_path) != 0) {
+            ESP_LOGW(TAG, "Failed to remove existing startup.gif file");
+        }
+    }
+
+    FILE* file = fopen(local_path, "wb");
+    if (!file) {
+        ESP_LOGE(TAG, "Failed to open file for writing: %s", local_path);
+        ESP_LOGE(TAG, "Error: %s", strerror(errno));
+        http->Close();
+        return false;
+    }
+
+    std::unique_ptr<char[]> buffer(new char[4096]);
+    const size_t buf_size = 4096;
+    size_t total_read = 0;
+    bool download_success = true;
+    uint32_t timeout_start = esp_timer_get_time() / 1000;
+    uint32_t timeout_duration = 120000; // 2 minutes total timeout
+    uint32_t last_read_time = timeout_start;
+    uint32_t read_timeout = 30000;      // 30s stall timeout
+
+    while (download_success) {
+        uint32_t current_time = esp_timer_get_time() / 1000;
+        if (current_time - timeout_start > timeout_duration) {
+            ESP_LOGE(TAG, "startup.gif download timeout after %u ms (read %u bytes)",
+                     timeout_duration, (unsigned int)total_read);
+            download_success = false;
+            break;
+        }
+
+        if (current_time - last_read_time > read_timeout) {
+            ESP_LOGE(TAG, "startup.gif download stalled for %u ms (read %u bytes so far)",
+                     current_time - last_read_time, (unsigned int)total_read);
+            download_success = false;
+            break;
+        }
+
+        int bytes_read = http->Read(buffer.get(), buf_size);
+        if (bytes_read > 0) {
+            size_t written = fwrite(buffer.get(), 1, bytes_read, file);
+            if (written != (size_t)bytes_read) {
+                ESP_LOGE(TAG, "Failed to write startup.gif data");
+                download_success = false;
+                break;
+            }
+
+            total_read += bytes_read;
+            last_read_time = esp_timer_get_time() / 1000;
+
+            if (total_read == 1024 || total_read % 16384 == 0) {
+                if (unknown_length) {
+                    ESP_LOGI(TAG, "startup.gif progress: %u bytes", (unsigned int)total_read);
+                } else {
+                    ESP_LOGI(TAG, "startup.gif progress: %u / %u bytes",
+                             (unsigned int)total_read, (unsigned int)content_length);
+                }
+            }
+            continue;
+        }
+
+        if (bytes_read == 0) {
+            ESP_LOGI(TAG, "startup.gif download stream completed, read %u bytes total", (unsigned int)total_read);
+            if (!unknown_length && total_read < content_length) {
+                ESP_LOGW(TAG, "startup.gif download ended early: read %u bytes, expected %u",
+                         (unsigned int)total_read, (unsigned int)content_length);
+            }
+            break;
+        }
+
+        ESP_LOGE(TAG, "HTTP Read() returned error for startup.gif: %d", bytes_read);
+        download_success = false;
+    }
+
+    fflush(file);
+    int fd = fileno(file);
+    if (fd >= 0) {
+        fsync(fd);
+    }
+    fclose(file);
+
+    if (!remote_etag.size()) {
+        remote_etag = http->GetResponseHeader("ETag");
+        if (remote_etag.empty()) {
+            remote_etag = http->GetResponseHeader("etag");
+        }
+    }
+    if (!remote_last_modified.size()) {
+        remote_last_modified = http->GetResponseHeader("Last-Modified");
+        if (remote_last_modified.empty()) {
+            remote_last_modified = http->GetResponseHeader("last-modified");
+        }
+    }
+    http->Close();
+
+    if (!download_success) {
+        ESP_LOGE(TAG, "Failed to download startup.gif, removing partial file");
+        unlink(local_path);
+        unlink(kLocalGifMetadataPath);
+        return false;
+    }
+
+    if (total_read == 0) {
+        ESP_LOGE(TAG, "Downloaded startup.gif is 0 bytes, removing");
+        unlink(local_path);
+        unlink(kLocalGifMetadataPath);
+        return false;
+    }
+
+    if (!unknown_length && total_read != content_length) {
+        ESP_LOGW(TAG, "startup.gif size mismatch after download: expected %u bytes, got %u bytes",
+                 (unsigned int)content_length, (unsigned int)total_read);
+    }
+    if (!SaveStartupGifMetadata(total_read, remote_etag, remote_last_modified)) {
+        ESP_LOGW(TAG, "Failed to save startup.gif metadata cache to %s", kLocalGifMetadataPath);
+    } else {
+        ESP_LOGI(TAG, "Saved startup.gif metadata cache: size=%u, etag=%s, last_modified=%s",
+                 (unsigned int)total_read,
+                 remote_etag.empty() ? "(empty)" : remote_etag.c_str(),
+                 remote_last_modified.empty() ? "(empty)" : remote_last_modified.c_str());
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(200));
+    ESP_LOGI(TAG, "startup.gif downloaded successfully: %s (%u bytes)", kLocalGifFilename, (unsigned int)total_read);
+    return true;
 }
 
 // NEW: HTTPS connection testing method (no file download)
@@ -1935,6 +2794,10 @@ bool AnimationUpdater::ValidateMegaAnimationFileFromDisk(const char* file_path) 
 }
 
 // NEW: Validate GIF-based test.bin file from disk
+static bool IsStartupGifBundleEntry(const char* name) {
+    return strcasecmp(name, "startup.gif") == 0;
+}
+
 bool AnimationUpdater::ValidateGifMegaAnimationFileFromDisk(const char* file_path) {
     ESP_LOGI(TAG, "Validating GIF-based test.bin from disk: %s", file_path);
     
@@ -1970,9 +2833,10 @@ bool AnimationUpdater::ValidateGifMegaAnimationFileFromDisk(const char* file_pat
     ESP_LOGI(TAG, "GIF test.bin header: file_count=%u, checksum=0x%08X, combined_length=%u", 
              file_count, checksum, combined_length);
     
-    // Validate file_count is reasonable (1-20 files expected, typically 13)
-    if (file_count == 0 || file_count > 20) {
-        ESP_LOGE(TAG, "Invalid file_count in header: %u (expected 1-20, typically 13)", file_count);
+    // Current format uses startup.gif as a separate SD card root file.
+    // test.bin is expected to contain exactly 20 animation GIFs.
+    if (file_count != 20) {
+        ESP_LOGE(TAG, "Invalid file_count in header: %u (expected 20)", file_count);
         fclose(f);
         return false;
     }
@@ -2017,6 +2881,12 @@ bool AnimationUpdater::ValidateGifMegaAnimationFileFromDisk(const char* file_pat
         // Remove null padding from name
         size_t name_len = strnlen(name, 32);
         name[name_len] = '\0';
+
+        if (IsStartupGifBundleEntry(name)) {
+            ESP_LOGE(TAG, "startup.gif found in test.bin; startup.gif is required to be delivered separately as /sdcard/startup.gif");
+            fclose(f);
+            return false;
+        }
         
         // Validate file name (should be non-empty and end with .gif)
         if (name_len == 0 || name_len > 32) {

@@ -86,6 +86,8 @@ private:
     
     // Mega file operations
     bool DownloadMegaAnimationFile(const std::string& url);
+    bool DownloadStartupWavFile(const std::string& url);
+    bool DownloadStartupGifFile(const std::string& url);
     bool SaveMegaAnimationToSpiffs(const std::string& data); // Note: Now saves to SD card
     bool ValidateMegaAnimationFile(const std::string& data);
     bool ValidateMegaAnimationFileFromDisk(const char* file_path);
@@ -93,9 +95,18 @@ private:
     bool GetRemoteContentLength(const std::string& url, size_t &out_length);
     bool GetRemoteMegaContentLength(size_t &out_length);
     size_t GetLocalMegaFileSize(const char* file_path);
+    bool GetRemoteStartupWavMetadata(const std::string& url, size_t& out_content_length, std::string& out_etag, std::string& out_last_modified);
+    bool GetRemoteStartupGifMetadata(const std::string& url, size_t& out_content_length, std::string& out_etag, std::string& out_last_modified);
+    bool LoadStartupWavMetadata(size_t& out_size, std::string& out_etag, std::string& out_last_modified);
+    bool LoadStartupGifMetadata(size_t& out_size, std::string& out_etag, std::string& out_last_modified);
+    bool SaveStartupWavMetadata(size_t size, const std::string& etag, const std::string& last_modified);
+    bool SaveStartupGifMetadata(size_t size, const std::string& etag, const std::string& last_modified);
+    size_t GetLocalFileSize(const char* file_path);
     bool GetLocalFileHeader(const char* file_path, uint32_t& file_count, uint32_t& checksum, uint32_t& combined_length);
     bool GetRemoteFileHeader(const std::string& url, uint32_t& file_count, uint32_t& checksum, uint32_t& combined_length);
     std::string BuildMegaDownloadUrl();
+    std::string BuildStartupWavDownloadUrl();
+    std::string BuildStartupGifDownloadUrl();
     
     // Configuration management
     void LoadConfiguration();

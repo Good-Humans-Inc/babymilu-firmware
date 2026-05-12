@@ -29,3 +29,6 @@ animation_transplant/
 # include .bin in /animations/ and /main/spiffs_data/
 !animations/*.bin
 !main/spiffs_data/*.bin
+
+.venv/
+gif_input/

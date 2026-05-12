@@ -4,7 +4,8 @@ Crop, resize, and pack GIF files into a test.bin file.
 
 This script:
 1. Crops and resizes all GIFs in a folder (optional step)
-2. Packs the GIF files into a single test.bin file for SD card loading
+2. Packs exactly 20 animation GIFs into a single test.bin file for SD card loading
+3. Produces startup.gif as a separate SD card root asset
 
 Usage:
     python crop_and_pack_gifs.py <gif_folder> <output_test.bin> [--no-crop]
@@ -18,7 +19,7 @@ Example:
     python crop_and_pack_gifs.py gif_folder/ test.bin
     python crop_and_pack_gifs.py gif_folder/ test.bin --no-crop
 
-Expected GIF files in folder (exactly 20 GIFs):
+Expected GIF files in folder (20 packed files + startup.gif at SD root):
     - smirk.gif
     - smirk_start.gif
     - heart.gif
@@ -39,20 +40,31 @@ Expected GIF files in folder (exactly 20 GIFs):
     - angry.gif
     - angry_start.gif
     - listening.gif
+    - startup.gif        # original (preserved); a *resize-only* (no crop)
+                         # optimized copy is written to startup_resized.gif
+                         # and written as a separate root output asset: startup.gif
 """
 
 import struct
 import os
 import sys
 from pathlib import Path
+import shutil
 from PIL import Image, ImageSequence
 
 # Crop/Resize configuration
 CROP_BOX = (244, 219, 780, 755)  # (left, top, right, bottom)
 TARGET_SIZE = (360, 360)  # Final size after resize
 
-# Exact list of GIF files that will be packed into test.bin (and nothing else)
-EXPECTED_GIFS = [
+# startup.gif is treated as a separate SD-card root asset (outside test.bin).
+STARTUP_GIF_NAME = "startup.gif"
+STARTUP_RESIZED_NAME = "startup_resized.gif"
+STARTUP_PALETTE_COLORS = 32
+STARTUP_PALETTE_SAMPLE_EVERY = 15
+STARTUP_DISPOSAL = 2
+
+# These 20 GIFs are packed into test.bin.
+PACKED_GIFS = [
     "smirk.gif",
     "smirk_start.gif",
     "heart.gif",
@@ -74,6 +86,50 @@ EXPECTED_GIFS = [
     "angry_start.gif",
     "listening.gif",
 ]
+# Optional root-only GIF asset that remains outside test.bin.
+EXPECTED_GIFS = PACKED_GIFS + [STARTUP_GIF_NAME]
+EXPECTED_GIF_SET = {name.lower() for name in EXPECTED_GIFS}
+
+def get_gif_size(file_path):
+    """Return the logical canvas size for a GIF, or None if it cannot be read."""
+    try:
+        with Image.open(file_path) as gif:
+            return gif.size
+    except Exception:
+        return None
+
+def build_startup_palette(input_path):
+    """Build one shared palette for startup.gif after resize."""
+    gif = Image.open(input_path)
+    samples = []
+    try:
+        for index, frame in enumerate(ImageSequence.Iterator(gif)):
+            if index % STARTUP_PALETTE_SAMPLE_EVERY != 0:
+                continue
+            sample = Image.new('RGB', TARGET_SIZE, (0, 0, 0))
+            resized = frame.convert('RGBA').resize(TARGET_SIZE, Image.Resampling.LANCZOS)
+            sample.paste(resized, (0, 0), resized)
+            samples.append(
+                sample
+            )
+
+        if not samples:
+            return None
+
+        sample_sheet = Image.new(
+            'RGB',
+            (TARGET_SIZE[0] * len(samples), TARGET_SIZE[1])
+        )
+        for index, sample in enumerate(samples):
+            sample_sheet.paste(sample, (TARGET_SIZE[0] * index, 0))
+
+        return sample_sheet.quantize(
+            colors=STARTUP_PALETTE_COLORS,
+            method=Image.Quantize.MEDIANCUT,
+            dither=Image.Dither.NONE,
+        )
+    finally:
+        gif.close()
 
 def crop_gif(input_path, output_path):
     """
@@ -86,6 +142,18 @@ def crop_gif(input_path, output_path):
     try:
         # Open the GIF
         gif = Image.open(input_path)
+
+        if gif.size == TARGET_SIZE:
+            print(f"[OK] Already {TARGET_SIZE[0]}x{TARGET_SIZE[1]}, keeping: "
+                  f"{os.path.basename(input_path)}")
+            gif.close()
+            return True
+
+        if gif.size[0] < CROP_BOX[2] or gif.size[1] < CROP_BOX[3]:
+            print(f"[ERROR] {os.path.basename(input_path)} is {gif.size}, "
+                  f"too small for crop box {CROP_BOX}")
+            gif.close()
+            return False
         
         # Get GIF info
         frames = []
@@ -124,14 +192,102 @@ def crop_gif(input_path, output_path):
                 save_kwargs['transparency'] = gif.info['transparency']
             
             frames[0].save(output_path, **save_kwargs)
-            print(f"✓ Cropped and resized: {os.path.basename(input_path)}")
+            gif.close()
+            print(f"[OK] Cropped and resized: {os.path.basename(input_path)}")
             return True
         else:
-            print(f"✗ Error: No frames found in {input_path}")
+            gif.close()
+            print(f"[ERROR] No frames found in {input_path}")
             return False
             
     except Exception as e:
-        print(f"✗ Error processing {input_path}: {str(e)}")
+        print(f"[ERROR] Error processing {input_path}: {str(e)}")
+        return False
+
+def resize_gif(input_path, output_path):
+    """
+    Resize-only path used for startup.gif: no crop is applied, frames are
+    scaled to TARGET_SIZE and flattened onto a black canvas.
+
+    Startup is shown before the regular animation system has settled. Store
+    every frame as a full-canvas redraw so the LCD's initial clear color cannot
+    leak through partial GIF frame updates around the round display edges.
+    """
+    try:
+        palette = build_startup_palette(input_path)
+        gif = Image.open(input_path)
+        frames = []
+        durations = []
+        background_index = 0
+
+        if palette is not None:
+            palette_data = palette.getpalette() or []
+            palette_entries = [
+                palette_data[i:i + 3]
+                for i in range(0, min(len(palette_data), 256 * 3), 3)
+                if len(palette_data[i:i + 3]) == 3
+            ]
+            if palette_entries:
+                background_index = min(
+                    range(len(palette_entries)),
+                    key=lambda idx: sum(palette_entries[idx])
+                )
+
+        for frame in ImageSequence.Iterator(gif):
+            resized_frame = Image.new('RGB', TARGET_SIZE, (0, 0, 0))
+            source_frame = frame.convert('RGBA').resize(
+                TARGET_SIZE,
+                Image.Resampling.LANCZOS
+            )
+            resized_frame.paste(source_frame, (0, 0), source_frame)
+            if palette is not None:
+                resized_frame = resized_frame.quantize(
+                    palette=palette,
+                    dither=Image.Dither.NONE,
+                )
+            elif resized_frame.mode != 'P':
+                resized_frame = resized_frame.convert(
+                    'P',
+                    palette=Image.ADAPTIVE,
+                    colors=STARTUP_PALETTE_COLORS,
+                    dither=Image.Dither.NONE,
+                )
+            frames.append(resized_frame.copy())
+
+            if 'duration' in frame.info:
+                durations.append(frame.info['duration'])
+            else:
+                durations.append(100)
+
+        if not frames:
+            print(f"[ERROR] No frames found in {input_path}")
+            return False
+
+        save_kwargs = {
+            'save_all': True,
+            'append_images': frames[1:],
+            'duration': durations,
+            'loop': gif.info.get('loop', 0),
+            'optimize': False,
+            'disposal': STARTUP_DISPOSAL,
+            'background': background_index,
+        }
+
+        frames[0].save(output_path, **save_kwargs)
+
+        try:
+            in_size = os.path.getsize(input_path)
+            out_size = os.path.getsize(output_path)
+            print(f"[OK] Resized (no crop) + full-frame encoded: "
+                  f"{os.path.basename(input_path)} -> {os.path.basename(output_path)} "
+                  f"({in_size:,} -> {out_size:,} bytes)")
+        except OSError:
+            print(f"[OK] Resized (no crop) + full-frame encoded: "
+                  f"{os.path.basename(input_path)} -> {os.path.basename(output_path)}")
+        return True
+
+    except Exception as e:
+        print(f"[ERROR] Error processing {input_path}: {str(e)}")
         return False
 
 def crop_all_gifs(gif_folder):
@@ -150,26 +306,46 @@ def crop_all_gifs(gif_folder):
         print(f"Error: Folder '{gif_folder}' not found!")
         return False
     
-    # Get all GIF files
-    gif_files = [f for f in os.listdir(gif_folder) if f.lower().endswith('.gif')]
+    # Process only the logical bundle inputs. Generated helper files such as
+    # startup_resized.gif must never be cropped on a later run.
+    all_gif_files = [f for f in os.listdir(gif_folder) if f.lower().endswith('.gif')]
+    gif_files = list(PACKED_GIFS)
+    if (gif_folder / STARTUP_GIF_NAME).exists():
+        gif_files.append(STARTUP_GIF_NAME)
+    ignored_gifs = sorted(
+        f for f in all_gif_files if f.lower() not in EXPECTED_GIF_SET
+    )
     
     if not gif_files:
         print(f"No GIF files found in '{gif_folder}'")
         return False
     
-    print(f"Found {len(gif_files)} GIF file(s) to crop and resize...")
+    print(f"Found {len(gif_files)} expected GIF file(s) to crop/resize...")
+    if ignored_gifs:
+        print("Ignoring generated/extra GIF file(s): "
+              f"{', '.join(ignored_gifs)}")
     print(f"Crop region: {CROP_BOX}, then resize to {TARGET_SIZE}\n")
     
     success_count = 0
     # Process each GIF
     for gif_file in sorted(gif_files):
         input_path = gif_folder / gif_file
-        output_path = gif_folder / gif_file  # Overwrite original
+        # startup.gif is special: only resize (no crop), write to a
+        # separate file so the (possibly very large) original is preserved,
+        # and re-encode with GIF optimization so the output is smaller.
+        if gif_file.lower() == STARTUP_GIF_NAME:
+            output_path = gif_folder / STARTUP_RESIZED_NAME
+            if resize_gif(input_path, output_path):
+                success_count += 1
+            continue
+
+        # All other GIFs: crop + resize, overwriting the source in place.
+        output_path = gif_folder / gif_file
         if crop_gif(input_path, output_path):
             success_count += 1
     
-    print(f"\n✓ Completed processing {success_count}/{len(gif_files)} GIF file(s)\n")
-    return success_count > 0
+    print(f"\n[OK] Completed processing {success_count}/{len(gif_files)} GIF file(s)\n")
+    return success_count == len(gif_files)
 
 def compute_checksum(data):
     """Calculate checksum as sum of all bytes, masked to 32 bits."""
@@ -185,6 +361,11 @@ def verify_gif_format(file_path):
     except Exception:
         pass
     return False
+
+
+def is_valid_gif_file(file_path):
+    """Return whether a path exists and looks like a valid GIF."""
+    return bool(file_path) and file_path.exists() and verify_gif_format(str(file_path))
 
 def pack_gif_file(file_name, file_path, offset, max_name_len=32):
     """
@@ -228,6 +409,68 @@ def pack_gif_file(file_name, file_path, offset, max_name_len=32):
     
     return table_entry, data_entry, file_size
 
+def _create_root_startup_asset(gif_folder, output_path):
+    """
+    Create/update startup.gif at the output root (next to test.bin).
+    """
+    startup_source = gif_folder / STARTUP_GIF_NAME
+    startup_resized = gif_folder / STARTUP_RESIZED_NAME
+    output_root = Path(output_path).parent
+
+    if not startup_source.exists():
+        resized_size = get_gif_size(startup_resized) if startup_resized.exists() else None
+        resized_is_valid = (
+            startup_resized.exists()
+            and is_valid_gif_file(startup_resized)
+            and resized_size == TARGET_SIZE
+        )
+        if not resized_is_valid:
+            print(f"[WARN] startup.gif not found in '{gif_folder}'; skipping root startup asset generation.")
+            return True
+        print(f"[INFO] startup.gif source missing, reusing existing {STARTUP_RESIZED_NAME} for SD-card root output.")
+
+    startup_mtime = startup_source.stat().st_mtime if startup_source.exists() else 0
+    resized_size = get_gif_size(startup_resized) if startup_resized.exists() else None
+    resized_mtime = startup_resized.stat().st_mtime if startup_resized.exists() else 0
+    resized_is_valid = (
+        startup_resized.exists()
+        and resized_size == TARGET_SIZE
+        and is_valid_gif_file(startup_resized)
+    )
+    if startup_source.exists() and not is_valid_gif_file(startup_source):
+        print(f"[ERROR] startup.gif exists but is not a valid GIF: {startup_source}")
+        return False
+
+    if startup_source.exists() and (
+        not resized_is_valid
+        or resized_mtime < startup_mtime
+    ):
+        if startup_resized.exists() and resized_size != TARGET_SIZE:
+            print(f"Regenerating {STARTUP_RESIZED_NAME}: "
+                  f"current size is {resized_size}, target is {TARGET_SIZE}")
+        elif startup_resized.exists():
+            print(f"Regenerating {STARTUP_RESIZED_NAME}: startup.gif is newer")
+        else:
+            print(f"Creating {STARTUP_RESIZED_NAME} from startup.gif")
+
+        if not resize_gif(startup_source, startup_resized):
+            print(f"Error: Failed to create {STARTUP_RESIZED_NAME}")
+            return False
+
+    startup_root_output = output_root / STARTUP_GIF_NAME
+    if startup_root_output.resolve() == startup_source.resolve():
+        print("[INFO] startup.gif output path matches source folder; overwriting startup.gif with optimized output.")
+    try:
+        shutil.copy2(startup_resized, startup_root_output)
+    except FileNotFoundError:
+        output_root.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(startup_resized, startup_root_output)
+
+    startup_size = os.path.getsize(startup_root_output)
+    print(f"[OK] Copied startup asset to SD card root: "
+          f"{startup_root_output} ({startup_size:,} bytes)")
+    return True
+
 def create_test_bin(gif_folder, output_path):
     """
     Create test.bin from GIF files in the specified folder.
@@ -245,12 +488,12 @@ def create_test_bin(gif_folder, output_path):
         print(f"Error: GIF folder not found: {gif_folder}")
         return False
     
-    # Find all GIF files (must match EXPECTED_GIFS exactly)
+    # Find all GIF files (must match PACKED_GIFS exactly for test.bin)
     found_gifs = {}
     missing_gifs = []
-    
-    # Check for all expected GIFs
-    for gif_name in EXPECTED_GIFS:
+
+    # Check for all required files to be packed into test.bin.
+    for gif_name in PACKED_GIFS:
         gif_path = gif_folder / gif_name
         if gif_path.exists():
             found_gifs[gif_name] = str(gif_path)
@@ -264,7 +507,7 @@ def create_test_bin(gif_folder, output_path):
     
     if missing_gifs:
         print(f"Error: Missing required GIF files: {', '.join(missing_gifs)}")
-        print("Aborting test.bin creation because the set must be complete.")
+        print("Aborting test.bin creation because the packed set must be complete.")
         return False
     
     print(f"Found {len(found_gifs)} GIF file(s) to pack:")
@@ -278,7 +521,7 @@ def create_test_bin(gif_folder, output_path):
     current_offset = 0
     file_info_list = []
     
-    for gif_name in EXPECTED_GIFS:
+    for gif_name in PACKED_GIFS:
         if gif_name in found_gifs:
             try:
                 table_entry, data_entry, file_size = pack_gif_file(
@@ -290,7 +533,7 @@ def create_test_bin(gif_folder, output_path):
                 file_info_list.append((gif_name, file_size, current_offset))
                 current_offset += len(data_entry)
 
-                print(f"✓ Packed {gif_name} ({file_size:,} bytes)")
+                print(f"[OK] Packed {gif_name} ({file_size:,} bytes)")
             except Exception as e:
                 print(f"Error packing {gif_name}: {e}")
                 return False
@@ -320,7 +563,7 @@ def create_test_bin(gif_folder, output_path):
     # Print summary
     print()
     print("=" * 60)
-    print(f"✓ Created test.bin: {output_path}")
+    print(f"[OK] Created test.bin: {output_path}")
     print("=" * 60)
     print(f"  Files packed: {num_files}")
     print(f"  Total size: {len(final_data):,} bytes")
@@ -336,8 +579,9 @@ def create_test_bin(gif_folder, output_path):
     print()
     print("Next steps:")
     print(f"  1. Copy {output_path} to the root of your SD card")
-    print(f"  2. Ensure the SD card is mounted on the device")
-    print(f"  3. The firmware will automatically load GIFs from test.bin")
+    print("  2. Copy startup.gif to the root of your SD card")
+    print(f"  3. Ensure the SD card is mounted on the device")
+    print(f"  4. The firmware will automatically load GIFs from test.bin")
     print()
     
     return True
@@ -356,17 +600,19 @@ def main():
         print("  output_test.bin Path where test.bin will be written")
         print("  --no-crop       Skip the crop/resize step (only pack existing GIFs)")
         print()
-        print("Expected GIF files (20 total, all required):")
-        for name in EXPECTED_GIFS:
+        print(f"Packed GIF files ({len(PACKED_GIFS)} total):")
+        for name in PACKED_GIFS:
             print(f"  - {name}")
+        print("Root output GIF:")
+        print(f"  - {STARTUP_GIF_NAME}  ({STARTUP_RESIZED_NAME} is generated and written to root)")
         print()
         print("Examples:")
         print("  python crop_and_pack_gifs.py gif_folder/ test.bin")
         print("  python crop_and_pack_gifs.py gif_folder/ test.bin --no-crop")
         sys.exit(1)
     
-    gif_folder = args[0]
-    output_path = args[1]
+    gif_folder = Path(args[0])
+    output_path = str(args[1])
     
     # Step 1: Crop and resize GIFs (unless --no-crop is specified)
     if not skip_crop:
@@ -381,11 +627,16 @@ def main():
     
     # Step 2: Pack GIFs into test.bin
     print("=" * 60)
-    print("Step 2: Packing GIFs into test.bin")
+    print("Step 2: Preparing startup.gif asset + packing test.bin")
     print("=" * 60)
+    if not _create_root_startup_asset(gif_folder, output_path):
+        print("Warning: Startup root asset preparation failed.")
+        sys.exit(1)
+    print()
+    print("Packing test.bin...")
+    print()
     if not create_test_bin(gif_folder, output_path):
         sys.exit(1)
 
 if __name__ == "__main__":
     main()
-
