@@ -51,7 +51,7 @@ the older "surrounding white pixels" bug.
   and no optimization, so the generated `startup_resized.gif` behaves more like
   the stable emotion GIFs.
 - `startup_resized.gif` is still only an intermediate artifact. The firmware reads
-  `startup.gif` from `/sdcard/test.bin`, where the packer stores the generated
+  `startup.gif` from `/sdcard/startup.gif`, where the packer stores the generated
   resized startup asset under the logical name `startup.gif`.
 
 ## Regeneration Command
@@ -63,7 +63,7 @@ Remove-Item .\startup_test\startup_resized.gif -Force
 python .\crop_and_pack_gifs.py .\startup_test .\test.bin --no-crop
 ```
 
-Then copy the regenerated `test.bin` to the SD card root.
+Then copy the regenerated `test.bin` and `startup.gif` to the SD card root.
 
 ## Firmware Command
 

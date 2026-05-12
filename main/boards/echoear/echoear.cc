@@ -1,4 +1,4 @@
-#include "wifi_board.h"
+﻿#include "wifi_board.h"
 #include "audio_codecs/box_audio_codec.h"
 #include "display/lcd_display.h"
 #include "application.h"
@@ -20,6 +20,8 @@
 #include <esp_log.h>
 #include <esp_random.h>
 #include <cJSON.h>
+#include <cstdio>
+#include <cstdlib>
 
 #include <driver/i2c_master.h>
 #include "i2c_device.h"
@@ -232,18 +234,62 @@ static void FetchFirestoreDeviceDocumentAndApplyRanking() {
     }
 }
 
-// Show /sdcard/test.bin's startup.gif on the LCD as soon as the SD card is
-// mounted, before animation_init() runs. Pulls the GIF straight out of
-// test.bin via animation_extract_gif_from_test_bin() (which doesn't depend
-// on animation_init having completed). The buffer is intentionally kept
-// alive for the whole boot: LVGL's lv_gif keeps the data pointer for as
-// long as it is the active source, and animation_init() will later swap to
-// normal.gif when the device reaches kDeviceStateIdle.
-static void ShowStartupGifFromTestBin() {
+static bool ReadFileToHeap(const char* path, uint8_t** out_data, size_t* out_size) {
+    if (path == nullptr || out_data == nullptr || out_size == nullptr) {
+        return false;
+    }
+
+    FILE* file = fopen(path, "rb");
+    if (!file) {
+        ESP_LOGD(TAG, "[SD/ANIM] startup.gif fallback file not found: %s", path);
+        return false;
+    }
+
+    if (fseek(file, 0, SEEK_END) != 0) {
+        ESP_LOGW(TAG, "[SD/ANIM] Failed to seek fallback startup.gif file: %s", path);
+        fclose(file);
+        return false;
+    }
+
+    const long file_size = ftell(file);
+    if (file_size <= 0) {
+        ESP_LOGW(TAG, "[SD/ANIM] Invalid startup.gif size (%ld) for %s", file_size, path);
+        fclose(file);
+        return false;
+    }
+
+    rewind(file);
+    uint8_t* data = (uint8_t*)malloc((size_t)file_size);
+    if (!data) {
+        ESP_LOGW(TAG, "[SD/ANIM] Failed to allocate %ld bytes for startup.gif: %s", file_size, path);
+        fclose(file);
+        return false;
+    }
+
+    if (fread(data, 1, (size_t)file_size, file) != (size_t)file_size) {
+        ESP_LOGW(TAG, "[SD/ANIM] Failed to read entire startup.gif file: %s", path);
+        free(data);
+        fclose(file);
+        return false;
+    }
+
+    fclose(file);
+    *out_data = data;
+    *out_size = (size_t)file_size;
+    return true;
+}
+
+// Show /sdcard/startup.gif on the LCD as soon as the SD card is
+// mounted, before animation_init() runs. The file is read from SD card root
+// (no dependency on test.bin). The buffer is intentionally kept alive for
+// the whole boot: LVGL's lv_gif keeps the data pointer for as long as it is
+// the active source.
+static void ShowStartupGifFromSdCard() {
     static uint8_t* s_startup_gif_data = nullptr;
     static size_t s_startup_gif_size = 0;
     if (s_startup_gif_data != nullptr) {
-        return;  // Already shown this boot
+        // Already shown this boot.
+        return;
     }
     if (!SdCard::IsMounted()) {
         return;
@@ -252,16 +298,20 @@ static void ShowStartupGifFromTestBin() {
     if (display == nullptr) {
         return;
     }
-    if (!animation_extract_gif_from_test_bin("startup.gif",
-                                             &s_startup_gif_data,
-                                             &s_startup_gif_size)) {
-        ESP_LOGW(TAG, "[SD/ANIM] startup.gif not found in test.bin, skipping startup screen");
+
+    bool loaded_from_file = false;
+    if (ReadFileToHeap("/sdcard/startup.gif", &s_startup_gif_data, &s_startup_gif_size)) {
+        loaded_from_file = true;
+    }
+
+    if (!loaded_from_file) {
+        ESP_LOGW(TAG, "[SD/ANIM] startup.gif not found in SD card root, skipping startup screen");
         s_startup_gif_data = nullptr;
         s_startup_gif_size = 0;
         return;
     }
-    ESP_LOGI(TAG, "[SD/ANIM] Playing startup.gif (%u bytes) from test.bin",
-             (unsigned)s_startup_gif_size);
+
+    ESP_LOGI(TAG, "[SD/ANIM] Playing startup.gif (%u bytes) from SD card root", (unsigned)s_startup_gif_size);
     display->SetEmotionGif(s_startup_gif_data, s_startup_gif_size);
 }
 
@@ -278,7 +328,7 @@ static void SdAnimInitTask(void* /*arg*/) {
 
     // Play startup.gif as soon as SD is up, before the slower
     // animation_init() pulls the rest of test.bin into RAM.
-    ShowStartupGifFromTestBin();
+    ShowStartupGifFromSdCard();
 
     ESP_LOGI(TAG, "[SD/ANIM] === Initializing animations ===");
     animation_init();
@@ -1958,10 +2008,12 @@ public:
         // Start SD card + animation init in background to allow WiFi startup in parallel.
         // Pin to core 0 so WiFi (core 1 in your logs) can connect concurrently.
         ESP_LOGI(TAG, "[SD/ANIM] Starting background init task");
+        animation_block_startup_load(true);
         BaseType_t task_ret = xTaskCreatePinnedToCore(SdAnimInitTask, "sd_anim_init", 8192, nullptr, 1, nullptr, 0);
         if (task_ret != pdPASS) {
             ESP_LOGW(TAG, "[SD/ANIM] Failed to start background init task");
             s_firestore_startup_done.store(true);
+            animation_block_startup_load(false);
         }
     }
 

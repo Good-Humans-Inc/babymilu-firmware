@@ -4,7 +4,8 @@ Crop, resize, and pack GIF files into a test.bin file.
 
 This script:
 1. Crops and resizes all GIFs in a folder (optional step)
-2. Packs the GIF files into a single test.bin file for SD card loading
+2. Packs exactly 20 animation GIFs into a single test.bin file for SD card loading
+3. Produces startup.gif as a separate SD card root asset
 
 Usage:
     python crop_and_pack_gifs.py <gif_folder> <output_test.bin> [--no-crop]
@@ -18,7 +19,7 @@ Example:
     python crop_and_pack_gifs.py gif_folder/ test.bin
     python crop_and_pack_gifs.py gif_folder/ test.bin --no-crop
 
-Expected GIF files in folder (exactly 21 GIFs):
+Expected GIF files in folder (20 packed files + startup.gif at SD root):
     - smirk.gif
     - smirk_start.gif
     - heart.gif
@@ -41,21 +42,29 @@ Expected GIF files in folder (exactly 21 GIFs):
     - listening.gif
     - startup.gif        # original (preserved); a *resize-only* (no crop)
                          # optimized copy is written to startup_resized.gif
-                         # and packed into test.bin as 'startup.gif'
+                         # and written as a separate root output asset: startup.gif
 """
 
 import struct
 import os
 import sys
 from pathlib import Path
+import shutil
 from PIL import Image, ImageSequence
 
 # Crop/Resize configuration
 CROP_BOX = (244, 219, 780, 755)  # (left, top, right, bottom)
 TARGET_SIZE = (360, 360)  # Final size after resize
 
-# Exact list of GIF files that will be packed into test.bin (and nothing else)
-EXPECTED_GIFS = [
+# startup.gif is treated as a separate SD-card root asset (outside test.bin).
+STARTUP_GIF_NAME = "startup.gif"
+STARTUP_RESIZED_NAME = "startup_resized.gif"
+STARTUP_PALETTE_COLORS = 32
+STARTUP_PALETTE_SAMPLE_EVERY = 15
+STARTUP_DISPOSAL = 2
+
+# These 20 GIFs are packed into test.bin.
+PACKED_GIFS = [
     "smirk.gif",
     "smirk_start.gif",
     "heart.gif",
@@ -76,20 +85,10 @@ EXPECTED_GIFS = [
     "angry.gif",
     "angry_start.gif",
     "listening.gif",
-    "startup.gif",
 ]
-
-# startup.gif is treated specially: the original is preserved (it can be a
-# very large source asset) and a resized copy is written to this filename,
-# which is what gets packed into test.bin (under the logical name
-# "startup.gif"). The resized file is also kept on disk so callers can use
-# it independently.
-STARTUP_GIF_NAME = "startup.gif"
-STARTUP_RESIZED_NAME = "startup_resized.gif"
+# Optional root-only GIF asset that remains outside test.bin.
+EXPECTED_GIFS = PACKED_GIFS + [STARTUP_GIF_NAME]
 EXPECTED_GIF_SET = {name.lower() for name in EXPECTED_GIFS}
-STARTUP_PALETTE_COLORS = 32
-STARTUP_PALETTE_SAMPLE_EVERY = 15
-STARTUP_DISPOSAL = 2
 
 def get_gif_size(file_path):
     """Return the logical canvas size for a GIF, or None if it cannot be read."""
@@ -310,7 +309,9 @@ def crop_all_gifs(gif_folder):
     # Process only the logical bundle inputs. Generated helper files such as
     # startup_resized.gif must never be cropped on a later run.
     all_gif_files = [f for f in os.listdir(gif_folder) if f.lower().endswith('.gif')]
-    gif_files = [name for name in EXPECTED_GIFS if (gif_folder / name).exists()]
+    gif_files = list(PACKED_GIFS)
+    if (gif_folder / STARTUP_GIF_NAME).exists():
+        gif_files.append(STARTUP_GIF_NAME)
     ignored_gifs = sorted(
         f for f in all_gif_files if f.lower() not in EXPECTED_GIF_SET
     )
@@ -361,6 +362,11 @@ def verify_gif_format(file_path):
         pass
     return False
 
+
+def is_valid_gif_file(file_path):
+    """Return whether a path exists and looks like a valid GIF."""
+    return bool(file_path) and file_path.exists() and verify_gif_format(str(file_path))
+
 def pack_gif_file(file_name, file_path, offset, max_name_len=32):
     """
     Pack a single GIF file into the test.bin format.
@@ -403,6 +409,68 @@ def pack_gif_file(file_name, file_path, offset, max_name_len=32):
     
     return table_entry, data_entry, file_size
 
+def _create_root_startup_asset(gif_folder, output_path):
+    """
+    Create/update startup.gif at the output root (next to test.bin).
+    """
+    startup_source = gif_folder / STARTUP_GIF_NAME
+    startup_resized = gif_folder / STARTUP_RESIZED_NAME
+    output_root = Path(output_path).parent
+
+    if not startup_source.exists():
+        resized_size = get_gif_size(startup_resized) if startup_resized.exists() else None
+        resized_is_valid = (
+            startup_resized.exists()
+            and is_valid_gif_file(startup_resized)
+            and resized_size == TARGET_SIZE
+        )
+        if not resized_is_valid:
+            print(f"[WARN] startup.gif not found in '{gif_folder}'; skipping root startup asset generation.")
+            return True
+        print(f"[INFO] startup.gif source missing, reusing existing {STARTUP_RESIZED_NAME} for SD-card root output.")
+
+    startup_mtime = startup_source.stat().st_mtime if startup_source.exists() else 0
+    resized_size = get_gif_size(startup_resized) if startup_resized.exists() else None
+    resized_mtime = startup_resized.stat().st_mtime if startup_resized.exists() else 0
+    resized_is_valid = (
+        startup_resized.exists()
+        and resized_size == TARGET_SIZE
+        and is_valid_gif_file(startup_resized)
+    )
+    if startup_source.exists() and not is_valid_gif_file(startup_source):
+        print(f"[ERROR] startup.gif exists but is not a valid GIF: {startup_source}")
+        return False
+
+    if startup_source.exists() and (
+        not resized_is_valid
+        or resized_mtime < startup_mtime
+    ):
+        if startup_resized.exists() and resized_size != TARGET_SIZE:
+            print(f"Regenerating {STARTUP_RESIZED_NAME}: "
+                  f"current size is {resized_size}, target is {TARGET_SIZE}")
+        elif startup_resized.exists():
+            print(f"Regenerating {STARTUP_RESIZED_NAME}: startup.gif is newer")
+        else:
+            print(f"Creating {STARTUP_RESIZED_NAME} from startup.gif")
+
+        if not resize_gif(startup_source, startup_resized):
+            print(f"Error: Failed to create {STARTUP_RESIZED_NAME}")
+            return False
+
+    startup_root_output = output_root / STARTUP_GIF_NAME
+    if startup_root_output.resolve() == startup_source.resolve():
+        print("[INFO] startup.gif output path matches source folder; overwriting startup.gif with optimized output.")
+    try:
+        shutil.copy2(startup_resized, startup_root_output)
+    except FileNotFoundError:
+        output_root.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(startup_resized, startup_root_output)
+
+    startup_size = os.path.getsize(startup_root_output)
+    print(f"[OK] Copied startup asset to SD card root: "
+          f"{startup_root_output} ({startup_size:,} bytes)")
+    return True
+
 def create_test_bin(gif_folder, output_path):
     """
     Create test.bin from GIF files in the specified folder.
@@ -420,40 +488,12 @@ def create_test_bin(gif_folder, output_path):
         print(f"Error: GIF folder not found: {gif_folder}")
         return False
     
-    # Find all GIF files (must match EXPECTED_GIFS exactly)
+    # Find all GIF files (must match PACKED_GIFS exactly for test.bin)
     found_gifs = {}
     missing_gifs = []
 
-    # Check for all expected GIFs.
-    # startup.gif is always packed from startup_resized.gif so the bundle gets
-    # a 360x360 resize-only startup asset, never the multi-MB original.
-    for gif_name in EXPECTED_GIFS:
-        if gif_name == STARTUP_GIF_NAME:
-            resized = gif_folder / STARTUP_RESIZED_NAME
-            original = gif_folder / STARTUP_GIF_NAME
-            if not original.exists():
-                missing_gifs.append(gif_name)
-                continue
-
-            resized_size = get_gif_size(resized) if resized.exists() else None
-            original_mtime = original.stat().st_mtime
-            resized_mtime = resized.stat().st_mtime if resized.exists() else 0
-            if resized_size != TARGET_SIZE or resized_mtime < original_mtime:
-                if resized.exists() and resized_size != TARGET_SIZE:
-                    print(f"Regenerating {STARTUP_RESIZED_NAME}: "
-                          f"current size is {resized_size}, target is {TARGET_SIZE}")
-                elif resized.exists():
-                    print(f"Regenerating {STARTUP_RESIZED_NAME}: startup.gif is newer")
-                else:
-                    print(f"Creating {STARTUP_RESIZED_NAME} from startup.gif")
-
-                if not resize_gif(original, resized):
-                    print(f"Error: Failed to create {STARTUP_RESIZED_NAME}")
-                    return False
-
-            found_gifs[gif_name] = str(resized)
-            continue
-
+    # Check for all required files to be packed into test.bin.
+    for gif_name in PACKED_GIFS:
         gif_path = gif_folder / gif_name
         if gif_path.exists():
             found_gifs[gif_name] = str(gif_path)
@@ -467,7 +507,7 @@ def create_test_bin(gif_folder, output_path):
     
     if missing_gifs:
         print(f"Error: Missing required GIF files: {', '.join(missing_gifs)}")
-        print("Aborting test.bin creation because the set must be complete.")
+        print("Aborting test.bin creation because the packed set must be complete.")
         return False
     
     print(f"Found {len(found_gifs)} GIF file(s) to pack:")
@@ -481,7 +521,7 @@ def create_test_bin(gif_folder, output_path):
     current_offset = 0
     file_info_list = []
     
-    for gif_name in EXPECTED_GIFS:
+    for gif_name in PACKED_GIFS:
         if gif_name in found_gifs:
             try:
                 table_entry, data_entry, file_size = pack_gif_file(
@@ -539,8 +579,9 @@ def create_test_bin(gif_folder, output_path):
     print()
     print("Next steps:")
     print(f"  1. Copy {output_path} to the root of your SD card")
-    print(f"  2. Ensure the SD card is mounted on the device")
-    print(f"  3. The firmware will automatically load GIFs from test.bin")
+    print("  2. Copy startup.gif to the root of your SD card")
+    print(f"  3. Ensure the SD card is mounted on the device")
+    print(f"  4. The firmware will automatically load GIFs from test.bin")
     print()
     
     return True
@@ -559,20 +600,19 @@ def main():
         print("  output_test.bin Path where test.bin will be written")
         print("  --no-crop       Skip the crop/resize step (only pack existing GIFs)")
         print()
-        print(f"Expected GIF files ({len(EXPECTED_GIFS)} total, all required):")
-        for name in EXPECTED_GIFS:
-            if name == STARTUP_GIF_NAME:
-                print(f"  - {name}  (resized to {STARTUP_RESIZED_NAME}; original preserved)")
-            else:
-                print(f"  - {name}")
+        print(f"Packed GIF files ({len(PACKED_GIFS)} total):")
+        for name in PACKED_GIFS:
+            print(f"  - {name}")
+        print("Root output GIF:")
+        print(f"  - {STARTUP_GIF_NAME}  ({STARTUP_RESIZED_NAME} is generated and written to root)")
         print()
         print("Examples:")
         print("  python crop_and_pack_gifs.py gif_folder/ test.bin")
         print("  python crop_and_pack_gifs.py gif_folder/ test.bin --no-crop")
         sys.exit(1)
     
-    gif_folder = args[0]
-    output_path = args[1]
+    gif_folder = Path(args[0])
+    output_path = str(args[1])
     
     # Step 1: Crop and resize GIFs (unless --no-crop is specified)
     if not skip_crop:
@@ -587,8 +627,14 @@ def main():
     
     # Step 2: Pack GIFs into test.bin
     print("=" * 60)
-    print("Step 2: Packing GIFs into test.bin")
+    print("Step 2: Preparing startup.gif asset + packing test.bin")
     print("=" * 60)
+    if not _create_root_startup_asset(gif_folder, output_path):
+        print("Warning: Startup root asset preparation failed.")
+        sys.exit(1)
+    print()
+    print("Packing test.bin...")
+    print()
     if not create_test_bin(gif_folder, output_path):
         sys.exit(1)
 
