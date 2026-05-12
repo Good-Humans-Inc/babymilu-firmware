@@ -3,7 +3,8 @@
 
 Usage:
   python3 upload_to_all_folders.py --source /absolute/path/to/startup.wav
-  python3 upload_to_all_folders.py --source ./startup.wav --name startup.wav --bucket milu-public --prefix device_bin --dry-run
+  python3 upload_to_all_folders.py --source ./startup.gif --bucket milu-public --prefix device_bin --dry-run
+  python3 upload_to_all_folders.py --source ./custom.bin --name startup.bin --dry-run
   python3 upload_to_all_folders.py --source ./startup.wav --overwrite
 
 Requirements:
@@ -108,7 +109,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--bucket", default="milu-public", help="GCS bucket name")
     p.add_argument("--prefix", default="device_bin", help="Top-level prefix to scan")
     p.add_argument("--source", required=True, help="Local file to upload")
-    p.add_argument("--name", default="startup.wav", help="File name under each folder")
+    p.add_argument(
+        "--name",
+        help="File name under each folder; defaults to the source file name",
+    )
     p.add_argument("--overwrite", action="store_true", help="Overwrite if already exists")
     p.add_argument("--dry-run", action="store_true", help="Show what would be uploaded")
     return p.parse_args()
@@ -119,6 +123,10 @@ def main() -> None:
 
     if not os.path.isfile(args.source):
         raise SystemExit(f"source file not found: {args.source}")
+
+    target_name = args.name or os.path.basename(args.source)
+    if not target_name:
+        raise SystemExit("could not determine target file name; pass --name explicitly")
 
     with open(args.source, "rb") as f:
         file_bytes = f.read()
@@ -142,7 +150,7 @@ def main() -> None:
     uploaded = skipped = failed = 0
 
     for folder in folders:
-        target = f"{folder}{args.name}" if folder.endswith("/") else f"{folder}/{args.name}"
+        target = f"{folder}{target_name}" if folder.endswith("/") else f"{folder}/{target_name}"
 
         if args.dry_run:
             print(f"DRY-RUN: gs://{args.bucket}/{target}")
