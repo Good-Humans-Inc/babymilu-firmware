@@ -13,6 +13,7 @@
 #include "sd_card_startup.h"
 #include "power_save_timer.h"
 #include "system_info.h"
+#include "font_awesome_symbols.h"
 
 #include <wifi_station.h>
 #include <ssid_manager.h>
@@ -190,6 +191,16 @@ static void ApplyFirestoreWifiRanking(const std::string& response) {
     if (!reordered.empty()) {
         ESP_LOGI(TAG, "[FIRESTORE] Highest priority WiFi is now: %s", reordered.front().ssid.c_str());
     }
+}
+
+static std::string GetWifiStatusForErrLog() {
+    auto& wifi_station = WifiStation::GetInstance();
+    if (!wifi_station.IsConnected()) {
+        return "NA";
+    }
+
+    std::string ssid = wifi_station.GetSsid();
+    return ssid.empty() ? "NA" : ssid;
 }
 
 static void FetchFirestoreDeviceDocumentAndApplyRanking() {
@@ -806,13 +817,31 @@ private:
             return;
         }
         InitializeVolumeMessageTimer();
-        int level = 0;
-        bool charging = false, discharging = false;
         std::string message;
         auto& wifi_station = WifiStation::GetInstance();
-        if (GetBatteryLevel(level, charging, discharging)) {
-            message = "battery: " + std::to_string(level) + "%";
-            if (charging) message += " chrg";
+        if (charge_ != nullptr && charge_->IsAvailable()) {
+            uint16_t voltage_mv = charge_->GetVoltage();
+            int16_t current_ma = charge_->GetCurrent();
+            if (voltage_mv > 0) {
+                uint16_t display_mv = GetCompensatedDisplayVoltageMv(voltage_mv, current_ma);
+                int display_level = GetDisplayBatteryPercent(display_mv);
+                const bool charging = current_ma > 50;
+                const char* battery_icon = GetDisplayBatteryIcon(display_level);
+                lv_color_t battery_color = GetDisplayBatteryColor();
+                const char* battery_state = "";
+                if (charging) {
+                    battery_state = "charging";
+                } else if (current_ma < -50) {
+                    battery_state = "discharging";
+                }
+                std::string network = wifi_station.IsConnected() ? wifi_station.GetSsid() : "na";
+                display_->CreateBatteryOverlayMessage(battery_icon, battery_color, battery_state, network.c_str());
+                esp_timer_stop(volume_message_timer_);
+                ESP_ERROR_CHECK(esp_timer_start_once(volume_message_timer_, 2000 * 1000));
+                return;
+            } else {
+                message = "battery: N/A";
+            }
         } else {
             message = "battery: N/A";
         }
@@ -825,6 +854,89 @@ private:
         display_->CreateOverlayMessage(message.c_str());
         esp_timer_stop(volume_message_timer_);
         ESP_ERROR_CHECK(esp_timer_start_once(volume_message_timer_, 2000 * 1000));
+    }
+
+    static uint16_t GetCompensatedDisplayVoltageMv(uint16_t voltage_mv, int16_t current_ma) {
+        // Cancel the charger lift / load sag observed around plug-in/out.
+        // 0.36 ohm is represented as 0.36 mV per mA with integer math.
+        int correction_mv = (static_cast<int>(current_ma) * 36) / 100;
+        if (correction_mv > 120) {
+            correction_mv = 120;
+        } else if (correction_mv < -120) {
+            correction_mv = -120;
+        }
+
+        int compensated_mv = static_cast<int>(voltage_mv) - correction_mv;
+        if (compensated_mv < 0) {
+            compensated_mv = 0;
+        } else if (compensated_mv > 5000) {
+            compensated_mv = 5000;
+        }
+        return static_cast<uint16_t>(compensated_mv);
+    }
+
+    static int GetDisplayBatteryPercent(uint16_t display_mv) {
+        struct BatteryPoint {
+            uint16_t mv;
+            uint8_t percent;
+        };
+
+        static constexpr BatteryPoint kDisplayCurve[] = {
+            {3350, 1},
+            {3400, 3},
+            {3450, 6},
+            {3500, 10},
+            {3550, 16},
+            {3600, 23},
+            {3650, 31},
+            {3700, 40},
+            {3750, 50},
+            {3800, 60},
+            {3850, 69},
+            {3900, 77},
+            {3950, 84},
+            {4000, 90},
+            {4040, 94},
+            {4070, 96},
+            {4100, 99},
+            {4160, 100},
+        };
+
+        if (display_mv < kDisplayCurve[0].mv) {
+            return 0;
+        }
+        const size_t last = sizeof(kDisplayCurve) / sizeof(kDisplayCurve[0]) - 1;
+        if (display_mv >= kDisplayCurve[last].mv) {
+            return 100;
+        }
+
+        for (size_t i = 0; i < last; ++i) {
+            const BatteryPoint& low = kDisplayCurve[i];
+            const BatteryPoint& high = kDisplayCurve[i + 1];
+            if (display_mv >= low.mv && display_mv < high.mv) {
+                return low.percent +
+                    ((display_mv - low.mv) * (high.percent - low.percent)) /
+                    (high.mv - low.mv);
+            }
+        }
+
+        return 100;
+    }
+
+    static const char* GetDisplayBatteryIcon(int display_level) {
+        const char* levels[] = {
+            FONT_AWESOME_BATTERY_EMPTY,
+            FONT_AWESOME_BATTERY_1,
+            FONT_AWESOME_BATTERY_2,
+            FONT_AWESOME_BATTERY_3,
+            FONT_AWESOME_BATTERY_FULL,
+            FONT_AWESOME_BATTERY_FULL,
+        };
+        return levels[std::clamp(display_level, 0, 100) / 20];
+    }
+
+    static lv_color_t GetDisplayBatteryColor() {
+        return lv_color_hex(0x3DDC84);
     }
 
     void InitializeI2c() {
@@ -1919,8 +2031,11 @@ private:
                     if (log_counter >= 6) {
                         log_counter = 0;
                         // Use ESP_LOGE so it goes through error logging system to /sdcard/err.txt
-                        ESP_LOGE(TAG, "[BATTERY] %d%%, %s", 
-                                battery_level, charging ? "charging" : (discharging ? "discharging" : "idle"));
+                        std::string wifi_status = GetWifiStatusForErrLog();
+                        ESP_LOGE(TAG, "[BATTERY] %d%%, %s, wifi: %s",
+                                battery_level,
+                                charging ? "charging" : (discharging ? "discharging" : "idle"),
+                                wifi_status.c_str());
                     }
                 }
 
@@ -2084,11 +2199,17 @@ public:
         // Log as E so the SD error-log hook captures battery telemetry in err.txt.
         static int64_t last_log_time = 0;
         int64_t current_time = esp_timer_get_time() / 1000; // Convert to milliseconds
-        const int64_t LOG_INTERVAL_MS = 15000; // 15 seconds
+        const int64_t LOG_INTERVAL_MS = 30000; // 30 seconds
         
         if (current_time - last_log_time >= LOG_INTERVAL_MS) {
-            ESP_LOGE(TAG, "[BATTERY] Voltage: %d mV, Current: %d mA, Level: %d%%, Charging: %s, Discharging: %s",
-                     voltage_mv, current_ma, level, charging ? "yes" : "no", discharging ? "yes" : "no");
+            std::string wifi_status = GetWifiStatusForErrLog();
+            ESP_LOGE(TAG, "[BATTERY] Voltage: %d mV, Current: %d mA, Level: %d%%, Charging: %s, Discharging: %s, wifi: %s",
+                     voltage_mv,
+                     current_ma,
+                     level,
+                     charging ? "yes" : "no",
+                     discharging ? "yes" : "no",
+                     wifi_status.c_str());
             last_log_time = current_time;
         }
         
