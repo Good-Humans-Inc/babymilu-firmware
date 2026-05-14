@@ -41,8 +41,15 @@
 #include <arpa/inet.h>
 #include <cstdio>
 #include <unistd.h>
+#include <algorithm>
+#include <esp_heap_caps.h>
+#include <atomic>
 
 #define TAG "Application"
+
+namespace {
+std::atomic<bool> g_startup_wav_playing{false};
+}
 
 #ifndef DEFAULT_MQTT_ENDPOINT
 #define DEFAULT_MQTT_ENDPOINT ""
@@ -159,36 +166,66 @@ static bool PlayWavFromUrl(const std::string &url, float gain)
     return true;
 }
 
-static uint16_t ReadUint16LE(FILE *file, bool &ok)
+struct MemoryReader {
+    const uint8_t* data = nullptr;
+    size_t size = 0;
+    size_t offset = 0;
+
+    bool Read(void* dest, size_t length) {
+        if (length > Remaining()) {
+            return false;
+        }
+        memcpy(dest, data + offset, length);
+        offset += length;
+        return true;
+    }
+
+    bool Skip(size_t length) {
+        if (length > Remaining()) {
+            return false;
+        }
+        offset += length;
+        return true;
+    }
+
+    const uint8_t* Current() const {
+        return data + offset;
+    }
+
+    size_t Remaining() const {
+        return size - offset;
+    }
+};
+
+static bool ReadUint16LE(MemoryReader& reader, uint16_t& value)
 {
     uint8_t bytes[2];
-    if (fread(bytes, 1, sizeof(bytes), file) != sizeof(bytes)) {
-        ok = false;
-        return 0;
-    }
-    return static_cast<uint16_t>(bytes[0] | (bytes[1] << 8));
-}
-
-static uint32_t ReadUint32LE(FILE *file, bool &ok)
-{
-    uint8_t bytes[4];
-    if (fread(bytes, 1, sizeof(bytes), file) != sizeof(bytes)) {
-        ok = false;
-        return 0;
-    }
-    return static_cast<uint32_t>(bytes[0] | (bytes[1] << 8) |
-                                (bytes[2] << 16) | (bytes[3] << 24));
-}
-
-// Play a local WAV file from SD card during startup.
-// Expects PCM RIFF/WAVE, 16-bit PCM, and channels that can be mixed to mono.
-static bool PlayWavFromSdCard(const std::string& path, float gain) {
-    auto &board = Board::GetInstance();
-    auto codec = board.GetAudioCodec();
-    if (!codec) {
-        ESP_LOGE(TAG, "Audio codec not available");
+    if (!reader.Read(bytes, sizeof(bytes))) {
         return false;
     }
+    value = static_cast<uint16_t>(bytes[0] | (bytes[1] << 8));
+    return true;
+}
+
+static bool ReadUint32LE(MemoryReader& reader, uint32_t& value)
+{
+    uint8_t bytes[4];
+    if (!reader.Read(bytes, sizeof(bytes))) {
+        return false;
+    }
+    value = static_cast<uint32_t>(bytes[0] | (bytes[1] << 8) |
+                                  (bytes[2] << 16) | (bytes[3] << 24));
+    return true;
+}
+
+static bool ReadFileToStartupBuffer(const std::string& path, uint8_t** out_data, size_t* out_size)
+{
+    if (out_data == nullptr || out_size == nullptr) {
+        return false;
+    }
+    *out_data = nullptr;
+    *out_size = 0;
+
     constexpr TickType_t WaitPerPoll = pdMS_TO_TICKS(100);
     constexpr int MaxPolls = 30;
     for (int i = 0; i < MaxPolls; ++i) {
@@ -208,18 +245,71 @@ static bool PlayWavFromSdCard(const std::string& path, float gain) {
         return false;
     }
 
-    bool ok = true;
-    char tag[4];
-    if (fread(tag, 1, sizeof(tag), file) != sizeof(tag) || memcmp(tag, "RIFF", sizeof(tag)) != 0) {
-        ESP_LOGE(TAG, "startup.wav invalid header: missing RIFF");
+    if (fseek(file, 0, SEEK_END) != 0) {
+        ESP_LOGW(TAG, "Failed to seek startup WAV: %s", path.c_str());
         fclose(file);
         return false;
     }
-    (void)ReadUint32LE(file, ok); // total_size (not needed)
-    if (!ok || fread(tag, 1, sizeof(tag), file) != sizeof(tag) ||
-        memcmp(tag, "WAVE", sizeof(tag)) != 0) {
-        ESP_LOGE(TAG, "startup.wav invalid header: missing WAVE");
+    long file_size = ftell(file);
+    if (file_size <= 0) {
+        ESP_LOGW(TAG, "Invalid startup WAV size %ld: %s", file_size, path.c_str());
         fclose(file);
+        return false;
+    }
+    rewind(file);
+
+    uint8_t* data = static_cast<uint8_t*>(
+        heap_caps_malloc(static_cast<size_t>(file_size), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (data == nullptr) {
+        data = static_cast<uint8_t*>(
+            heap_caps_malloc(static_cast<size_t>(file_size), MALLOC_CAP_8BIT));
+    }
+    if (data == nullptr) {
+        ESP_LOGW(TAG, "Failed to allocate %ld bytes for startup WAV", file_size);
+        fclose(file);
+        return false;
+    }
+
+    size_t bytes_read = fread(data, 1, static_cast<size_t>(file_size), file);
+    fclose(file);
+    if (bytes_read != static_cast<size_t>(file_size)) {
+        ESP_LOGW(TAG, "Failed to read full startup WAV: got %u of %ld bytes",
+                 static_cast<unsigned>(bytes_read), file_size);
+        free(data);
+        return false;
+    }
+
+    *out_data = data;
+    *out_size = bytes_read;
+    ESP_LOGI(TAG, "Preloaded startup WAV into memory: %s (%u bytes)",
+             path.c_str(), static_cast<unsigned>(bytes_read));
+    return true;
+}
+
+static bool PlayWavFromMemory(const std::string& label, const uint8_t* wav_data, size_t wav_size, float gain)
+{
+    auto &board = Board::GetInstance();
+    auto codec = board.GetAudioCodec();
+    if (!codec) {
+        ESP_LOGE(TAG, "Audio codec not available");
+        return false;
+    }
+    if (wav_data == nullptr || wav_size == 0) {
+        ESP_LOGW(TAG, "Startup WAV memory buffer is empty");
+        return false;
+    }
+
+    MemoryReader reader{wav_data, wav_size, 0};
+    char tag[4];
+    if (!reader.Read(tag, sizeof(tag)) || memcmp(tag, "RIFF", sizeof(tag)) != 0) {
+        ESP_LOGE(TAG, "startup.wav invalid header: missing RIFF");
+        return false;
+    }
+    uint32_t total_size = 0;
+    (void)ReadUint32LE(reader, total_size);
+    (void)total_size;
+    if (!reader.Read(tag, sizeof(tag)) || memcmp(tag, "WAVE", sizeof(tag)) != 0) {
+        ESP_LOGE(TAG, "startup.wav invalid header: missing WAVE");
         return false;
     }
 
@@ -229,37 +319,53 @@ static bool PlayWavFromSdCard(const std::string& path, float gain) {
     uint16_t bits_per_sample = 0;
     bool found_fmt = false;
     bool found_data = false;
-    uint32_t data_size = 0;
+    const uint8_t* pcm_data = nullptr;
+    size_t pcm_size = 0;
 
-    while (true) {
-        if (fread(tag, 1, sizeof(tag), file) != sizeof(tag)) {
+    while (reader.Remaining() >= 8) {
+        if (!reader.Read(tag, sizeof(tag))) {
             break;
         }
-        uint32_t chunk_size = ReadUint32LE(file, ok);
-        if (!ok) {
+        uint32_t chunk_size = 0;
+        if (!ReadUint32LE(reader, chunk_size)) {
             break;
         }
+        if (chunk_size > reader.Remaining()) {
+            ESP_LOGE(TAG, "startup.wav invalid chunk size");
+            return false;
+        }
+
         if (memcmp(tag, "fmt ", sizeof(tag)) == 0) {
-            audio_format = ReadUint16LE(file, ok);
-            channels = ReadUint16LE(file, ok);
-            sample_rate = ReadUint32LE(file, ok);
-            (void)ReadUint32LE(file, ok); // byte_rate
-            (void)ReadUint16LE(file, ok); // block_align
-            bits_per_sample = ReadUint16LE(file, ok);
+            if (chunk_size < 16) {
+                ESP_LOGE(TAG, "startup.wav fmt chunk too small");
+                return false;
+            }
+            size_t chunk_start = reader.offset;
+            if (!ReadUint16LE(reader, audio_format) ||
+                !ReadUint16LE(reader, channels) ||
+                !ReadUint32LE(reader, sample_rate)) {
+                return false;
+            }
+            uint32_t byte_rate = 0;
+            uint16_t block_align = 0;
+            (void)ReadUint32LE(reader, byte_rate);
+            (void)ReadUint16LE(reader, block_align);
+            (void)byte_rate;
+            (void)block_align;
+            if (!ReadUint16LE(reader, bits_per_sample)) {
+                return false;
+            }
 
-            if (!ok || audio_format != 1) {
+            if (audio_format != 1) {
                 ESP_LOGE(TAG, "startup.wav must be PCM format");
-                fclose(file);
                 return false;
             }
             if (bits_per_sample != 16) {
                 ESP_LOGE(TAG, "startup.wav must be 16-bit PCM");
-                fclose(file);
                 return false;
             }
             if (channels == 0 || channels > 2) {
                 ESP_LOGE(TAG, "startup.wav supports 1 or 2 channels only");
-                fclose(file);
                 return false;
             }
             if (sample_rate != static_cast<uint32_t>(codec->output_sample_rate())) {
@@ -267,105 +373,116 @@ static bool PlayWavFromSdCard(const std::string& path, float gain) {
                          sample_rate, codec->output_sample_rate());
             }
             found_fmt = true;
-            if (chunk_size > 16) {
-                if (fseek(file, static_cast<long>(chunk_size - 16), SEEK_CUR) != 0) {
-                    fclose(file);
-                    return false;
-                }
-            }
-        } else if (memcmp(tag, "data", sizeof(tag)) == 0) {
-            data_size = chunk_size;
-            found_data = true;
-            break;
-        } else {
-            if (fseek(file, static_cast<long>(chunk_size), SEEK_CUR) != 0) {
-                fclose(file);
+
+            size_t consumed = reader.offset - chunk_start;
+            if (chunk_size > consumed && !reader.Skip(chunk_size - consumed)) {
                 return false;
             }
+        } else if (memcmp(tag, "data", sizeof(tag)) == 0) {
+            pcm_data = reader.Current();
+            pcm_size = chunk_size;
+            found_data = true;
+            break;
+        } else if (!reader.Skip(chunk_size)) {
+            return false;
         }
-        if (chunk_size & 1) {
-            if (fseek(file, 1, SEEK_CUR) != 0) {
-                break;
-            }
+
+        if ((chunk_size & 1) != 0 && !reader.Skip(1)) {
+            return false;
         }
     }
 
-    if (!found_fmt || !found_data || data_size == 0) {
+    if (!found_fmt || !found_data || pcm_data == nullptr || pcm_size == 0) {
         ESP_LOGE(TAG, "startup.wav missing required fmt/data chunks");
-        fclose(file);
         return false;
     }
 
     codec->EnableOutput(true);
     gain = (gain <= 0.0f) ? 1.0f : gain;
 
-    constexpr size_t kReadBufferSize = 2048;
-    std::vector<uint8_t> read_buf(kReadBufferSize);
+    const size_t frame_size = static_cast<size_t>(channels) * sizeof(int16_t);
+    const size_t frame_count = pcm_size / frame_size;
     std::vector<int16_t> samples;
-    samples.reserve(2048);
-    uint32_t frame_size = static_cast<uint32_t>(channels) * sizeof(int16_t);
-    uint32_t remaining = data_size;
+    samples.reserve(256);
     uint64_t emitted_samples = 0;
-    bool decode_ok = false;
     constexpr uint32_t kTailMarginMs = 60;
 
-    while (remaining > 0) {
-        size_t request = sizeof(read_buf);
-        if (remaining < request) {
-            request = remaining;
+    for (size_t frame = 0; frame < frame_count; ++frame) {
+        const size_t frame_offset = frame * frame_size;
+        int32_t sample_sum = 0;
+        for (uint16_t ch = 0; ch < channels; ++ch) {
+            const size_t sample_offset = frame_offset + ch * sizeof(int16_t);
+            int16_t sample = static_cast<int16_t>(
+                pcm_data[sample_offset] | (pcm_data[sample_offset + 1] << 8));
+            sample_sum += sample;
         }
-        size_t got = fread(read_buf.data(), 1, request, file);
-        if (got == 0) {
-            break;
+        sample_sum /= channels;
+        int32_t scaled = static_cast<int32_t>(sample_sum * gain);
+        if (scaled > 32767) {
+            scaled = 32767;
+        } else if (scaled < -32768) {
+            scaled = -32768;
         }
-        remaining -= got;
-
-        size_t offset = 0;
-        while (offset + frame_size <= got) {
-            int32_t sample_sum = 0;
-            for (uint16_t ch = 0; ch < channels; ++ch) {
-                size_t sample_offset = offset + ch * sizeof(int16_t);
-                int16_t s = static_cast<int16_t>(read_buf[sample_offset] |
-                                                (read_buf[sample_offset + 1] << 8));
-                sample_sum += s;
-            }
-            sample_sum /= channels;
-            int32_t scaled = static_cast<int32_t>(sample_sum * gain);
-            if (scaled > 32767) {
-                scaled = 32767;
-            } else if (scaled < -32768) {
-                scaled = -32768;
-            }
-            samples.push_back(static_cast<int16_t>(scaled));
-            offset += frame_size;
-            ++emitted_samples;
-            if (samples.size() >= 256) {
-                codec->OutputData(samples);
-                samples.clear();
-            }
+        samples.push_back(static_cast<int16_t>(scaled));
+        ++emitted_samples;
+        if (samples.size() >= 256) {
+            codec->OutputData(samples);
+            samples.clear();
         }
-        decode_ok = true;
     }
 
     if (!samples.empty()) {
         codec->OutputData(samples);
     }
-    fclose(file);
-    if (decode_ok && emitted_samples > 0) {
-        const uint32_t output_sample_rate = static_cast<uint32_t>(codec->output_sample_rate());
-        const uint32_t playback_ms = static_cast<uint32_t>(
-            (emitted_samples * 1000ULL) / output_sample_rate);
-        vTaskDelay(pdMS_TO_TICKS(playback_ms + kTailMarginMs));
-    }
 
-    if (!decode_ok || emitted_samples == 0) {
+    if (emitted_samples == 0) {
         ESP_LOGW(TAG, "No PCM frames emitted from startup.wav");
         return false;
     }
 
-    ESP_LOGI(TAG, "Played %llu samples from %s", emitted_samples, path.c_str());
+    vTaskDelay(pdMS_TO_TICKS(kTailMarginMs));
+
+    ESP_LOGI(TAG, "Played %llu samples from %s", emitted_samples, label.c_str());
     return true;
 }
+
+static bool PlayWavFromBufferedSdCard(const std::string& path, float gain)
+{
+    uint8_t* wav_data = nullptr;
+    size_t wav_size = 0;
+    if (!ReadFileToStartupBuffer(path, &wav_data, &wav_size)) {
+        return false;
+    }
+
+    animation_block_startup_load(false);
+    ESP_LOGI(TAG, "Startup WAV is memory-backed; released full animation loading");
+    bool ok = PlayWavFromMemory(path, wav_data, wav_size, gain);
+    free(wav_data);
+    return ok;
+}
+
+#ifdef CONFIG_BOARD_TYPE_ECHOEAR
+static void StartupWavTask(void* arg)
+{
+    const char* path = static_cast<const char*>(arg);
+    if (path == nullptr) {
+        animation_block_startup_load(false);
+        vTaskDelete(NULL);
+        return;
+    }
+
+    g_startup_wav_playing.store(true, std::memory_order_release);
+    bool played = PlayWavFromBufferedSdCard(path, 1.0f);
+    if (!played) {
+        ESP_LOGW(TAG, "startup.wav playback skipped or failed");
+        animation_block_startup_load(false);
+    } else {
+        ESP_LOGI(TAG, "startup.wav playback finished");
+    }
+    g_startup_wav_playing.store(false, std::memory_order_release);
+    vTaskDelete(NULL);
+}
+#endif
 
 static const char *const STATE_STRINGS[] = {
     "unknown",
@@ -924,12 +1041,18 @@ void Application::Start()
 
 #ifdef CONFIG_BOARD_TYPE_ECHOEAR
     animation_block_startup_load(true);
-    if (!PlayWavFromSdCard("/sdcard/startup.wav", 1.0f)) {
-        ESP_LOGW(TAG, "startup.wav playback skipped or failed");
-    } else {
-        ESP_LOGI(TAG, "startup.wav playback finished");
+    BaseType_t startup_wav_task = xTaskCreatePinnedToCore(
+        StartupWavTask,
+        "startup_wav",
+        6144,
+        const_cast<char*>("/sdcard/startup.wav"),
+        5,
+        nullptr,
+        1);
+    if (startup_wav_task != pdPASS) {
+        ESP_LOGW(TAG, "Failed to start startup_wav task");
+        animation_block_startup_load(false);
     }
-    animation_block_startup_load(false);
 #endif
 
 #if CONFIG_USE_AUDIO_PROCESSOR
@@ -1739,6 +1862,11 @@ void Application::AudioLoop()
 
 void Application::OnAudioOutput()
 {
+    if (g_startup_wav_playing.load(std::memory_order_acquire))
+    {
+        return;
+    }
+
     if (busy_decoding_audio_)
     {
         return;
