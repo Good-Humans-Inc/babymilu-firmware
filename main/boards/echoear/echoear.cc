@@ -203,6 +203,8 @@ static std::string GetWifiStatusForErrLog() {
     return ssid.empty() ? "NA" : ssid;
 }
 
+static constexpr int64_t kBatteryLogIntervalMs = 30000;
+
 static void FetchFirestoreDeviceDocumentAndApplyRanking() {
     std::string mac_address = SystemInfo::GetMacAddress();
     std::string firestore_url =
@@ -1972,7 +1974,7 @@ private:
         xTaskCreate([](void* arg) {
             EchoEar* board = static_cast<EchoEar*>(arg);
             bool was_always_powersaving = false;
-            int log_counter = 0;  // Counter for 5-minute battery logging (60 iterations * 5 seconds = 5 minutes)
+            int64_t last_summary_log_time = 0;
             
             while (true) {
                 int battery_level = 0;
@@ -2026,16 +2028,19 @@ private:
                     
                     was_always_powersaving = always_powersaving;
 
-                    // Log battery percentage every 30 seconds (6 iterations * 5 seconds)
-                    log_counter++;
-                    if (log_counter >= 6) {
-                        log_counter = 0;
+                    int64_t current_time = esp_timer_get_time() / 1000;
+                    if (current_time - last_summary_log_time >= kBatteryLogIntervalMs) {
                         // Use ESP_LOGE so it goes through error logging system to /sdcard/err.txt
                         std::string wifi_status = GetWifiStatusForErrLog();
-                        ESP_LOGE(TAG, "[BATTERY] %d%%, %s, wifi: %s",
+                        int brightness = board->GetBacklight()->brightness();
+                        int volume = board->GetAudioCodec()->output_volume();
+                        ESP_LOGE(TAG, "[BATTERY] %d%%, %s, wifi: %s, brightness: %d%%, volume: %d%%",
                                 battery_level,
                                 charging ? "charging" : (discharging ? "discharging" : "idle"),
-                                wifi_status.c_str());
+                                wifi_status.c_str(),
+                                brightness,
+                                volume);
+                        last_summary_log_time = current_time;
                     }
                 }
 
@@ -2199,9 +2204,8 @@ public:
         // Log as E so the SD error-log hook captures battery telemetry in err.txt.
         static int64_t last_log_time = 0;
         int64_t current_time = esp_timer_get_time() / 1000; // Convert to milliseconds
-        const int64_t LOG_INTERVAL_MS = 30000; // 30 seconds
         
-        if (current_time - last_log_time >= LOG_INTERVAL_MS) {
+        if (current_time - last_log_time >= kBatteryLogIntervalMs) {
             std::string wifi_status = GetWifiStatusForErrLog();
             ESP_LOGE(TAG, "[BATTERY] Voltage: %d mV, Current: %d mA, Level: %d%%, Charging: %s, Discharging: %s, wifi: %s",
                      voltage_mv,
