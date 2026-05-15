@@ -146,6 +146,7 @@ private:
     void OnAudioInput();
     void OnAudioOutput();
     bool ReadAudio(std::vector<int16_t>& data, int sample_rate, int samples);
+    bool PlayOpusFromUrl(const std::string& url, int sample_rate, int frame_duration);
     void ResetDecoder();
     void SetDecodeSampleRate(int sample_rate, int frame_duration);
     void CheckNewVersion();
