@@ -1,86 +1,43 @@
-# Committing Managed Components to Git
+# Managed Components Policy
 
-## Why?
-- Ensures all team members have the exact same component versions
-- Avoids Windows-specific component manager download issues
-- Faster builds (no need to download components)
-- More reliable builds across different environments
+Status: historical note replaced by current policy.
 
-## Steps to Commit
+## Current Policy
 
-### 1. Remove from .gitignore (Already Done)
-✅ Updated `.gitignore` to allow `managed_components/` and `dependencies.lock`
+Do not commit the full `managed_components/` tree. ESP-IDF Component Manager is
+expected to download registry components during `idf.py reconfigure` or
+`idf.py build`.
 
-### 2. Add and Commit Files
+The exception is the local custom `78__esp-wifi-connect` patch set:
 
-```bash
-# Stage managed_components directory
-git add managed_components/
+- `managed_components/78__esp-wifi-connect/wifi_station.cc`
+- `managed_components/78__esp-wifi-connect/include/wifi_station.h`
 
-# Stage dependencies.lock (ensures version consistency)
-git add dependencies.lock
+These paths are explicitly unignored in `.gitignore` because they contain local
+behavior used by the firmware.
 
-# Stage the updated .gitignore
-git add .gitignore
+## Why The Old Plan Is Obsolete
 
-# Stage the CMakeLists.txt fix
-git add main/CMakeLists.txt
+This file previously proposed committing all managed components to Git to avoid
+Windows download/hash issues. That is no longer the desired repository shape.
+Committing all components would increase repository size and make component
+updates harder.
 
-# Commit everything
-git commit -m "Add managed_components to git and fix opus dependency
+## Recovery Commands
 
-- Remove managed_components/ from .gitignore for team consistency
-- Remove dependencies.lock from .gitignore for version consistency  
-- Add 78__esp-opus-encoder to main component REQUIRES
-- This ensures all team members have the same components"
-```
+If a build has incomplete or stale managed components:
 
-### 3. Push to Repository
-
-```bash
-git push
-```
-
-### 4. For Your Coworker (After You Push)
-
-She should:
-```bash
-# Pull the latest changes
-git pull
-
-# Verify managed_components exists
-ls managed_components/78__esp-opus/include/opus.h
-
-# Clean and rebuild
-idf.py fullclean
+```powershell
+Remove-Item -Recurse -Force managed_components -ErrorAction SilentlyContinue
+idf.py reconfigure
 idf.py build
 ```
 
-## Important Notes
+Git will preserve the explicitly tracked `78__esp-wifi-connect` files. If they
+are missing after cleanup, restore them from Git before rebuilding.
 
-⚠️ **Repository Size**: Committing managed_components will increase your repo size significantly (likely 50-200MB+). This is a trade-off for reliability.
+## Related Docs
 
-✅ **Benefits**:
-- No more component download issues
-- Consistent builds across all machines
-- Faster initial builds (no download step)
-- Works offline
-
-⚠️ **Considerations**:
-- When updating components, you'll need to commit the updated managed_components
-- Larger repository size
-- Goes against ESP-IDF's default practice (but many teams do this for reliability)
-
-## Alternative: Git LFS (If Repository Gets Too Large)
-
-If the repository becomes too large, consider using Git LFS for managed_components:
-
-```bash
-# Install git-lfs (if not already installed)
-# Then:
-git lfs install
-git lfs track "managed_components/**"
-git add .gitattributes
-git commit -m "Track managed_components with Git LFS"
-```
-
+- `TROUBLESHOOTING_WINDOWS.md`
+- `FIX_HASH_MISMATCH.md`
+- `FINAL_SOLUTION.md`

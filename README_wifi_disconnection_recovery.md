@@ -1,24 +1,45 @@
-# WiFi Disconnection Recovery Sequence
+# WiFi Disconnection Recovery
 
-## Setup Steps
+Current recovery behavior is handled by `WifiBoard` and BLE provisioning.
 
-1. `idf.py -p COMXX erase-flash`
+## Full Reset
 
-   Clear all your wifi configs
+```powershell
+idf.py -p COMXX erase-flash
+idf.py build flash monitor
+```
 
-2. `idf.py build&flash monitor`
+This clears NVS and forces first-boot WiFi setup.
 
-   Remember to monitor
+## Remote Reconfiguration
 
-## Recovery Sequence
+MQTT can request BLE setup:
 
-1st startup -> BLE send first ssid&pwd, device will restart 
-                                     |
-                                    \|/
-after restart and connected, turn off 1st wifi -> device will spend 5-10 secs sending attempt and restart
-                                     |
-                                    \|/
-restart and 15-sec wait for next scan, you will use BLE to send 2nd ssid&pwd -> restart
-                                     |
-                                    \|/
-finally the 2nd wifi is connected
+```json
+{"type":"wifi_reconfig_nimble"}
+```
+
+This preserves existing credentials, reboots, advertises as `BabyMilu`, and saves
+the next BLE credential as lowest priority with one-shot next-boot preference.
+
+## Remote Clear
+
+```json
+{"type":"wifi_clear_credential"}
+```
+
+This clears saved SSIDs, clears `wifi` settings, clears `websocket` settings, and
+reboots into BLE config mode.
+
+## BLE Formats
+
+```text
+ssid:<ssid>
+pwd:<password>
+```
+
+or:
+
+```text
+wifi:<ssid>:<password>
+```

@@ -1,151 +1,54 @@
 # BLE WiFi Setup Guide
 
-This guide explains how to use the BLE (Bluetooth Low Energy) WiFi configuration feature.
+EchoEar uses BLE provisioning through `WifiBoard`.
 
-## How It Works
+## Code
 
-1. **Device starts BLE server** with name "BabyMilu"
-2. **Client connects** via Bluetooth Low Energy
-3. **Client sends WiFi credentials** in specific format
-4. **Device saves credentials** and connects to WiFi
+- `main/boards/common/wifi_board.cc`
+- `main/boards/common/ble_server.c`
+- `main/protocols/mqtt_protocol.cc`
 
-## BLE Connection
+## BLE Identity
 
-### Device Name
-- **BLE Device Name**: `BabyMilu`
-- **Service UUID**: `0x180` (Generic Access)
-- **Read Characteristic**: `0xFEF4` (for status messages)
-- **Write Characteristic**: `0xDEAD` (for sending data)
+- Advertised device name: `BabyMilu`.
+- On BLE connect, firmware sends readiness text and `MAC:<device-mac>`.
 
-## Data Format
+## Credential Formats
 
-Send WiFi credentials using these formats:
+Supported formats:
 
-### Method 1: Separate SSID and Password
-```
-ssid:YOUR_WIFI_NAME
-pwd:YOUR_WIFI_PASSWORD
+```text
+ssid:<ssid>
+pwd:<password>
 ```
 
-### Method 2: Combined Format (Recommended)
-```
-wifi:YOUR_WIFI_NAME:YOUR_WIFI_PASSWORD
-```
+or:
 
-## Example Client Code (Python)
-
-```python
-import asyncio
-from bleak import BleakClient, BleakScanner
-
-async def configure_wifi():
-    # Scan for devices
-    devices = await BleakScanner.discover()
-    xiaozhi_device = None
-    
-    for device in devices:
-        if device.name == "BabyMilu":
-            xiaozhi_device = device
-            break
-    
-    if not xiaozhi_device:
-        print("Xiaozhi device not found")
-        return
-    
-    # Connect to device
-    async with BleakClient(xiaozhi_device.address) as client:
-        print(f"Connected to {xiaozhi_device.name}")
-        
-        # Read initial status
-        status = await client.read_gatt_char("0000fef4-0000-1000-8000-00805f9b34fb")
-        print(f"Status: {status.decode()}")
-        
-        # Send WiFi credentials (combined format)
-        wifi_ssid = "YOUR_WIFI_NAME"
-        wifi_password = "YOUR_WIFI_PASSWORD"
-        credentials = f"wifi:{wifi_ssid}:{wifi_password}"
-        
-        await client.write_gatt_char("0000dead-0000-1000-8000-00805f9b34fb", 
-                                   credentials.encode())
-        
-        # Read final status
-        status = await client.read_gatt_char("0000fef4-0000-1000-8000-00805f9b34fb")
-        print(f"Status: {status.decode()}")
-
-# Run the example
-asyncio.run(configure_wifi())
+```text
+wifi:<ssid>:<password>
 ```
 
-## Example Client Code (JavaScript/Node.js)
+After saving credentials, firmware restarts or restarts networking depending on
+the path used.
 
-```javascript
-const { BleakClient } = require('bleak');
+## Remote Reconfiguration
 
-async function configureWifi() {
-    const client = new BleakClient();
-    
-    try {
-        // Scan for devices
-        const devices = await client.scan();
-        const xiaozhiDevice = devices.find(d => d.name === 'BabyMilu');
-        
-        if (!xiaozhiDevice) {
-            console.log('Xiaozhi device not found');
-            return;
-        }
-        
-        // Connect to device
-        await client.connect(xiaozhiDevice.address);
-        console.log('Connected to BabyMilu');
-        
-        // Send WiFi credentials
-        const wifiSsid = 'YOUR_WIFI_NAME';
-        const wifiPassword = 'YOUR_WIFI_PASSWORD';
-        const credentials = `wifi:${wifiSsid}:${wifiPassword}`;
-        
-        await client.writeCharacteristic('0000dead-0000-1000-8000-00805f9b34fb', 
-                                       Buffer.from(credentials));
-        
-        console.log('WiFi credentials sent');
-        
-    } finally {
-        await client.disconnect();
-    }
-}
+MQTT `wifi_reconfig_nimble` enters BLE WiFi config mode without clearing
+existing credentials. The firmware sets `force_ble_cfg` and `ble_cred_low`, then
+reboots into a clean BLE setup path.
 
-configureWifi();
-```
+The next BLE credential is saved as lowest priority and marked for one-shot use
+on the next boot.
 
-## Status Messages
+## Clear And Reconfigure
 
-The device will send these status messages:
-
-- `"Ready for WiFi configuration"` - Initial state
-- `"SSID received, send password"` - After SSID is received
-- `"Password received, connecting..."` - After password is received
-- `"WiFi credentials saved, connecting..."` - After successful save
+MQTT `wifi_clear_credential` clears saved SSIDs, clears `wifi` settings, clears
+`websocket` settings, then enters BLE config mode.
 
 ## Troubleshooting
 
-### Common Issues
-
-1. **Device not found**: Ensure the device is powered on and BLE is enabled
-2. **Connection failed**: Check if another device is already connected
-3. **WiFi connection failed**: Verify the SSID and password are correct
-
-### Debug Logs
-
-Enable debug logging to see BLE communication:
-
-```
-CONFIG_LOG_DEFAULT_LEVEL_DEBUG=y
-CONFIG_LOG_MAXIMUM_LEVEL_DEBUG=y
-```
-
-## Integration Notes
-
-- BLE server starts automatically when WifiBoard is created
-- Device advertises as "BabyMilu" 
-- BLE runs alongside normal WiFi functionality
-- Credentials are saved using the existing SSID manager
-- Device will attempt to connect to WiFi after receiving credentials
+- If BLE does not appear, confirm the device rebooted into config mode.
+- If the new credential does not win immediately, check the one-shot
+  `nxt_boot_ssid` behavior.
+- If MQTT WebSocket URL reuse is surprising after a clear, confirm the
+  `websocket` settings namespace was erased.
