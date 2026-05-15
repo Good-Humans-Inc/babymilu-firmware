@@ -58,26 +58,20 @@ std::atomic<bool> g_startup_wav_playing{false};
 #define DEFAULT_MQTT_PUBLISH_TEMPLATE "xiaozhi/%s/up"
 #endif
 
-// Minimal WAV-from-HTTP player for POC: expects mono 16-bit PCM at codec sample rate
-static bool PlayWavFromUrl(const std::string &url, float gain)
+static bool PlayWavFromMemory(const std::string& label, const uint8_t* wav_data, size_t wav_size, float gain, bool require_codec_sample_rate = false);
+
+static bool DownloadUrlToBuffer(const std::string& url, const char* accept, int timeout_ms, std::vector<uint8_t>& out)
 {
     auto &board = Board::GetInstance();
-    auto codec = board.GetAudioCodec();
-    if (!codec)
-    {
-        ESP_LOGE(TAG, "Audio codec not available");
-        return false;
-    }
-
     std::unique_ptr<Http> http(board.CreateHttp());
     if (!http)
     {
         ESP_LOGE(TAG, "Failed to create HTTP client");
         return false;
     }
-    http->SetHeader("Accept", "audio/wav,application/octet-stream");
+    http->SetHeader("Accept", accept);
     http->SetHeader("Accept-Encoding", "identity");
-    http->SetTimeout(10000);
+    http->SetTimeout(timeout_ms);
 
     ESP_LOGI(TAG, "Opening URL: %s", url.c_str());
     if (!http->Open("GET", url))
@@ -93,77 +87,44 @@ static bool PlayWavFromUrl(const std::string &url, float gain)
         return false;
     }
 
-    // Naively skip 44-byte WAV header for PCM WAV
-    int to_skip = 44;
-    char hdr[64];
-    while (to_skip > 0)
-    {
-        int n = http->Read(hdr, to_skip > (int)sizeof(hdr) ? (int)sizeof(hdr) : to_skip);
-        if (n <= 0)
-        {
-            break;
-        }
-        to_skip -= n;
-    }
-
-    // Stream PCM frames -> codec
-    const size_t BUF = 1024;
-    std::unique_ptr<uint8_t[]> buf(new uint8_t[BUF]);
-    bool have_leftover = false;
-    uint8_t leftover = 0;
-    gain = (gain <= 0.0f) ? 1.0f : gain;
-    codec->EnableOutput(true);
-
+    constexpr size_t kMaxAudioUrlBytes = 4 * 1024 * 1024;
+    uint8_t chunk[4096];
+    out.clear();
     while (true)
     {
-        int n = http->Read(reinterpret_cast<char *>(buf.get()), BUF);
-        if (n <= 0)
+        int n = http->Read(reinterpret_cast<char *>(chunk), sizeof(chunk));
+        if (n < 0)
+        {
+            ESP_LOGE(TAG, "HTTP read failed");
+            http->Close();
+            return false;
+        }
+        if (n == 0)
         {
             break;
         }
-
-        size_t offset = 0;
-        std::vector<int16_t> samples;
-        samples.reserve(n / 2 + 1);
-
-        // Handle odd byte from previous chunk
-        if (have_leftover)
+        if (out.size() + static_cast<size_t>(n) > kMaxAudioUrlBytes)
         {
-            int16_t s = (int16_t)((uint16_t)buf[offset] << 8 | leftover);
-            int32_t v = (int32_t)(s * gain);
-            if (v > 32767) v = 32767; else if (v < -32768) v = -32768;
-            samples.push_back((int16_t)v);
-            offset += 1;
-            have_leftover = false;
+            ESP_LOGE(TAG, "Audio URL too large: over %u bytes", static_cast<unsigned>(kMaxAudioUrlBytes));
+            http->Close();
+            return false;
         }
-
-        // Convert little-endian 16-bit to int16_t, apply gain
-        for (; offset + 1 < (size_t)n; offset += 2)
-        {
-            int16_t s = (int16_t)((uint16_t)buf[offset + 1] << 8 | buf[offset]);
-            int32_t v = (int32_t)(s * gain);
-            if (v > 32767)
-                v = 32767;
-            else if (v < -32768)
-                v = -32768;
-            samples.push_back((int16_t)v);
-        }
-
-        // Save leftover byte if odd length
-        if (offset < (size_t)n)
-        {
-            leftover = buf[offset];
-            have_leftover = true;
-        }
-
-        if (!samples.empty())
-        {
-            codec->OutputData(samples);
-        }
+        out.insert(out.end(), chunk, chunk + n);
     }
 
     http->Close();
-    return true;
+    ESP_LOGI(TAG, "Downloaded %u bytes from %s", static_cast<unsigned>(out.size()), url.c_str());
+    return !out.empty();
+}
+
+// Buffered WAV-from-HTTP player. Parses RIFF chunks and validates PCM metadata before playback.
+static bool PlayWavFromUrl(const std::string &url, float gain)
+{
+    std::vector<uint8_t> wav_data;
+    if (!DownloadUrlToBuffer(url, "audio/wav,application/octet-stream", 30000, wav_data)) {
+        return false;
+    }
+    return PlayWavFromMemory(url, wav_data.data(), wav_data.size(), gain, true);
 }
 
 struct MemoryReader {
@@ -286,7 +247,7 @@ static bool ReadFileToStartupBuffer(const std::string& path, uint8_t** out_data,
     return true;
 }
 
-static bool PlayWavFromMemory(const std::string& label, const uint8_t* wav_data, size_t wav_size, float gain)
+static bool PlayWavFromMemory(const std::string& label, const uint8_t* wav_data, size_t wav_size, float gain, bool require_codec_sample_rate)
 {
     auto &board = Board::GetInstance();
     auto codec = board.GetAudioCodec();
@@ -302,14 +263,14 @@ static bool PlayWavFromMemory(const std::string& label, const uint8_t* wav_data,
     MemoryReader reader{wav_data, wav_size, 0};
     char tag[4];
     if (!reader.Read(tag, sizeof(tag)) || memcmp(tag, "RIFF", sizeof(tag)) != 0) {
-        ESP_LOGE(TAG, "startup.wav invalid header: missing RIFF");
+        ESP_LOGE(TAG, "%s invalid WAV header: missing RIFF", label.c_str());
         return false;
     }
     uint32_t total_size = 0;
     (void)ReadUint32LE(reader, total_size);
     (void)total_size;
     if (!reader.Read(tag, sizeof(tag)) || memcmp(tag, "WAVE", sizeof(tag)) != 0) {
-        ESP_LOGE(TAG, "startup.wav invalid header: missing WAVE");
+        ESP_LOGE(TAG, "%s invalid WAV header: missing WAVE", label.c_str());
         return false;
     }
 
@@ -331,13 +292,13 @@ static bool PlayWavFromMemory(const std::string& label, const uint8_t* wav_data,
             break;
         }
         if (chunk_size > reader.Remaining()) {
-            ESP_LOGE(TAG, "startup.wav invalid chunk size");
+            ESP_LOGE(TAG, "%s invalid WAV chunk size", label.c_str());
             return false;
         }
 
         if (memcmp(tag, "fmt ", sizeof(tag)) == 0) {
             if (chunk_size < 16) {
-                ESP_LOGE(TAG, "startup.wav fmt chunk too small");
+                ESP_LOGE(TAG, "%s WAV fmt chunk too small", label.c_str());
                 return false;
             }
             size_t chunk_start = reader.offset;
@@ -357,20 +318,23 @@ static bool PlayWavFromMemory(const std::string& label, const uint8_t* wav_data,
             }
 
             if (audio_format != 1) {
-                ESP_LOGE(TAG, "startup.wav must be PCM format");
+                ESP_LOGE(TAG, "%s WAV must be PCM format", label.c_str());
                 return false;
             }
             if (bits_per_sample != 16) {
-                ESP_LOGE(TAG, "startup.wav must be 16-bit PCM");
+                ESP_LOGE(TAG, "%s WAV must be 16-bit PCM", label.c_str());
                 return false;
             }
             if (channels == 0 || channels > 2) {
-                ESP_LOGE(TAG, "startup.wav supports 1 or 2 channels only");
+                ESP_LOGE(TAG, "%s WAV supports 1 or 2 channels only", label.c_str());
                 return false;
             }
             if (sample_rate != static_cast<uint32_t>(codec->output_sample_rate())) {
-                ESP_LOGW(TAG, "startup.wav sample rate %u does not match codec output %d",
-                         sample_rate, codec->output_sample_rate());
+                ESP_LOGW(TAG, "%s sample rate %u does not match codec output %d",
+                         label.c_str(), sample_rate, codec->output_sample_rate());
+                if (require_codec_sample_rate) {
+                    return false;
+                }
             }
             found_fmt = true;
 
@@ -393,7 +357,7 @@ static bool PlayWavFromMemory(const std::string& label, const uint8_t* wav_data,
     }
 
     if (!found_fmt || !found_data || pcm_data == nullptr || pcm_size == 0) {
-        ESP_LOGE(TAG, "startup.wav missing required fmt/data chunks");
+        ESP_LOGE(TAG, "%s WAV missing required fmt/data chunks", label.c_str());
         return false;
     }
 
@@ -436,7 +400,7 @@ static bool PlayWavFromMemory(const std::string& label, const uint8_t* wav_data,
     }
 
     if (emitted_samples == 0) {
-        ESP_LOGW(TAG, "No PCM frames emitted from startup.wav");
+        ESP_LOGW(TAG, "No PCM frames emitted from %s", label.c_str());
         return false;
     }
 
@@ -770,6 +734,96 @@ void Application::PlaySound(const std::string_view &sound)
         std::lock_guard<std::mutex> lock(mutex_);
         audio_decode_queue_.emplace_back(std::move(packet));
     }
+}
+
+bool Application::PlayOpusFromUrl(const std::string& url, int sample_rate, int frame_duration)
+{
+    auto codec = Board::GetInstance().GetAudioCodec();
+    if (!codec) {
+        ESP_LOGE(TAG, "Audio codec not available");
+        return false;
+    }
+    if (sample_rate <= 0) {
+        sample_rate = 16000;
+    }
+    if (frame_duration <= 0) {
+        frame_duration = OPUS_FRAME_DURATION_MS;
+    }
+
+    std::vector<uint8_t> p3_data;
+    if (!DownloadUrlToBuffer(url, "application/octet-stream,audio/opus,*/*", 30000, p3_data)) {
+        return false;
+    }
+
+    SetDecodeSampleRate(sample_rate, frame_duration);
+    codec->EnableOutput(true);
+
+    size_t offset = 0;
+    size_t frames = 0;
+    size_t payload_bytes = 0;
+    busy_decoding_audio_ = true;
+    while (offset < p3_data.size()) {
+        if (p3_data.size() - offset < sizeof(BinaryProtocol3)) {
+            ESP_LOGE(TAG, "Invalid p3 frame header at offset %u", static_cast<unsigned>(offset));
+            busy_decoding_audio_ = false;
+            return false;
+        }
+
+        uint8_t type = p3_data[offset];
+        uint16_t payload_size = static_cast<uint16_t>(
+            (static_cast<uint16_t>(p3_data[offset + 2]) << 8) | p3_data[offset + 3]);
+        offset += sizeof(BinaryProtocol3);
+
+        if (payload_size > p3_data.size() - offset) {
+            ESP_LOGE(TAG, "Invalid p3 payload size %u at offset %u",
+                     payload_size, static_cast<unsigned>(offset));
+            busy_decoding_audio_ = false;
+            return false;
+        }
+        if (type != 0) {
+            ESP_LOGE(TAG, "Unsupported p3 packet type %u", type);
+            busy_decoding_audio_ = false;
+            return false;
+        }
+
+        std::vector<uint8_t> payload(payload_size);
+        memcpy(payload.data(), p3_data.data() + offset, payload_size);
+        offset += payload_size;
+
+        std::vector<int16_t> pcm;
+        if (!opus_decoder_->Decode(std::move(payload), pcm)) {
+            ESP_LOGE(TAG, "Failed to decode p3 opus frame %u", static_cast<unsigned>(frames));
+            busy_decoding_audio_ = false;
+            return false;
+        }
+        if (opus_decoder_->sample_rate() != codec->output_sample_rate()) {
+            int target_size = output_resampler_.GetOutputSamples(pcm.size());
+            std::vector<int16_t> resampled(target_size);
+            output_resampler_.Process(pcm.data(), pcm.size(), resampled.data());
+            pcm = std::move(resampled);
+        }
+        if (!pcm.empty()) {
+            codec->OutputData(pcm);
+        }
+        ++frames;
+        payload_bytes += payload_size;
+        if (aborted_) {
+            ESP_LOGW(TAG, "play_opus_url aborted");
+            busy_decoding_audio_ = false;
+            return false;
+        }
+    }
+    busy_decoding_audio_ = false;
+
+    if (frames == 0) {
+        ESP_LOGW(TAG, "No Opus frames played from %s", url.c_str());
+        return false;
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(OPUS_FRAME_DURATION_MS));
+    ESP_LOGI(TAG, "Played %u p3 Opus frames (%u payload bytes) from %s",
+             static_cast<unsigned>(frames), static_cast<unsigned>(payload_bytes), url.c_str());
+    return true;
 }
 
 void Application::EnterAudioTestingMode()
@@ -1501,6 +1555,7 @@ void Application::Start()
                 // Run playback in background to avoid blocking main loop
                 Schedule([this, url_str = std::string(url->valuestring), g]() {
                     ResetDecoder();
+                    aborted_ = false;
                     if (device_state_ == kDeviceStateIdle || device_state_ == kDeviceStateListening) {
                         SetDeviceState(kDeviceStateSpeaking);
                     }
@@ -1516,6 +1571,32 @@ void Application::Start()
                 });
             } else {
                 ESP_LOGW(TAG, "play_url missing 'url' field");
+            }
+        } else if (strcmp(type->valuestring, "play_opus_url") == 0) {
+            auto url = cJSON_GetObjectItem(root, "url");
+            auto sample_rate = cJSON_GetObjectItem(root, "sample_rate");
+            auto frame_duration = cJSON_GetObjectItem(root, "frame_duration");
+            if (cJSON_IsString(url)) {
+                int sr = cJSON_IsNumber(sample_rate) ? sample_rate->valueint : 16000;
+                int fd = cJSON_IsNumber(frame_duration) ? frame_duration->valueint : OPUS_FRAME_DURATION_MS;
+                Schedule([this, url_str = std::string(url->valuestring), sr, fd]() {
+                    ResetDecoder();
+                    aborted_ = false;
+                    if (device_state_ == kDeviceStateIdle || device_state_ == kDeviceStateListening) {
+                        SetDeviceState(kDeviceStateSpeaking);
+                    }
+                    background_task_->Schedule([this, url_str, sr, fd]() {
+                        bool ok = PlayOpusFromUrl(url_str, sr, fd);
+                        Schedule([this, ok]() {
+                            if (device_state_ == kDeviceStateSpeaking) {
+                                SetDeviceState(kDeviceStateIdle);
+                            }
+                            ESP_LOGI(TAG, "PlayOpusFromUrl %s", ok ? "done" : "failed");
+                        });
+                    });
+                });
+            } else {
+                ESP_LOGW(TAG, "play_opus_url missing 'url' field");
             }
         } else if (strcmp(type->valuestring, "adjust_volume") == 0) {
             // Handle volume adjustment: accepts "volume" (number) or "message" (number as string)
