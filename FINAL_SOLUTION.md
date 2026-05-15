@@ -1,41 +1,26 @@
-# Final Solution: Let ESP-IDF Manage Components
+# ESP-IDF Component Manager Policy
 
-## What I Changed
+Current policy:
 
-1. ✅ Put `managed_components/` back in `.gitignore` - ESP-IDF will manage it
-2. ✅ Put `dependencies.lock` back in `.gitignore` - ESP-IDF will generate it
-3. ✅ Kept the CMakeLists.txt fix (`78__esp-opus-encoder` in REQUIRES) - this is still needed!
+- Do not commit the full `managed_components/` directory.
+- Do not rely on a committed `dependencies.lock`; it is currently ignored.
+- Let ESP-IDF Component Manager download registry components.
+- Keep only the intentionally tracked local `78__esp-wifi-connect` patch files.
 
-## Why This Is Better
+Tracked local component files:
 
-- ✅ No hash mismatch issues - ESP-IDF downloads components with correct hashes
-- ✅ Standard ESP-IDF practice
-- ✅ Components are always up-to-date and verified
-- ✅ `dependencies.lock` ensures version consistency (ESP-IDF generates it from `idf_component.yml`)
+- `managed_components/78__esp-wifi-connect/wifi_station.cc`
+- `managed_components/78__esp-wifi-connect/include/wifi_station.h`
 
-## For Your Coworker
-
-After you commit and push these changes, she should:
+## Clean Reconfigure
 
 ```powershell
-# Pull latest changes
-git pull
-
-# Delete any existing managed_components (if they exist)
 Remove-Item -Recurse -Force managed_components -ErrorAction SilentlyContinue
-
-# Reconfigure (ESP-IDF will download components with correct hashes)
+git restore -- managed_components/78__esp-wifi-connect/wifi_station.cc `
+              managed_components/78__esp-wifi-connect/include/wifi_station.h
 idf.py reconfigure
-
-# Build
 idf.py build
 ```
 
-## What Ensures Consistency
-
-- `main/idf_component.yml` - defines which components and versions to use
-- ESP-IDF Component Manager - downloads exact versions
-- `dependencies.lock` - auto-generated, ensures everyone gets same versions
-
-This is the ESP-IDF recommended approach and avoids all hash verification issues!
-
+If Git reports the two tracked files are already present, the restore step is a
+no-op.

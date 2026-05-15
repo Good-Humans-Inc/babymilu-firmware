@@ -1,193 +1,60 @@
-# SCF Lambda Function
+# EchoEar Firmware
 
-A Flask-based web service that manages device registrations and URL assignments for firmware updates.
+This repository is an EchoEar-only ESP-IDF firmware tree. Multi-board support has
+been removed from the build, and the only board implementation compiled by CMake
+is `main/boards/echoear`.
 
-## Overview
+## Current Build Shape
 
-This service provides a simple device registration system that assigns firmware URLs to devices in a round-robin fashion. It supports multiple actions including device registration, status checking, and system reset.
+- Target board: EchoEar.
+- Target chip: ESP32-S3.
+- Board sources: `main/boards/echoear/*.cc` plus shared support from
+  `main/boards/common`.
+- Kconfig board option: `CONFIG_BOARD_TYPE_ECHOEAR`.
+- CMake board selection: `main/CMakeLists.txt` sets `BOARD_TYPE` to `echoear`.
+- Shared docs for agents: `docs/AGENT_CONTEXT.md`.
 
-## API Endpoints
+## Useful Commands
 
-### Base URL
-```
-https://1379890832-bqi413zoc2.ap-shanghai.tencentscf.com
-```
-
-All requests are made to the root endpoint with query parameters.
-
-## Request Types
-
-### 1. Device Registration
-
-**Purpose**: Register a new device and get assigned a firmware URL.
-
-**Registration**: At this time allows at most 2 devices to register
-
-**Parameters**:
-- `device_id` (required): Unique identifier for the device
-
-**Examples**:
-
-#### First Device Registration
-```
-https://1379890832-bqi413zoc2.ap-shanghai.tencentscf.com/?device_id=XX:XX
-```
-**Response**: Returns static .bin 1
-```
-https://gitee.com/xie-hangxuan/test/raw/master/normal1.bin
+```powershell
+idf.py set-target esp32s3
+idf.py reconfigure
+idf.py build
+idf.py flash monitor
 ```
 
-#### Second Device Registration
-```
-https://1379890832-bqi413zoc2.ap-shanghai.tencentscf.com/?device_id=YY:YY
-```
-**Response**: Returns static .bin 2
-```
-https://gitee.com/xie-hangxuan/test/raw/master/temp/normal1.bin
+Optional MQTT defaults can be injected at build time:
+
+```powershell
+idf.py build -DDEFAULT_MQTT_ENDPOINT="mqtt.example.com:1883" `
+             -DDEFAULT_MQTT_PUBLISH_TEMPLATE="xiaozhi/%s/up"
 ```
 
-#### Third Device Registration (No URLs Available)
-```
-https://1379890832-bqi413zoc2.ap-shanghai.tencentscf.com/?device_id=ZZ:ZZ
-```
-**Response**: No static URLs available, return unavailable string
-```
-url unavailable
-```
+## Runtime Assets
 
-#### Empty Device ID
-```
-https://1379890832-bqi413zoc2.ap-shanghai.tencentscf.com/?device_id=
-```
-**Response**: 
-```
-No device_id provided
-```
+EchoEar uses SD-card animation assets:
 
-#### Already Registered Device
-```
-https://1379890832-bqi413zoc2.ap-shanghai.tencentscf.com/?device_id=XX:XX
-```
-**Response**: Returns the previously assigned URL for that device
+- `/sdcard/test.bin`: packed 20-GIF emotion bundle.
+- `/sdcard/startup.gif`: startup display GIF, separate from `test.bin`.
+- `/sdcard/startup.wav`: optional startup audio asset.
+- `/sdcard/err.txt`: warning/error log file uploaded on the next network-ready
+  boot, then recreated for future logs.
 
-### 2. Status Check
+Use `crop_and_pack_gifs.py` to prepare `test.bin` and the root `startup.gif`
+asset.
 
-**Purpose**: Get system status information including registered devices and URL usage.
+## Active Documentation
 
-**Parameters**:
-- `action=status`
+- `docs/AGENT_CONTEXT.md`: concise current behavior for LLM/agent work.
+- `CODEBASE_WALKTHROUGH.md`: current codebase map.
+- `docs/MQTT_WEBSOCKET_ARCHITECTURE.md`: MQTT/WebSocket architecture.
+- `docs/websocket.md`: WebSocket protocol reference.
+- `docs/ble-wifi-setup-guide.md`: BLE WiFi provisioning.
+- `MIGRATION_13_TO_20_GIFS_GUIDE.md`: current 20-GIF asset workflow.
+- `STARTUP_GIF_RENDER_FIX.md`: startup GIF display notes.
 
-**Example**:
-```
-https://1379890832-bqi413zoc2.ap-shanghai.tencentscf.com/?action=status
-```
+## Cleanup Note
 
-**Response**: Return a string of registered status
-```
-Status Report:
-Total Devices: 2
-URLs Used: 2
-URLs Available: 0
-Registered Devices: XX:XX, YY:YY
-```
-
-### 3. System Reset
-
-**Purpose**: Manually reset the lambda and you could restart registration.
-
-**Parameters**:
-- `action=reset`
-
-**Example**:
-```
-https://1379890832-bqi413zoc2.ap-shanghai.tencentscf.com/?action=reset
-```
-
-**Response**:
-```
-Registrations reset
-```
-
-## Available Firmware URLs
-
-The service cycles through the following static URLs:
-
-1. `https://gitee.com/xie-hangxuan/test/raw/master/normal1.bin`
-2. `https://gitee.com/xie-hangxuan/test/raw/master/temp/normal1.bin`
-
-**⚠️ Important Limitation**: Only 2 URLs are available. The third device registration will return "url unavailable".
-
-## Error Handling
-
-### Invalid Action
-```
-https://1379890832-bqi413zoc2.ap-shanghai.tencentscf.com/?action=invalid_action
-```
-
-**Response**:
-```
-Invalid action. Use: register, status, or reset
-```
-
-## Usage Examples
-
-### Complete Workflow
-
-1. **Register first device**:
-   ```
-   https://1379890832-bqi413zoc2.ap-shanghai.tencentscf.com/?device_id=XX:XX
-   Response: https://gitee.com/xie-hangxuan/test/raw/master/normal1.bin
-   ```
-
-2. **Register second device**:
-   ```
-   https://1379890832-bqi413zoc2.ap-shanghai.tencentscf.com/?device_id=YY:YY
-   Response: https://gitee.com/xie-hangxuan/test/raw/master/temp/normal1.bin
-   ```
-
-3. **Check status**:
-   ```
-   https://1379890832-bqi413zoc2.ap-shanghai.tencentscf.com/?action=status
-   Response: Status Report: Total Devices: 2, URLs Used: 2, URLs Available: 0, Registered Devices: XX:XX, YY:YY
-   ```
-
-4. **Try to register third device** (no URLs available - only 2 URLs exist):
-   ```
-   https://1379890832-bqi413zoc2.ap-shanghai.tencentscf.com/?device_id=ZZ:ZZ
-   Response: url unavailable
-   ```
-
-5. **Reset system**:
-   ```
-   https://1379890832-bqi413zoc2.ap-shanghai.tencentscf.com/?action=reset
-   Response: Registrations reset
-   ```
-
-6. **Register device after reset**:
-   ```
-   https://1379890832-bqi413zoc2.ap-shanghai.tencentscf.com/?device_id=AA:AA
-   Response: https://gitee.com/xie-hangxuan/test/raw/master/normal1.bin
-   ```
-
-## Server Configuration
-
-- **Host**: 0.0.0.0 (all interfaces)
-- **Port**: 9000
-- **Framework**: Flask
-
-## Running the Service
-
-```bash
-python scf_lambda.py
-```
-
-The service will be available at `http://localhost:9000/`
-
-## Notes
-
-- Device IDs are case-sensitive
-- Once a device is registered, it will always receive the same URL
-- The service maintains state in memory (not persistent across restarts)
-- URL assignment follows a round-robin pattern
-- **Maximum number of devices is limited to 2** (only 2 URLs are available)
-- The third device registration will always return "url unavailable"
+Historical board galleries, non-EchoEar board sources, and unrelated scratch docs
+have been removed or marked as archived. New documentation should describe the
+EchoEar-only build unless it is explicitly labeled as historical.

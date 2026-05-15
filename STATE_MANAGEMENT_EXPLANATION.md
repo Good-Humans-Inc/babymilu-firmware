@@ -1,275 +1,122 @@
-# Detailed State Management Explanation
+# EchoEar State Management
 
-## Key Concepts
+This page summarizes the current device-state behavior in `main/application.cc`.
+It is written for agents that need to reason about listening, speaking, remote
+wakeup, and TTS transitions.
 
-### 1. **Device State (`device_state_`)** - EXCLUSIVE States
-The device can only be in ONE state at a time. These are mutually exclusive:
+## Core concepts
 
-```cpp
-enum DeviceState {
-    kDeviceStateIdle,        // Device is idle/standby
-    kDeviceStateListening,   // Device is listening to microphone and streaming audio
-    kDeviceStateSpeaking,    // Device is playing audio (TTS) to speakers
-    kDeviceStateConnecting,  // Device is establishing connection
-    // ... other states
-};
-```
+`device_state_` is exclusive. EchoEar can be idle, listening, speaking,
+connecting, configuring WiFi, upgrading, activating, audio testing, or in fatal
+error, but it is never in two device states at once.
 
-**CRITICAL**: When `device_state_` changes, it calls `SetDeviceState()` which:
-- Stops previous state's activities
-- Starts new state's activities
-- These states **CANNOT overlap**
+`listening_mode_` is a configuration value, not a separate state:
 
-### 2. **Listening Mode (`listening_mode_`)** - Configuration Parameter
-This is NOT a state, but a **configuration** that controls HOW listening behaves:
+- `kListeningModeAutoStop`: listen until silence/server flow stops it.
+- `kListeningModeManualStop`: listen until an explicit stop/manual transition.
+- `kListeningModeRealtime`: keep capture active for realtime/AEC behavior.
 
-```cpp
-enum ListeningMode {
-    kListeningModeAutoStop,      // Stops listening automatically after silence
-    kListeningModeManualStop,    // Stops listening only when user/server stops it
-    kListeningModeRealtime       // Keeps listening even while speaking (AEC mode)
-};
-```
+Changing listening mode with `SetListeningMode(mode)` stores the mode and then
+enters `kDeviceStateListening`.
 
-**CRITICAL**: `listening_mode_` is **preserved** across state changes. It's a setting, not a state.
+## Important state effects
 
----
+### Idle
 
-## Question 1: Why Auto-Set Listening When WebSocket Starts Wasn't Really Listening?
+When entering idle:
 
-### The Problem
+- display status becomes standby
+- emotion becomes `normal`
+- audio processor stops
+- wake word detection starts
 
-When `ws_start` opens WebSocket and automatically calls `SetListeningMode()`, it triggers:
+### Listening
 
-```cpp
-// Line 1777 in OpenWebSocketConnection()
-SetListeningMode(kListeningModeManualStop);
-```
+When entering listening:
 
-Which calls:
-```cpp
-// Line 1392-1395
-void Application::SetListeningMode(ListeningMode mode) {
-    listening_mode_ = mode;  // Store the mode
-    SetDeviceState(kDeviceStateListening);  // Change device state
-}
-```
+- display status becomes listening
+- emotion becomes `listening`
+- IoT states are updated when the Xiaozhi IoT protocol is enabled
+- `listen:start` is sent only if an active protocol exists and its audio channel
+  is open
+- audio capture starts only if the audio processor is not already running
+- wake word detection stops
 
-Then `SetDeviceState(kDeviceStateListening)` executes (lines 1432-1487):
-1. Sets display to "LISTENING"
-2. Tries to send listen start message
-3. **CRITICAL**: Checks if `audio_processor_->IsRunning()` at line 1441
+For remote wakeup with an open WebSocket and previous state idle, listening mode
+is forced to `kListeningModeAutoStop` so TTS stop can resume listening.
 
-### Why It Might Not Work
+If the protocol is not ready, the state can show listening without sending
+`listen:start`; later WebSocket-open handling is expected to start capture when
+the channel is ready.
 
-**The audio processor might already be running** from a previous state, so the code at lines 1441-1487 is **skipped**:
+### Speaking
 
-```cpp
-if (!audio_processor_->IsRunning()) {  // <-- This check!
-    // Send listen start message
-    // Start audio capture
-}
-```
+When entering speaking:
 
-If `audio_processor_->IsRunning()` is `true`, it does NOT:
-- Send the listen start message to server
-- Start audio capture (already running, but maybe not sending?)
-- Reset encoder state properly
+- display status becomes speaking
+- the decoder is reset for playback
+- `speaking_start_time_us_` is recorded for VAD interrupt grace timing
+- VAD debounce state is reset
 
-**The fix**: The check should ensure the connection is ready AND properly initialized.
+If device-side AEC is enabled, the audio processor is kept running or started,
+`listening_mode_` is set to realtime, and wake word detection stops. This is the
+path that allows VAD interrupt during playback.
 
----
+If device-side AEC is not enabled and mode is not realtime, the audio processor
+stops during speaking. AFE wake word detection may remain active if that feature
+is configured.
 
-## Question 2: Can Device Be in Listening Mode and Speaking Mode at the Same Time?
+## TTS flow
 
-### Answer: **NO - States are EXCLUSIVE, but Mode can be Realtime**
+When a `tts:start` message arrives while idle or listening:
 
-The device can **NEVER** have:
-- `device_state_ == kDeviceStateListening` AND
-- `device_state_ == kDeviceStateSpeaking` 
+1. `state_before_tts_` stores the current state.
+2. If EchoEar was listening, it sends `listen:stop` before playback.
+3. The device enters speaking.
 
-At the same time. Only ONE `device_state_` value exists.
+When `tts:stop` arrives while speaking:
 
-### However, Listening MODE can affect Speaking behavior:
+- If playback was aborted by the user/device, EchoEar goes idle and does not
+  auto-resume.
+- If a WebSocket audio channel is still open, EchoEar treats this as remote
+  wakeup flow.
+- In alarm mode, EchoEar always resumes listening after the first TTS and clears
+  `is_alarm_mode_`.
+- In normal remote wakeup, EchoEar resumes listening only if
+  `state_before_tts_` was listening.
+- In manual-stop mode without remote wakeup, EchoEar goes idle.
+- In auto/realtime mode without remote wakeup, EchoEar resumes listening.
 
-When in `kDeviceStateSpeaking` state, the code checks `listening_mode_`:
+## Server listen messages
 
-```cpp
-// Line 1492-1500
-case kDeviceStateSpeaking:
-    if (listening_mode_ != kListeningModeRealtime) {
-        audio_processor_->Stop();  // Stop microphone capture
-        wake_word_->StartDetection();
-    }
-    // If listening_mode_ == kListeningModeRealtime:
-    //   - audio_processor_ KEEPS RUNNING (microphone active while speaking)
-    //   - This is for AEC (Acoustic Echo Cancellation)
-```
+Current server-side `listen:start` handling sets AutoStop listening mode. This
+means server-initiated listening is expected to return to listening after TTS
+unless the flow was aborted.
 
-So:
-- **State**: Exclusive (Listening OR Speaking, never both)
-- **Mode**: Can be Realtime (microphone keeps running while speaking for AEC)
+`listen:stop` stops listening and returns toward idle according to the active
+handler path.
 
----
+## WebSocket remote wakeup
 
-## Question 3: Why Does lx-alarm-testing Work But Current Branch Doesn't?
+`ws_start` opens the WebSocket channel when needed. After the channel opens:
 
-### Both Branches Go to Idle After TTS - But Why One Works?
+- If the device is idle, EchoEar waits briefly, verifies the channel is still
+  open, and enters AutoStop listening.
+- If alarm mode is set, EchoEar still sends `listen:start`; the server may send
+  TTS first, and listening resumes after TTS stop.
+- If the device is speaking, EchoEar aborts speech and enters AutoStop
+  listening.
+- If the device is already listening but capture is not running, EchoEar sends
+  `listen:start` and starts capture.
+- If the device is connecting, EchoEar enters AutoStop listening.
 
-The key difference is **WHAT HAPPENS BEFORE TTS STARTS**:
+## Agent cautions
 
-### lx-alarm-testing Branch Flow:
-
-```
-1. ws_start arrives → OpenWebSocketConnection()
-2. WebSocket opens successfully
-3. Line 1777: SetListeningMode(kListeningModeManualStop)
-   → Sets device_state_ to LISTENING
-   → Sends listen:start message to server
-   → Starts audio capture and streaming
-4. Server receives audio, processes it
-5. Server sends TTS start → device_state_ changes to SPEAKING
-   → audio_processor_ stops (line 1494)
-   → But listening_mode_ is STILL kListeningModeManualStop (preserved!)
-6. TTS plays
-7. TTS stops → Line 1725: Check listening_mode_
-   → Since it's ManualStop → Goes to IDLE
-8. BUT: Server already has the session and can send "listen" message
-   → OR server can send another ws_start to restart
-```
-
-### Current Branch Flow (After Our Changes):
-
-```
-1. ws_start arrives → OpenWebSocketConnection()
-2. WebSocket opens successfully
-3. Line 1777: SetListeningMode(kListeningModeManualStop)  [SAME]
-   → Sets device_state_ to LISTENING
-   → Sends listen:start message
-   → Starts audio capture
-4. Server receives audio, processes it
-5. Server sends TTS start → device_state_ to SPEAKING [SAME]
-6. TTS plays [SAME]
-7. TTS stops → Line 1725: Goes to IDLE [SAME]
-8. BUT: We REMOVED automatic transitions, so device stays idle
-   → Server must send explicit "listen" message to restart
-```
-
-### The Real Difference:
-
-**lx-alarm-testing** works because:
-- The WebSocket connection is already established
-- The server knows the device is ready
-- When server sends "listen" message (which you added), device starts listening again
-
-**Current branch** should work the same IF:
-- Server sends explicit `{"type":"listen","state":"start"}` message after TTS
-- Your "listen" message handler (lines 1010-1025) handles it properly
-
-The issue might be that the server isn't sending the "listen" message, or there's a timing issue.
-
----
-
-## Question 4: Detailed State Transition Flow
-
-### State Transition Diagram:
-
-```
-IDLE
-  ↓ [ws_start arrives]
-CONNECTING (WebSocket opening)
-  ↓ [WebSocket opened]
-LISTENING
-  ↓ [SetListeningMode called]
-  → listening_mode_ stored (e.g., ManualStop)
-  → listen:start message sent
-  → audio_processor_ starts
-  → microphone streaming begins
-  
-LISTENING
-  ↓ [TTS start message arrives]
-SPEAKING
-  → audio_processor_ stops (unless Realtime mode)
-  → TTS audio playback starts
-  → listening_mode_ preserved (still ManualStop)
-  
-SPEAKING
-  ↓ [TTS stop message arrives]
-  → Check listening_mode_:
-    - If ManualStop → IDLE
-    - If AutoStop → LISTENING
-    - If Realtime → LISTENING (already was listening)
-```
-
-### Critical Code Paths:
-
-#### 1. When WebSocket Opens (Line 1774-1782):
-```cpp
-if (device_state_ == kDeviceStateIdle) {
-    SetListeningMode(kListeningModeManualStop);
-    // This immediately:
-    // 1. Stores listening_mode_ = ManualStop
-    // 2. Calls SetDeviceState(LISTENING)
-    // 3. Sends listen:start message
-    // 4. Starts audio capture
-}
-```
-
-#### 2. When TTS Starts (Line 1717-1719):
-```cpp
-if (device_state_ == kDeviceStateIdle || device_state_ == kDeviceStateListening) {
-    SetDeviceState(kDeviceStateSpeaking);
-    // State changes from LISTENING → SPEAKING
-    // listening_mode_ is preserved (still ManualStop)
-}
-```
-
-#### 3. When TTS Stops (Line 1725-1729):
-```cpp
-if (listening_mode_ == kListeningModeManualStop) {
-    SetDeviceState(kDeviceStateIdle);  // Go to idle
-} else {
-    SetDeviceState(kDeviceStateListening);  // Go back to listening
-}
-```
-
-### Key Insight: State vs Mode
-
-- **State** (`device_state_`): What the device is DOING right now (Idle/Listening/Speaking)
-- **Mode** (`listening_mode_`): How listening should BEHAVE when it happens
-
-Think of it like:
-- State = "What am I doing?" (Reading/Writing/Eating)
-- Mode = "How should I read?" (Fast/Slow/Careful)
-
-The mode persists even when you stop the activity!
-
----
-
-## Why "Listening" State Might Not Actually Be Listening
-
-The listening state only starts audio capture if:
-
-1. `audio_processor_->IsRunning()` is FALSE (line 1441)
-2. Connection is open (line 1445)
-3. Protocol is available (line 1444)
-
-If any of these fail, you'll see:
-- Device shows "LISTENING" state
-- LED shows listening (red light)
-- But no audio is being sent!
-
-This is why you might have seen the state change but audio wasn't actually streaming.
-
----
-
-## Summary
-
-1. **Device states are EXCLUSIVE** - only one at a time
-2. **Listening mode is a CONFIGURATION** - persists across state changes
-3. **Realtime mode** allows microphone to keep running while speaking (for AEC)
-4. **Both branches go to idle** after TTS, but lx-alarm-testing works because server manages the flow properly
-5. **The "listening" state might not actually listen** if audio processor is already running or connection isn't ready
-
-The key to making it work: Ensure the server sends explicit "listen" messages after TTS, or the connection stays open and ready for the next interaction.
-
+- Do not infer listening from state alone; also check protocol readiness and
+  whether the audio processor is running.
+- Do not assume TTS stop always goes idle. Remote WebSocket and alarm mode can
+  resume listening automatically.
+- Do not assume manual-stop mode survives remote wakeup unchanged; remote wakeup
+  from idle forces AutoStop.
+- Incoming `tts` handlers currently access `state->valuestring` directly, so
+  malformed `tts` messages without a string `state` are not safely ignored.
