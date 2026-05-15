@@ -13,6 +13,7 @@
 #include "sd_card_startup.h"
 #include "power_save_timer.h"
 #include "system_info.h"
+#include "font_awesome_symbols.h"
 
 #include <wifi_station.h>
 #include <ssid_manager.h>
@@ -191,6 +192,20 @@ static void ApplyFirestoreWifiRanking(const std::string& response) {
         ESP_LOGI(TAG, "[FIRESTORE] Highest priority WiFi is now: %s", reordered.front().ssid.c_str());
     }
 }
+
+static std::string GetWifiStatusForErrLog() {
+    auto& wifi_station = WifiStation::GetInstance();
+    if (!wifi_station.IsConnected()) {
+        return "NA";
+    }
+
+    std::string ssid = wifi_station.GetSsid();
+    return ssid.empty() ? "NA" : ssid;
+}
+
+static constexpr int64_t kBatteryLogIntervalMs = 30000;
+static constexpr uint16_t kLowBatteryPowerOffVoltageMv = 3400;
+static constexpr int kLowBatteryBrightness = 20;
 
 static void FetchFirestoreDeviceDocumentAndApplyRanking() {
     std::string mac_address = SystemInfo::GetMacAddress();
@@ -733,6 +748,88 @@ private:
     esp_timer_handle_t volume_message_timer_ = nullptr;  // Timer to clear volume message
     std::string previous_emotion_ = "normal";  // Store previous emotion string to restore
     int previous_volume_ = -1;  // Store volume before muting (for restore on unmute)
+    bool startup_low_voltage_charging_ = false;
+    uint16_t startup_low_voltage_mv_ = 0;
+
+    void ConfigurePowerControlPin() {
+        gpio_config_t power_gpio_config = {
+            .pin_bit_mask = (BIT64(POWER_CTRL)),
+            .mode = GPIO_MODE_OUTPUT,
+        };
+        ESP_ERROR_CHECK(gpio_config(&power_gpio_config));
+        gpio_set_level(POWER_CTRL, 0);
+    }
+
+    bool ReadBatteryStatus(uint16_t& voltage_mv, int16_t& current_ma, bool& charging, bool& discharging) {
+        if (charge_ == nullptr || !charge_->IsAvailable()) {
+            return false;
+        }
+
+        voltage_mv = charge_->GetVoltage();
+        current_ma = charge_->GetCurrent();
+        if (voltage_mv == 0 || !charge_->IsAvailable()) {
+            return false;
+        }
+
+        charging = (current_ma > 50);
+        discharging = (current_ma < -50);
+        return true;
+    }
+
+    int BatteryLevelFromVoltage(uint16_t voltage_mv) const {
+        const uint16_t min_voltage_mv = 3000;
+        const uint16_t max_voltage_mv = 4200;
+        uint16_t clamped_voltage_mv = voltage_mv;
+        if (clamped_voltage_mv < min_voltage_mv) {
+            clamped_voltage_mv = min_voltage_mv;
+        } else if (clamped_voltage_mv > max_voltage_mv) {
+            clamped_voltage_mv = max_voltage_mv;
+        }
+        return ((clamped_voltage_mv - min_voltage_mv) * 100) / (max_voltage_mv - min_voltage_mv);
+    }
+
+    void PowerOffForLowBattery(uint16_t voltage_mv, const char* context) {
+        ESP_LOGW(TAG, "[BATTERY] %s voltage %u mV < %u mV and not charging - powering off",
+                 context, (unsigned)voltage_mv, (unsigned)kLowBatteryPowerOffVoltageMv);
+        gpio_set_level(POWER_CTRL, 1);
+    }
+
+    void ApplyLowVoltageChargingMode(uint16_t voltage_mv, const char* context) {
+        ESP_LOGI(TAG, "[BATTERY] %s voltage %u mV < %u mV but charging - dimming to %d and showing sleepy",
+                 context, (unsigned)voltage_mv, (unsigned)kLowBatteryPowerOffVoltageMv, kLowBatteryBrightness);
+        if (backlight_ != nullptr) {
+            backlight_->SetBrightness(kLowBatteryBrightness, false);
+        }
+        if (display_ != nullptr) {
+            display_->SetEmotion("sleepy");
+        }
+    }
+
+    bool CheckStartupLowBattery() {
+        uint16_t voltage_mv = 0;
+        int16_t current_ma = 0;
+        bool charging = false;
+        bool discharging = false;
+        if (!ReadBatteryStatus(voltage_mv, current_ma, charging, discharging)) {
+            ESP_LOGW(TAG, "[BATTERY] Startup voltage unavailable, continuing normal boot");
+            return false;
+        }
+
+        ESP_LOGI(TAG, "[BATTERY] Startup voltage: %u mV, current: %d mA, charging: %s",
+                 (unsigned)voltage_mv, current_ma, charging ? "yes" : "no");
+        if (voltage_mv >= kLowBatteryPowerOffVoltageMv) {
+            return false;
+        }
+
+        if (!charging) {
+            PowerOffForLowBattery(voltage_mv, "Startup");
+            return true;
+        }
+
+        startup_low_voltage_charging_ = true;
+        startup_low_voltage_mv_ = voltage_mv;
+        return false;
+    }
 
     void InitializeVolumeMessageTimer() {
         if (volume_message_timer_ != nullptr) {
@@ -806,13 +903,31 @@ private:
             return;
         }
         InitializeVolumeMessageTimer();
-        int level = 0;
-        bool charging = false, discharging = false;
         std::string message;
         auto& wifi_station = WifiStation::GetInstance();
-        if (GetBatteryLevel(level, charging, discharging)) {
-            message = "battery: " + std::to_string(level) + "%";
-            if (charging) message += " chrg";
+        if (charge_ != nullptr && charge_->IsAvailable()) {
+            uint16_t voltage_mv = charge_->GetVoltage();
+            int16_t current_ma = charge_->GetCurrent();
+            if (voltage_mv > 0) {
+                uint16_t display_mv = GetCompensatedDisplayVoltageMv(voltage_mv, current_ma);
+                int display_level = GetDisplayBatteryPercent(display_mv);
+                const bool charging = current_ma > 50;
+                const char* battery_icon = charging ? FONT_AWESOME_BATTERY_CHARGING : GetDisplayBatteryIcon(display_level);
+                lv_color_t battery_color = GetDisplayBatteryColor();
+                const char* battery_state = "";
+                if (charging) {
+                    battery_state = "charging";
+                } else if (current_ma < -50) {
+                    battery_state = "discharging";
+                }
+                std::string network = wifi_station.IsConnected() ? wifi_station.GetSsid() : "na";
+                display_->CreateBatteryOverlayMessage(battery_icon, battery_color, battery_state, network.c_str());
+                esp_timer_stop(volume_message_timer_);
+                ESP_ERROR_CHECK(esp_timer_start_once(volume_message_timer_, 2000 * 1000));
+                return;
+            } else {
+                message = "battery: N/A";
+            }
         } else {
             message = "battery: N/A";
         }
@@ -825,6 +940,89 @@ private:
         display_->CreateOverlayMessage(message.c_str());
         esp_timer_stop(volume_message_timer_);
         ESP_ERROR_CHECK(esp_timer_start_once(volume_message_timer_, 2000 * 1000));
+    }
+
+    static uint16_t GetCompensatedDisplayVoltageMv(uint16_t voltage_mv, int16_t current_ma) {
+        // Cancel the charger lift / load sag observed around plug-in/out.
+        // 0.36 ohm is represented as 0.36 mV per mA with integer math.
+        int correction_mv = (static_cast<int>(current_ma) * 36) / 100;
+        if (correction_mv > 120) {
+            correction_mv = 120;
+        } else if (correction_mv < -120) {
+            correction_mv = -120;
+        }
+
+        int compensated_mv = static_cast<int>(voltage_mv) - correction_mv;
+        if (compensated_mv < 0) {
+            compensated_mv = 0;
+        } else if (compensated_mv > 5000) {
+            compensated_mv = 5000;
+        }
+        return static_cast<uint16_t>(compensated_mv);
+    }
+
+    static int GetDisplayBatteryPercent(uint16_t display_mv) {
+        struct BatteryPoint {
+            uint16_t mv;
+            uint8_t percent;
+        };
+
+        static constexpr BatteryPoint kDisplayCurve[] = {
+            {3350, 1},
+            {3400, 3},
+            {3450, 6},
+            {3500, 10},
+            {3550, 16},
+            {3600, 23},
+            {3650, 31},
+            {3700, 40},
+            {3750, 50},
+            {3800, 60},
+            {3850, 69},
+            {3900, 77},
+            {3950, 84},
+            {4000, 90},
+            {4040, 94},
+            {4070, 96},
+            {4100, 99},
+            {4160, 100},
+        };
+
+        if (display_mv < kDisplayCurve[0].mv) {
+            return 0;
+        }
+        const size_t last = sizeof(kDisplayCurve) / sizeof(kDisplayCurve[0]) - 1;
+        if (display_mv >= kDisplayCurve[last].mv) {
+            return 100;
+        }
+
+        for (size_t i = 0; i < last; ++i) {
+            const BatteryPoint& low = kDisplayCurve[i];
+            const BatteryPoint& high = kDisplayCurve[i + 1];
+            if (display_mv >= low.mv && display_mv < high.mv) {
+                return low.percent +
+                    ((display_mv - low.mv) * (high.percent - low.percent)) /
+                    (high.mv - low.mv);
+            }
+        }
+
+        return 100;
+    }
+
+    static const char* GetDisplayBatteryIcon(int display_level) {
+        const char* levels[] = {
+            FONT_AWESOME_BATTERY_EMPTY,
+            FONT_AWESOME_BATTERY_1,
+            FONT_AWESOME_BATTERY_2,
+            FONT_AWESOME_BATTERY_3,
+            FONT_AWESOME_BATTERY_FULL,
+            FONT_AWESOME_BATTERY_FULL,
+        };
+        return levels[std::clamp(display_level, 0, 100) / 20];
+    }
+
+    static lv_color_t GetDisplayBatteryColor() {
+        return lv_color_hex(0x3DDC84);
     }
 
     void InitializeI2c() {
@@ -1739,52 +1937,34 @@ private:
         // Rotate display 180° (upside down)
         display_->SetDisplayRotation180(true);
         backlight_ = new PwmBacklight(DISPLAY_BACKLIGHT_PIN, DISPLAY_BACKLIGHT_OUTPUT_INVERT);
-        backlight_->RestoreBrightness();
+        if (startup_low_voltage_charging_) {
+            backlight_->SetBrightness(kLowBatteryBrightness, false);
+        } else {
+            backlight_->RestoreBrightness();
+        }
     }
 
     void InitializePowerSaveTimer() {
         // Create power save timer: -1 (no CPU freq limit), 30 seconds to sleep, -1 (no shutdown)
         power_save_timer_ = new PowerSaveTimer(-1, 30, -1);
         power_save_timer_->OnEnterSleepMode([this]() {
-            // Check battery level to determine sleep behavior
-            int battery_level = 0;
+            // Check battery voltage to determine sleep behavior
+            uint16_t voltage_mv = 0;
+            int16_t current_ma = 0;
             bool charging = false;
             bool discharging = false;
 
-            if (GetBatteryLevel(battery_level, charging, discharging)) {
-                if (battery_level < 25 && !charging) {
-                    // < 25%, not charging: shutdown
-                    ESP_LOGW(TAG, "Battery level %d%% < 25%% and not charging - shutting down", battery_level);
-                    gpio_set_level(POWER_CTRL, 1);
+            if (ReadBatteryStatus(voltage_mv, current_ma, charging, discharging)) {
+                int battery_level = BatteryLevelFromVoltage(voltage_mv);
+                if (voltage_mv < kLowBatteryPowerOffVoltageMv && !charging) {
+                    PowerOffForLowBattery(voltage_mv, "Sleep");
                     return;
-                } else if (battery_level < 25 && charging) {
-                    // < 25%, charging: always powersaving mode + sleepy.gif
-                    ESP_LOGI(TAG, "Always power saving mode - battery %d%% < 25%% and charging, setting brightness to 20 and switching to sleepy animation", battery_level);
-                    GetBacklight()->SetBrightness(20, false);
-                    auto display = GetDisplay();
-                    if (display) {
-                        display->SetEmotion("sleepy");
-                    }
-                } else if (battery_level >= 25 && battery_level <= 40 && !charging) {
-                    // 25-40%, not charging: always powersaving mode + battery.gif
-                    ESP_LOGI(TAG, "Always power saving mode - battery %d%% (25-40%% range) and not charging, setting brightness to 20 and switching to battery animation", battery_level);
-                    GetBacklight()->SetBrightness(20, false);
-                    auto display = GetDisplay();
-                    if (display) {
-                        display->SetEmotion("battery");
-                    }
-                } else if (battery_level >= 25 && battery_level <= 40 && charging) {
-                    // 25-40%, charging: 30-sec powersaving mode + sleepy.gif
-                    ESP_LOGI(TAG, "30-sec power saving mode - battery %d%% (25-40%% range) and charging, setting brightness to 20 and switching to sleepy animation", battery_level);
-                    GetBacklight()->SetBrightness(20, false);
-                    auto display = GetDisplay();
-                    if (display) {
-                        display->SetEmotion("sleepy");
-                    }
+                } else if (voltage_mv < kLowBatteryPowerOffVoltageMv && charging) {
+                    ApplyLowVoltageChargingMode(voltage_mv, "Sleep");
                 } else {
-                    // > 40%: 30-sec powersaving mode + sleepy.gif (regardless of charging)
-                    ESP_LOGI(TAG, "30-sec power saving mode - battery %d%% (>40%%), setting brightness to 20 and switching to sleepy animation", battery_level);
-                    GetBacklight()->SetBrightness(20, false);
+                    ESP_LOGI(TAG, "30-sec power saving mode - battery %d%% (%u mV), setting brightness to %d and switching to sleepy animation",
+                             battery_level, (unsigned)voltage_mv, kLowBatteryBrightness);
+                    GetBacklight()->SetBrightness(kLowBatteryBrightness, false);
                     auto display = GetDisplay();
                     if (display) {
                         display->SetEmotion("sleepy");
@@ -1792,8 +1972,8 @@ private:
                 }
             } else {
                 // Can't read battery - use default behavior (30-sec mode with sleepy)
-                ESP_LOGI(TAG, "30-sec power saving mode - battery level unknown, setting brightness to 20 and switching to sleepy animation");
-                GetBacklight()->SetBrightness(20, false);
+                ESP_LOGI(TAG, "30-sec power saving mode - battery level unknown, setting brightness to %d and switching to sleepy animation", kLowBatteryBrightness);
+                GetBacklight()->SetBrightness(kLowBatteryBrightness, false);
                 auto display = GetDisplay();
                 if (display) {
                     display->SetEmotion("sleepy");
@@ -1801,33 +1981,19 @@ private:
             }
         });
         power_save_timer_->OnExitSleepMode([this]() {
-            // Check if we're in "always powersaving" mode - if so, immediately put back to sleep
-            int battery_level = 0;
+            // Check if low voltage still requires dimming/poweroff.
+            uint16_t voltage_mv = 0;
+            int16_t current_ma = 0;
             bool charging = false;
             bool discharging = false;
 
-            if (GetBatteryLevel(battery_level, charging, discharging)) {
-                bool always_powersaving = false;
-                if (battery_level < 25 && charging) {
-                    // < 25%, charging: always powersaving
-                    always_powersaving = true;
-                } else if (battery_level >= 25 && battery_level <= 40 && !charging) {
-                    // 25-40%, not charging: always powersaving
-                    always_powersaving = true;
+            if (ReadBatteryStatus(voltage_mv, current_ma, charging, discharging)) {
+                if (voltage_mv < kLowBatteryPowerOffVoltageMv && !charging) {
+                    PowerOffForLowBattery(voltage_mv, "Wake");
+                    return;
                 }
-
-                if (always_powersaving) {
-                    ESP_LOGI(TAG, "Always power saving mode active - immediately re-entering sleep mode");
-                    // Immediately re-apply sleep settings
-                    GetBacklight()->SetBrightness(20, false);
-                    auto display = GetDisplay();
-                    if (display) {
-                        if (battery_level < 25 && charging) {
-                            display->SetEmotion("sleepy");
-                        } else if (battery_level >= 25 && battery_level <= 40 && !charging) {
-                            display->SetEmotion("battery");
-                        }
-                    }
+                if (voltage_mv < kLowBatteryPowerOffVoltageMv && charging) {
+                    ApplyLowVoltageChargingMode(voltage_mv, "Wake");
                     return;  // Don't restore brightness/animation for always powersaving mode
                 }
             }
@@ -1859,50 +2025,35 @@ private:
         // Create battery monitoring task to check for "always powersaving" mode
         xTaskCreate([](void* arg) {
             EchoEar* board = static_cast<EchoEar*>(arg);
-            bool was_always_powersaving = false;
-            int log_counter = 0;  // Counter for 5-minute battery logging (60 iterations * 5 seconds = 5 minutes)
+            bool was_always_powersaving = board->startup_low_voltage_charging_;
+            int64_t last_summary_log_time = 0;
             
             while (true) {
-                int battery_level = 0;
+                uint16_t voltage_mv = 0;
+                int16_t current_ma = 0;
                 bool charging = false;
                 bool discharging = false;
 
-                if (board->GetBatteryLevel(battery_level, charging, discharging)) {
-                    bool always_powersaving = false;
-                    if (battery_level < 25 && charging) {
-                        // < 25%, charging: always powersaving
-                        always_powersaving = true;
-                    } else if (battery_level >= 25 && battery_level <= 40 && !charging) {
-                        // 25-40%, not charging: always powersaving
-                        always_powersaving = true;
+                if (board->ReadBatteryStatus(voltage_mv, current_ma, charging, discharging)) {
+                    int battery_level = board->BatteryLevelFromVoltage(voltage_mv);
+                    if (voltage_mv < kLowBatteryPowerOffVoltageMv && !charging) {
+                        board->PowerOffForLowBattery(voltage_mv, "Monitor");
+                        vTaskDelay(pdMS_TO_TICKS(5000));
+                        continue;
                     }
+
+                    bool always_powersaving = voltage_mv < kLowBatteryPowerOffVoltageMv && charging;
 
                     if (always_powersaving) {
                         // If just entered always powersaving mode, immediately apply sleep settings
                         if (!was_always_powersaving) {
                             ESP_LOGI(TAG, "[BATTERY] Entered always power saving mode - applying sleep settings immediately");
-                            board->GetBacklight()->SetBrightness(20, false);
-                            auto display = board->GetDisplay();
-                            if (display) {
-                                if (battery_level < 25 && charging) {
-                                    display->SetEmotion("sleepy");
-                                } else if (battery_level >= 25 && battery_level <= 40 && !charging) {
-                                    display->SetEmotion("battery");
-                                }
-                            }
+                            board->ApplyLowVoltageChargingMode(voltage_mv, "Monitor");
                         }
                         // If in always powersaving mode and not in sleep mode, force it
                         if (board->power_save_timer_ && !board->power_save_timer_->IsInSleepMode()) {
                             ESP_LOGI(TAG, "[BATTERY] Always power saving mode - ensuring sleep settings applied");
-                            board->GetBacklight()->SetBrightness(20, false);
-                            auto display = board->GetDisplay();
-                            if (display) {
-                                if (battery_level < 25 && charging) {
-                                    display->SetEmotion("sleepy");
-                                } else if (battery_level >= 25 && battery_level <= 40 && !charging) {
-                                    display->SetEmotion("battery");
-                                }
-                            }
+                            board->ApplyLowVoltageChargingMode(voltage_mv, "Monitor");
                         }
                     } else if (was_always_powersaving) {
                         // Exited always powersaving mode - restore normal brightness if not in timer-based sleep mode
@@ -1914,13 +2065,21 @@ private:
                     
                     was_always_powersaving = always_powersaving;
 
-                    // Log battery percentage every 30 seconds (6 iterations * 5 seconds)
-                    log_counter++;
-                    if (log_counter >= 6) {
-                        log_counter = 0;
+                    int64_t current_time = esp_timer_get_time() / 1000;
+                    if (current_time - last_summary_log_time >= kBatteryLogIntervalMs) {
                         // Use ESP_LOGE so it goes through error logging system to /sdcard/err.txt
-                        ESP_LOGE(TAG, "[BATTERY] %d%%, %s", 
-                                battery_level, charging ? "charging" : (discharging ? "discharging" : "idle"));
+                        std::string wifi_status = GetWifiStatusForErrLog();
+                        int brightness = board->GetBacklight()->brightness();
+                        int volume = board->GetAudioCodec()->output_volume();
+                        ESP_LOGE(TAG, "[BATTERY] %d%%, %u mV, %d mA, %s, wifi: %s, brightness: %d%%, volume: %d%%",
+                                battery_level,
+                                (unsigned)voltage_mv,
+                                current_ma,
+                                charging ? "charging" : (discharging ? "discharging" : "idle"),
+                                wifi_status.c_str(),
+                                brightness,
+                                volume);
+                        last_summary_log_time = current_time;
                     }
                 }
 
@@ -1979,25 +2138,27 @@ private:
             ToggleMute();
         });
 
-         gpio_config_t power_gpio_config = {
-            .pin_bit_mask = (BIT64(POWER_CTRL) ),
-            .mode = GPIO_MODE_OUTPUT,
-            
-      };
-        ESP_ERROR_CHECK(gpio_config(&power_gpio_config));
-
-        gpio_set_level(POWER_CTRL, 0);
+        ConfigurePowerControlPin();
     }
 
 public:
     EchoEar() : boot_button_(BOOT_BUTTON_GPIO, false, 5000, 0) {  // 5-second long press time
         InitializeI2c();
-        InitializeBmi270();  // Initialize BMI270 after I2C bus is ready
+        ConfigurePowerControlPin();
         InitializeCharge();
+        if (CheckStartupLowBattery()) {
+            while (true) {
+                vTaskDelay(pdMS_TO_TICKS(1000));
+            }
+        }
+        InitializeBmi270();  // Initialize BMI270 after I2C bus is ready
         InitializeCst816sTouchPad();
         
         InitializeSpi();
         Initializest77916Display();
+        if (startup_low_voltage_charging_) {
+            ApplyLowVoltageChargingMode(startup_low_voltage_mv_, "Startup");
+        }
         InitializeButtons();
         InitializePowerSaveTimer();
         InitializeEmotionResetTimer();
@@ -2047,48 +2208,26 @@ public:
     }
 
     virtual bool GetBatteryLevel(int &level, bool& charging, bool& discharging) override {
-        if (charge_ == nullptr || !charge_->IsAvailable()) {
+        uint16_t voltage_mv = 0;
+        int16_t current_ma = 0;
+        if (!ReadBatteryStatus(voltage_mv, current_ma, charging, discharging)) {
             return false;
         }
-        
-        // Read voltage and current from charge IC
-        uint16_t voltage_mv = charge_->GetVoltage();
-        int16_t current_ma = charge_->GetCurrent();
-        
-        // Determine charging/discharging status based on current
-        // Positive current typically means charging, negative means discharging
-        charging = (current_ma > 50);  // Threshold: > 50mA considered charging
-        discharging = (current_ma < -50);  // Threshold: < -50mA considered discharging
-        
-        // Convert voltage to battery level percentage
-        // Typical Li-ion battery: 3.0V (0%) to 4.2V (100%)
-        // Voltage register might be in different units - adjust based on actual chip
-        // Assuming voltage is in millivolts, typical range: 3000mV (0%) to 4200mV (100%)
-        const uint16_t MIN_VOLTAGE_MV = 3000;  // 3.0V = 0%
-        const uint16_t MAX_VOLTAGE_MV = 4200;  // 4.2V = 100%
-        
-        // Clamp voltage to valid range
-        if (voltage_mv < MIN_VOLTAGE_MV) {
-            voltage_mv = MIN_VOLTAGE_MV;
-        } else if (voltage_mv > MAX_VOLTAGE_MV) {
-            voltage_mv = MAX_VOLTAGE_MV;
-        }
-        
-        // Calculate percentage using linear interpolation
-        level = ((voltage_mv - MIN_VOLTAGE_MV) * 100) / (MAX_VOLTAGE_MV - MIN_VOLTAGE_MV);
-        
-        // Ensure level is in valid range
-        if (level < 0) level = 0;
-        if (level > 100) level = 100;
+        level = BatteryLevelFromVoltage(voltage_mv);
         
         // Log as E so the SD error-log hook captures battery telemetry in err.txt.
         static int64_t last_log_time = 0;
         int64_t current_time = esp_timer_get_time() / 1000; // Convert to milliseconds
-        const int64_t LOG_INTERVAL_MS = 15000; // 15 seconds
         
-        if (current_time - last_log_time >= LOG_INTERVAL_MS) {
-            ESP_LOGE(TAG, "[BATTERY] Voltage: %d mV, Current: %d mA, Level: %d%%, Charging: %s, Discharging: %s",
-                     voltage_mv, current_ma, level, charging ? "yes" : "no", discharging ? "yes" : "no");
+        if (current_time - last_log_time >= kBatteryLogIntervalMs) {
+            std::string wifi_status = GetWifiStatusForErrLog();
+            ESP_LOGE(TAG, "[BATTERY] Voltage: %u mV, Current: %d mA, Level: %d%%, Charging: %s, Discharging: %s, wifi: %s",
+                     (unsigned)voltage_mv,
+                     current_ma,
+                     level,
+                     charging ? "yes" : "no",
+                     discharging ? "yes" : "no",
+                     wifi_status.c_str());
             last_log_time = current_time;
         }
         

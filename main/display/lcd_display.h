@@ -79,6 +79,8 @@ public:
 
     // Overlay message (top, does not affect layout)
     void CreateOverlayMessage(const char* message);
+    void CreateBatteryOverlayMessage(const char* battery_icon, lv_color_t battery_color,
+                                     const char* battery_state, const char* network);
     void ClearOverlayMessage();
 };
 
