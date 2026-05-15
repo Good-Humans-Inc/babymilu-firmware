@@ -53,15 +53,14 @@ void animation_block_startup_load(bool block) {
 }
 
 void animation_wait_for_startup_load_clear(uint32_t poll_ticks_ms) {
-    constexpr uint32_t kMaxWaitMs = 30000;
-    uint32_t waited_ms = 0;
+    constexpr int kMaxWaitSteps = 200; // up to 5 seconds with default 25ms polling
+    int waited = 0;
     while (g_startup_load_blocked.load(std::memory_order_acquire)) {
-        if (waited_ms >= kMaxWaitMs) {
-            ESP_LOGW("animation", "Startup load block timed out before WAV preload completed; continuing animation init");
+        if (waited++ >= kMaxWaitSteps) {
+            ESP_LOGW("animation", "Startup load block timed out; continuing animation init");
             break;
         }
         vTaskDelay(pdMS_TO_TICKS(poll_ticks_ms));
-        waited_ms += poll_ticks_ms;
     }
 }
 

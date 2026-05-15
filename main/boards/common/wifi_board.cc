@@ -353,8 +353,10 @@ void WifiBoard::StartNetwork() {
     
     wifi_station.Start();
 
-    // Try to connect to WiFi with saved credentials before falling back to BLE configuration.
-    if (!wifi_station.WaitForConnected(25 * 1000)) {
+    // Try to connect to WiFi, if failed, use BLE for configuration
+    // Keep this longer than per-SSID retry window (3 retries x 15s) so
+    // WifiStation can finish retries before BLE fallback.
+    if (!wifi_station.WaitForConnected(60 * 1000)) {
         wifi_station.Stop();
         wifi_config_mode_ = true;
         ESP_LOGI(TAG, "WiFi connection failed, using BLE for configuration");

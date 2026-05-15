@@ -45,8 +45,8 @@ typedef enum _AnimationType_e {
 void animation_set_now_animation(int animation);
 void animation_check_volume_and_lock(int volume);  // Check volume and lock/unlock silence animation
 void animation_init(void);
-// Used by startup to hold heavy test.bin loading until startup.wav has been
-// copied out of SD card storage and audio playback is memory-backed.
+// Used by startup to prevent animation_init() heavy test.bin loading from
+// competing with startup audio playback.
 void animation_block_startup_load(bool block);
 void animation_wait_for_startup_load_clear(uint32_t poll_ticks_ms);
 void animation_cleanup_sd_card_animation(Animation_t* anim);
