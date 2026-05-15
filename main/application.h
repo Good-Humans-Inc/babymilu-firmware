@@ -50,7 +50,8 @@ enum DeviceState {
 };
 
 #define OPUS_FRAME_DURATION_MS 60
-#define MAX_AUDIO_PACKETS_IN_QUEUE (2400 / OPUS_FRAME_DURATION_MS)
+#define AUDIO_SEND_RING_DURATION_MS 3000
+#define MAX_AUDIO_PACKETS_IN_QUEUE (AUDIO_SEND_RING_DURATION_MS / OPUS_FRAME_DURATION_MS)
 #define AUDIO_TESTING_MAX_DURATION_MS 10000
 
 class Application {
@@ -84,6 +85,8 @@ public:
     AecMode GetAecMode() const { return aec_mode_; }
     bool IsAlarmModeActive() const { return is_alarm_mode_; }
     void SetAlarmMode(bool enabled) { is_alarm_mode_ = enabled; }
+    void SetWebSocketConnectionMode(const std::string& mode);
+    const std::string& GetWebSocketConnectionMode() const { return websocket_connection_mode_; }
     BackgroundTask* GetBackgroundTask() const { return background_task_; }
     void ClearWifiConfiguration();
     Protocol* GetActiveProtocol();  // Returns the protocol to use for audio (WebSocket if available, else primary)
@@ -108,6 +111,7 @@ private:
     ListeningMode listening_mode_ = kListeningModeAutoStop;
     AecMode aec_mode_ = kAecOff;
     bool is_alarm_mode_ = false;  // Track if device is in alarm mode (for auto-listen after TTS)
+    std::string websocket_connection_mode_ = "normal";
     DeviceState state_before_tts_ = kDeviceStateUnknown;  // Track state before TTS started (to detect alarm mode)
 
     bool aborted_ = false;
@@ -130,6 +134,8 @@ private:
     std::list<AudioStreamPacket> audio_decode_queue_;
     std::condition_variable audio_decode_cv_;
     std::list<AudioStreamPacket> audio_testing_queue_;
+    uint32_t audio_uplink_sequence_ = 0;
+    uint32_t audio_uplink_dropped_frames_ = 0;
 
     // 新增：用于维护音频包的timestamp队列
     std::list<uint32_t> timestamp_queue_;

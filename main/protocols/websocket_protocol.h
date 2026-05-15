@@ -26,10 +26,14 @@ private:
     WebSocket* websocket_ = nullptr;
     int version_ = 1;
     int frame_count_ = 0;  // Counter for Opus frames sent
+    int audio_metadata_frame_count_ = 0;
+    uint32_t audio_metadata_start_sequence_ = 0;
+    uint32_t audio_metadata_start_timestamp_ms_ = 0;
 
     void ParseServerHello(const cJSON* root);
     bool SendText(const std::string& text) override;
     std::string GetHelloMessage();
+    void MaybeSendAudioMetadata(const AudioStreamPacket& packet);
 };
 
 #endif

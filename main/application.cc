@@ -41,6 +41,9 @@
 #include <arpa/inet.h>
 #include <cstdio>
 #include <unistd.h>
+#include <algorithm>
+#include <cctype>
+#include <iterator>
 
 #define TAG "Application"
 
@@ -551,6 +554,20 @@ static const char *const STATE_STRINGS[] = {
     "fatal_error",
     "invalid_state"};
 
+static std::string NormalizeWebSocketConnectionMode(std::string mode)
+{
+    mode.erase(std::remove_if(mode.begin(), mode.end(), [](unsigned char ch) {
+        return std::isspace(ch) != 0;
+    }), mode.end());
+    std::transform(mode.begin(), mode.end(), mode.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    if (mode == "alarm" || mode == "reminder" || mode == "music" || mode == "normal") {
+        return mode;
+    }
+    return "normal";
+}
+
 Application::Application()
 {
     event_group_ = xEventGroupCreate();
@@ -999,6 +1016,8 @@ void Application::ToggleChatState()
                 // WebSocket protocol will use default URL if none is configured
                 if (!websocket_protocol_ || !websocket_protocol_->IsAudioChannelOpened()) {
                     ESP_LOGI(TAG, "Opening WebSocket connection for manual interaction (will use default URL if needed)");
+                    SetWebSocketConnectionMode("normal");
+                    SetAlarmMode(false);
                     OpenWebSocketConnection();
                     active_protocol = GetActiveProtocol();
                 }
@@ -1092,6 +1111,8 @@ void Application::StartListening()
                 // WebSocket protocol will use default URL if none is configured
                 if (!websocket_protocol_ || !websocket_protocol_->IsAudioChannelOpened()) {
                     ESP_LOGI(TAG, "Opening WebSocket connection for manual interaction (will use default URL if needed)");
+                    SetWebSocketConnectionMode("normal");
+                    SetAlarmMode(false);
                     OpenWebSocketConnection();
                     active_protocol = GetActiveProtocol();
                 }
@@ -1722,17 +1743,13 @@ void Application::Start()
     audio_processor_->Initialize(codec);
     audio_processor_->OnOutput([this](std::vector<int16_t> &&data)
                                {
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            if (audio_send_queue_.size() >= MAX_AUDIO_PACKETS_IN_QUEUE) {
-                ESP_LOGW(TAG, "Too many audio packets in queue, drop the newest packet");
-                return;
-            }
-        }
         background_task_->Schedule([this, data = std::move(data)]() mutable {
             opus_encoder_->Encode(std::move(data), [this](std::vector<uint8_t>&& opus) {
                 AudioStreamPacket packet;
                 packet.payload = std::move(opus);
+                packet.frame_duration = OPUS_FRAME_DURATION_MS;
+                packet.sample_rate = 16000;
+                packet.capture_timestamp_ms = static_cast<uint32_t>(esp_timer_get_time() / 1000);
 #ifdef CONFIG_USE_SERVER_AEC
                 {
                     std::lock_guard<std::mutex> lock(timestamp_mutex_);
@@ -1750,10 +1767,15 @@ void Application::Start()
                 }
 #endif
                 std::lock_guard<std::mutex> lock(mutex_);
+                packet.sequence = audio_uplink_sequence_++;
                 if (audio_send_queue_.size() >= MAX_AUDIO_PACKETS_IN_QUEUE) {
-                    ESP_LOGW(TAG, "Too many audio packets in queue, drop the oldest packet");
+                    ++audio_uplink_dropped_frames_;
+                    ESP_LOGW(TAG, "Audio uplink ring full (%u frames), dropping oldest packet; dropped=%u",
+                             (unsigned)MAX_AUDIO_PACKETS_IN_QUEUE,
+                             (unsigned)audio_uplink_dropped_frames_);
                     audio_send_queue_.pop_front();
                 }
+                packet.dropped_frames = audio_uplink_dropped_frames_;
                 audio_send_queue_.emplace_back(std::move(packet));
                 xEventGroupSetBits(event_group_, SEND_AUDIO_EVENT);
             });
@@ -1801,6 +1823,8 @@ void Application::Start()
                     // WebSocket protocol will use default URL if none is configured
                     if (!websocket_protocol_ || !websocket_protocol_->IsAudioChannelOpened()) {
                         ESP_LOGI(TAG, "Opening WebSocket connection for wake word (will use default URL if needed)");
+                        SetWebSocketConnectionMode("normal");
+                        SetAlarmMode(false);
                         OpenWebSocketConnection();
                         active_protocol = GetActiveProtocol();
                     }
@@ -1927,11 +1951,21 @@ void Application::MainEventLoop()
             std::unique_lock<std::mutex> lock(mutex_);
             auto packets = std::move(audio_send_queue_);
             lock.unlock();
-            for (auto &packet : packets)
+            for (auto it = packets.begin(); it != packets.end(); ++it)
             {
                 auto* active_protocol = GetActiveProtocol();
-                if (!active_protocol || !active_protocol->SendAudio(packet))
+                if (!active_protocol || !active_protocol->SendAudio(*it))
                 {
+                    std::lock_guard<std::mutex> relock(mutex_);
+                    const size_t unsent_count = static_cast<size_t>(std::distance(it, packets.end()));
+                    while (!audio_send_queue_.empty() &&
+                           audio_send_queue_.size() + unsent_count > MAX_AUDIO_PACKETS_IN_QUEUE) {
+                        ++audio_uplink_dropped_frames_;
+                        audio_send_queue_.pop_front();
+                    }
+                    audio_send_queue_.splice(audio_send_queue_.begin(), packets, it, packets.end());
+                    ESP_LOGW(TAG, "Audio send failed, preserving %u unsent frames in uplink ring",
+                             (unsigned)unsent_count);
                     break;
                 }
             }
@@ -2263,6 +2297,8 @@ void Application::SetDeviceState(DeviceState state)
         // DISABLED: Comment out transcript display to reduce memory usage
         // display->SetChatMessage("system", "");
         timestamp_queue_.clear();
+        audio_uplink_sequence_ = 0;
+        audio_uplink_dropped_frames_ = 0;
         break;
     case kDeviceStateListening:
         display->SetStatus(Lang::Strings::LISTENING);
@@ -2523,6 +2559,12 @@ void Application::SendMcpMessage(const std::string &payload)
         } });
 }
 
+void Application::SetWebSocketConnectionMode(const std::string& mode)
+{
+    websocket_connection_mode_ = NormalizeWebSocketConnectionMode(mode);
+    ESP_LOGI(TAG, "WebSocket connection mode set to %s", websocket_connection_mode_.c_str());
+}
+
 void Application::SetAecMode(AecMode mode)
 {
     aec_mode_ = mode;
@@ -2604,6 +2646,7 @@ void Application::OpenWebSocketConnection() {
             board.SetPowerSaveMode(true);
             Schedule([this]() {
                 is_alarm_mode_ = false; // Reset alarm mode when WebSocket closes
+                SetWebSocketConnectionMode("normal");
                 SetDeviceState(kDeviceStateIdle);
             });
         });

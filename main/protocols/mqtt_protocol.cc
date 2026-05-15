@@ -13,6 +13,7 @@
 #include <ml307_udp.h>
 #include <cstring>
 #include <algorithm>
+#include <cctype>
 #include <arpa/inet.h>
 #include "assets/lang_config.h"
 
@@ -38,6 +39,42 @@ static bool IsValidWebSocketUrl(const std::string& url) {
     }
     
     return true;
+}
+
+static std::string NormalizeConnectionMode(std::string mode, const char* fallback = "normal") {
+    mode.erase(std::remove_if(mode.begin(), mode.end(), [](unsigned char ch) {
+        return std::isspace(ch) != 0;
+    }), mode.end());
+    std::transform(mode.begin(), mode.end(), mode.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    if (mode == "normal" || mode == "alarm" || mode == "reminder" || mode == "music") {
+        return mode;
+    }
+    return fallback;
+}
+
+static std::string GetStringField(const cJSON* root, const char* key) {
+    auto item = cJSON_GetObjectItem(root, key);
+    return cJSON_IsString(item) ? std::string(item->valuestring) : std::string();
+}
+
+static std::string ExtractWsStartMode(const cJSON* root) {
+    std::string mode = GetStringField(root, "mode");
+    if (mode.empty()) {
+        auto request = cJSON_GetObjectItem(root, "request");
+        if (cJSON_IsObject(request)) {
+            mode = GetStringField(request, "mode");
+        }
+    }
+    if (mode.empty()) {
+        mode = GetStringField(root, "conversation_type");
+    }
+    if (mode.empty()) {
+        mode = GetStringField(root, "sourceType");
+    }
+    // Compatibility: historical ws_start meant alarm.
+    return NormalizeConnectionMode(mode, "alarm");
 }
 
 MqttProtocol::MqttProtocol() {
@@ -205,17 +242,21 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
             ParseServerHello(root);
         } else if (strcmp(type->valuestring, "ws_start") == 0) {
             // Server is redirecting to WebSocket
-            // ws_start indicates alarm mode (server-initiated conversation)
             server_requested_websocket_ = true;
             auto wss_url = cJSON_GetObjectItem(root, "wss");
             auto version = cJSON_GetObjectItem(root, "version");
+            std::string connection_mode = ExtractWsStartMode(root);
             
             if (cJSON_IsString(wss_url)) {
                 std::string url = wss_url->valuestring;
-                ESP_LOGI(TAG, "Server requests WebSocket connection (alarm mode): %s", url.c_str());
+                ESP_LOGI(TAG, "Server requests WebSocket connection (mode=%s): %s",
+                         connection_mode.c_str(), url.c_str());
                 
-                // Set alarm mode flag - in alarm mode, TTS plays first, then listening starts
-                Application::GetInstance().SetAlarmMode(true);
+                auto& app = Application::GetInstance();
+                app.SetWebSocketConnectionMode(connection_mode);
+                // Legacy alarm mode means "server-initiated starter should resume listening
+                // after the first TTS", so reminders/music starters need the same behavior.
+                app.SetAlarmMode(connection_mode != "normal");
                 
                 // Validate URL before saving
                 if (!IsValidWebSocketUrl(url)) {
@@ -240,7 +281,8 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
                     auto& app = Application::GetInstance();
                     // Always open WebSocket connection - if one exists, it will be closed and recreated
                     // This ensures clean state and proper callback setup for each new conversation
-                    ESP_LOGI(TAG, "Opening WebSocket connection for ws_start (alarm mode - TTS first, then listening)");
+                    ESP_LOGI(TAG, "Opening WebSocket connection for ws_start (mode=%s)",
+                             app.GetWebSocketConnectionMode().c_str());
                     app.OpenWebSocketConnection();
                 });
             } else {

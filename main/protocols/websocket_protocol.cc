@@ -54,14 +54,61 @@ bool WebsocketProtocol::SendAudio(const AudioStreamPacket& packet) {
         frame_count_++;
         if (frame_count_ % 50 == 0 || frame_count_ <= 5) {
             // Log every 50th frame or first 5 frames for debugging
-            ESP_LOGI(TAG, "Sending Opus frame %d, bytes=%zu", frame_count_, (size_t)packet.payload.size());
+            ESP_LOGI(TAG, "Sending Opus frame %d, seq=%u, captured_ms=%u, dropped=%u, bytes=%zu",
+                     frame_count_,
+                     (unsigned)packet.sequence,
+                     (unsigned)packet.capture_timestamp_ms,
+                     (unsigned)packet.dropped_frames,
+                     (size_t)packet.payload.size());
         } else {
-            ESP_LOGD(TAG, "Sending Opus frame %d, bytes=%zu", frame_count_, (size_t)packet.payload.size());
+            ESP_LOGD(TAG, "Sending Opus frame %d, seq=%u, bytes=%zu",
+                     frame_count_, (unsigned)packet.sequence, (size_t)packet.payload.size());
         }
-        return websocket_->Send(packet.payload.data(), packet.payload.size(), true);
+        bool ok = websocket_->Send(packet.payload.data(), packet.payload.size(), true);
+        if (ok) {
+            MaybeSendAudioMetadata(packet);
+        }
+        return ok;
     } else {
         return websocket_->Send(packet.payload.data(), packet.payload.size(), true);
     }
+}
+
+void WebsocketProtocol::MaybeSendAudioMetadata(const AudioStreamPacket& packet) {
+    static constexpr int kAudioMetadataFramesPerChunk = 4;
+    if (websocket_ == nullptr || !websocket_->IsConnected()) {
+        return;
+    }
+    if (audio_metadata_frame_count_ == 0) {
+        audio_metadata_start_sequence_ = packet.sequence;
+        audio_metadata_start_timestamp_ms_ = packet.capture_timestamp_ms;
+    }
+    audio_metadata_frame_count_++;
+    if (audio_metadata_frame_count_ < kAudioMetadataFramesPerChunk) {
+        return;
+    }
+
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "session_id", session_id_.c_str());
+    cJSON_AddStringToObject(root, "type", "audio_meta");
+    cJSON_AddStringToObject(root, "state", "chunk");
+    cJSON_AddNumberToObject(root, "first_sequence", audio_metadata_start_sequence_);
+    cJSON_AddNumberToObject(root, "last_sequence", packet.sequence);
+    cJSON_AddNumberToObject(root, "first_timestamp_ms", audio_metadata_start_timestamp_ms_);
+    cJSON_AddNumberToObject(root, "last_timestamp_ms", packet.capture_timestamp_ms);
+    cJSON_AddNumberToObject(root, "frames", audio_metadata_frame_count_);
+    cJSON_AddNumberToObject(root, "sample_rate", packet.sample_rate);
+    cJSON_AddNumberToObject(root, "frame_duration", packet.frame_duration);
+    cJSON_AddNumberToObject(root, "dropped_frames", packet.dropped_frames);
+    char* json_str = cJSON_PrintUnformatted(root);
+    if (json_str != nullptr) {
+        if (!websocket_->Send(json_str)) {
+            ESP_LOGW(TAG, "Failed to send audio metadata chunk");
+        }
+        cJSON_free(json_str);
+    }
+    cJSON_Delete(root);
+    audio_metadata_frame_count_ = 0;
 }
 
 bool WebsocketProtocol::SendText(const std::string& text) {
@@ -125,6 +172,34 @@ static bool IsValidWebSocketUrl(const std::string& url) {
     return true;
 }
 
+static bool UrlHasQueryParam(const std::string& url, const std::string& key) {
+    size_t query_start = url.find('?');
+    if (query_start == std::string::npos) {
+        return false;
+    }
+    size_t pos = query_start + 1;
+    while (pos < url.size()) {
+        size_t end = url.find('&', pos);
+        if (end == std::string::npos) {
+            end = url.size();
+        }
+        size_t equals = url.find('=', pos);
+        if (equals != std::string::npos && equals < end && url.substr(pos, equals - pos) == key) {
+            return true;
+        }
+        pos = end + 1;
+    }
+    return false;
+}
+
+static void AppendQueryParamIfMissing(std::string& url, const std::string& key, const std::string& value) {
+    if (value.empty() || UrlHasQueryParam(url, key)) {
+        return;
+    }
+    url += (url.find('?') == std::string::npos) ? "?" : "&";
+    url += key + "=" + value;
+}
+
 bool WebsocketProtocol::OpenAudioChannel() {
     static constexpr size_t kWebSocketReceiveBufferSize = 4096;
 
@@ -182,21 +257,13 @@ bool WebsocketProtocol::OpenAudioChannel() {
         ESP_LOGI(TAG, "Using WebSocket URL from settings: %s", url.c_str());
     }
     
-    // Add device-id and client-id as query parameters to the URL
-    // Only add if they're not already present (URL from ws_start may already have them)
     std::string mac_address = SystemInfo::GetMacAddress();
     std::string client_id = Board::GetInstance().GetUuid();
-    
-    // Check if URL already has query parameters (if it has '?', assume params are already there)
-    // This prevents duplicate params when ws_start message includes them
-    if (url.find('?') == std::string::npos) {
-        // No query parameters yet, add them
-        url += "?device-id=" + mac_address + "&client-id=" + client_id;
-        ESP_LOGI(TAG, "WebSocket URL with query params added: %s", url.c_str());
-    } else {
-        // URL already has query parameters, use as-is
-        ESP_LOGI(TAG, "WebSocket URL already has query params (using as-is): %s", url.c_str());
-    }
+    std::string connection_mode = Application::GetInstance().GetWebSocketConnectionMode();
+    AppendQueryParamIfMissing(url, "device-id", mac_address);
+    AppendQueryParamIfMissing(url, "client-id", client_id);
+    AppendQueryParamIfMissing(url, "mode", connection_mode);
+    ESP_LOGI(TAG, "WebSocket URL with connection params: %s", url.c_str());
     
     std::string token = settings.GetString("token");
     int version = settings.GetInt("version");
@@ -206,6 +273,9 @@ bool WebsocketProtocol::OpenAudioChannel() {
 
     error_occurred_ = false;
     frame_count_ = 0;  // Reset frame counter for new session
+    audio_metadata_frame_count_ = 0;
+    audio_metadata_start_sequence_ = 0;
+    audio_metadata_start_timestamp_ms_ = 0;
     last_incoming_time_ = std::chrono::steady_clock::now();  // Initialize timestamp for inactivity checking
     websocket_ = Board::GetInstance().CreateWebSocket();
     websocket_->SetReceiveBufferSize(kWebSocketReceiveBufferSize);
@@ -224,6 +294,7 @@ bool WebsocketProtocol::OpenAudioChannel() {
     // Note: Device-Id and Client-Id are now in URL query params, but keep headers for backward compatibility
     websocket_->SetHeader("Device-Id", mac_address.c_str());
     websocket_->SetHeader("Client-Id", client_id.c_str());
+    websocket_->SetHeader("Connection-Mode", connection_mode.c_str());
 
     websocket_->OnData([this](const char* data, size_t len, bool binary) {
         if (binary) {
@@ -334,10 +405,19 @@ std::string WebsocketProtocol::GetHelloMessage() {
     // Always request 16 kHz for WebSocket as per server requirements
     // The Opus encoder is configured for 16 kHz, and input is resampled to 16 kHz if needed
     int requested_sample_rate = 16000;
+    std::string connection_mode = Application::GetInstance().GetWebSocketConnectionMode();
+    std::string mac_address = SystemInfo::GetMacAddress();
+    std::string client_id = Board::GetInstance().GetUuid();
     
     cJSON* root = cJSON_CreateObject();
     cJSON_AddStringToObject(root, "type", "hello");
     cJSON_AddNumberToObject(root, "version", version_);
+    cJSON_AddStringToObject(root, "device_id", mac_address.c_str());
+    cJSON_AddStringToObject(root, "client_id", client_id.c_str());
+    cJSON_AddStringToObject(root, "mode", connection_mode.c_str());
+    cJSON* request = cJSON_CreateObject();
+    cJSON_AddStringToObject(request, "mode", connection_mode.c_str());
+    cJSON_AddItemToObject(root, "request", request);
     cJSON* features = cJSON_CreateObject();
 #if CONFIG_USE_SERVER_AEC
     cJSON_AddBoolToObject(features, "aec", true);
@@ -345,6 +425,9 @@ std::string WebsocketProtocol::GetHelloMessage() {
 #if CONFIG_IOT_PROTOCOL_MCP
     cJSON_AddBoolToObject(features, "mcp", true);
 #endif
+    cJSON_AddBoolToObject(features, "audio_sequence", true);
+    cJSON_AddBoolToObject(features, "audio_timestamp_ms", true);
+    cJSON_AddStringToObject(features, "audio_metadata", "chunk");
     cJSON_AddItemToObject(root, "features", features);
     cJSON_AddStringToObject(root, "transport", "websocket");
     cJSON* audio_params = cJSON_CreateObject();
@@ -362,8 +445,9 @@ std::string WebsocketProtocol::GetHelloMessage() {
 
 void WebsocketProtocol::ParseServerHello(const cJSON* root) {
     auto transport = cJSON_GetObjectItem(root, "transport");
-    if (transport == nullptr || strcmp(transport->valuestring, "websocket") != 0) {
-        ESP_LOGE(TAG, "Unsupported transport: %s", transport->valuestring);
+    if (!cJSON_IsString(transport) || strcmp(transport->valuestring, "websocket") != 0) {
+        ESP_LOGE(TAG, "Unsupported or missing transport in server hello: %s",
+                 cJSON_IsString(transport) ? transport->valuestring : "null");
         return;
     }
 
