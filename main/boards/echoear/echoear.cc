@@ -912,7 +912,7 @@ private:
                 uint16_t display_mv = GetCompensatedDisplayVoltageMv(voltage_mv, current_ma);
                 int display_level = GetDisplayBatteryPercent(display_mv);
                 const bool charging = current_ma > 50;
-                const char* battery_icon = GetDisplayBatteryIcon(display_level);
+                const char* battery_icon = charging ? FONT_AWESOME_BATTERY_CHARGING : GetDisplayBatteryIcon(display_level);
                 lv_color_t battery_color = GetDisplayBatteryColor();
                 const char* battery_state = "";
                 if (charging) {

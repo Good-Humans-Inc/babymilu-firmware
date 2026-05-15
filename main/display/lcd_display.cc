@@ -1251,7 +1251,7 @@ void LcdDisplay::CreateBatteryOverlayMessage(const char* battery_icon, lv_color_
     lv_obj_set_style_pad_bottom(overlay_bubble_, 2, 0);
     lv_obj_set_style_pad_column(overlay_bubble_, 8, 0);
     lv_obj_set_style_bg_color(overlay_bubble_, lv_color_hex(0xFFFFFF), 0);
-    lv_obj_set_style_bg_opa(overlay_bubble_, LV_OPA_20, 0);
+    lv_obj_set_style_bg_opa(overlay_bubble_, LV_OPA_40, 0);
     lv_obj_set_flex_flow(overlay_bubble_, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(overlay_bubble_, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
