@@ -24,6 +24,7 @@ def publish_test_message(
     message_text="hello world",
     volume=None,
     ota_url=None,
+    url=None,
 ):
     """
     Publish a test message to the MQTT broker.
@@ -36,6 +37,7 @@ def publish_test_message(
         message_text: Message content
         volume: Volume value (0-100) for adjust_volume type
         ota_url: Custom OTA URL for set_ota_url type
+        url: test.bin URL for auto_update type
     """
     client = mqtt.Client()
 
@@ -66,6 +68,12 @@ def publish_test_message(
             print("Error: --ota-url is required when using --type 'set_ota_url'")
             sys.exit(1)
         payload["message"] = ota_url
+    elif message_type == "auto_update":
+        if not url:
+            print("Error: --url is required when using --type 'auto_update'")
+            sys.exit(1)
+        payload["url"] = url
+        payload["message"] = ""
     elif message_type == "wifi_clear_credential":
         payload["message"] = ""
     else:
@@ -116,6 +124,9 @@ Examples:
 
   # Trigger remote animation update
   python test_mqtt_publish.py --type "remote_anim_update" --message ""
+
+  # Download test.bin from a specific URL through MQTT
+  python test_mqtt_publish.py --type "auto_update" --url "https://example.com/test.bin" --mac "90:e5:b1:a8:ad:24"
 
   # Trigger WiFi reconfiguration via NimBLE (device will reboot)
   python test_mqtt_publish.py --type "wifi_reconfig_nimble" --message "" --mac "90:e5:b1:a8:ad:24"
@@ -174,6 +185,11 @@ Examples:
         help="Custom OTA URL for set_ota_url type (default: None)",
     )
     parser.add_argument(
+        "--url",
+        default=None,
+        help="test.bin download URL for auto_update type (default: None)",
+    )
+    parser.add_argument(
         "--topic",
         default=None,
         help="Full MQTT topic (overrides --mac if provided)",
@@ -201,6 +217,10 @@ Examples:
         print("Error: --ota-url is required when using --type 'set_ota_url'")
         sys.exit(1)
 
+    if args.type == "auto_update" and not args.url:
+        print("Error: --url is required when using --type 'auto_update'")
+        sys.exit(1)
+
     publish_test_message(
         broker_host=args.broker,
         broker_port=args.port,
@@ -209,6 +229,7 @@ Examples:
         message_text=args.message,
         volume=args.volume,
         ota_url=args.ota_url,
+        url=args.url,
     )
 
     print("-" * 60)
@@ -222,6 +243,10 @@ Examples:
         print("  - Processing message type: set_ota_url")
         print(f"  - Custom OTA URL saved to NVS: {args.ota_url}")
         print("  - Device rebooted and will use the custom OTA URL on next startup")
+    elif args.type == "auto_update":
+        print("  - Processing message type: auto_update")
+        print(f"  - Server URL updated to: {args.url}")
+        print("  - /sdcard/test.bin downloaded, then the device rebooted")
     else:
         print(f"  - Processing message type: {args.type}")
 
