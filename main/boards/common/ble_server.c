@@ -3,6 +3,7 @@
 #include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "esp_bt.h"
 #include "esp_log.h"
 #include "esp_nimble_hci.h"
 #include "nimble/nimble_port.h"
@@ -13,6 +14,7 @@
 #include "sdkconfig.h"
 
 static const char *TAG = "BLE-Server";
+static const esp_power_level_t kPortableSarBleTxPowerCap = ESP_PWR_LVL_N0;
 
 // BLE Server state
 static struct {
@@ -35,8 +37,29 @@ static void ble_app_advertise(void);
 static int ble_gap_event(struct ble_gap_event *event, void *arg);
 static void ble_app_on_sync(void);
 static void host_task(void *param);
+static void ble_apply_tx_power_cap(void);
 static int ble_device_read(uint16_t con_handle, uint16_t attr_handle, struct ble_gatt_access_ctxt *ctxt, void *arg);
 static int ble_device_write(uint16_t conn_handle, uint16_t attr_handle, struct ble_gatt_access_ctxt *ctxt, void *arg);
+
+static void ble_apply_tx_power_cap(void)
+{
+    esp_err_t rc = esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_DEFAULT, kPortableSarBleTxPowerCap);
+    if (rc != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to set BLE default TX power cap: %d", rc);
+    }
+
+    rc = esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_ADV, kPortableSarBleTxPowerCap);
+    if (rc != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to set BLE advertising TX power cap: %d", rc);
+    }
+
+    rc = esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_SCAN, kPortableSarBleTxPowerCap);
+    if (rc != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to set BLE scan TX power cap: %d", rc);
+    }
+
+    ESP_LOGI(TAG, "Applied BLE TX power cap: 0 dBm");
+}
 
 // GATT service definitions
 static const struct ble_gatt_svc_def gatt_svcs[] = {
@@ -197,6 +220,8 @@ static void ble_app_advertise(void)
     memset(&adv_params, 0, sizeof(adv_params));
     adv_params.conn_mode = BLE_GAP_CONN_MODE_UND;
     adv_params.disc_mode = BLE_GAP_DISC_MODE_GEN;
+
+    ble_apply_tx_power_cap();
     
     rc = ble_gap_adv_start(ble_server_state.addr_type, NULL, BLE_HS_FOREVER, 
                           &adv_params, ble_gap_event, NULL);
@@ -243,6 +268,7 @@ bool ble_server_init(const char* device_name, ble_data_callback_t data_cb, ble_c
 
     // Initialize BLE
     nimble_port_init();
+    ble_apply_tx_power_cap();
     ble_svc_gap_device_name_set(device_name);
     ble_svc_gap_init();
     ble_svc_gatt_init();
