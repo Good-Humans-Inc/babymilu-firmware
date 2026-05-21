@@ -1,4 +1,5 @@
 #include "wifi_station.h"
+#include <algorithm>
 #include <cstring>
 
 #include <freertos/FreeRTOS.h>
