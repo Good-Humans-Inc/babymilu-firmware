@@ -1171,6 +1171,8 @@ void LcdDisplay::CreateOverlayMessage(const char* message)
         overlay_container_ = nullptr;
         overlay_bubble_ = nullptr;
         overlay_text_ = nullptr;
+        overlay_detail_text_ = nullptr;
+        overlay_progress_bar_ = nullptr;
     }
 
     auto screen = lv_screen_active();
@@ -1184,13 +1186,18 @@ void LcdDisplay::CreateOverlayMessage(const char* message)
     lv_obj_move_foreground(overlay_container_);
 
     overlay_bubble_ = lv_obj_create(overlay_container_);
-    lv_obj_set_style_radius(overlay_bubble_, 8, 0);
+    lv_obj_set_style_radius(overlay_bubble_, 16, 0);
     lv_obj_set_scrollbar_mode(overlay_bubble_, LV_SCROLLBAR_MODE_OFF);
-    lv_obj_set_style_border_width(overlay_bubble_, 1, 0);
+    lv_obj_set_style_border_width(overlay_bubble_, 0, 0);
     lv_obj_set_style_border_color(overlay_bubble_, current_theme_.border, 0);
-    lv_obj_set_style_pad_all(overlay_bubble_, 8, 0);
+    lv_obj_set_style_pad_hor(overlay_bubble_, 12, 0);
+    lv_obj_set_style_pad_ver(overlay_bubble_, 10, 0);
     lv_obj_set_style_bg_color(overlay_bubble_, current_theme_.system_bubble, 0);
-    lv_obj_set_width(overlay_bubble_, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(overlay_bubble_, LV_OPA_80, 0);
+    lv_obj_set_style_shadow_width(overlay_bubble_, 18, 0);
+    lv_obj_set_style_shadow_opa(overlay_bubble_, LV_OPA_30, 0);
+    lv_obj_set_style_shadow_color(overlay_bubble_, lv_color_black(), 0);
+    lv_obj_set_width(overlay_bubble_, LV_HOR_RES * 68 / 100);
     lv_obj_set_height(overlay_bubble_, LV_SIZE_CONTENT);
 
     overlay_text_ = lv_label_create(overlay_bubble_);
@@ -1200,14 +1207,90 @@ void LcdDisplay::CreateOverlayMessage(const char* message)
     lv_obj_set_style_text_color(overlay_text_, current_theme_.system_text, 0);
     lv_obj_set_style_text_align(overlay_text_, LV_TEXT_ALIGN_CENTER, 0);
 
-    lv_coord_t text_width = lv_txt_get_width(message, strlen(message), fonts_.text_font, 0);
-    lv_coord_t max_width = LV_HOR_RES * 85 / 100 - 16;
-    lv_coord_t bubble_width = (text_width < max_width) ? text_width : max_width;
-    if (bubble_width < 20) bubble_width = 20;
-    lv_obj_set_width(overlay_text_, bubble_width);
-    lv_obj_set_width(overlay_bubble_, bubble_width);
+    lv_obj_set_width(overlay_text_, LV_PCT(100));
+    lv_obj_align(overlay_bubble_, LV_ALIGN_BOTTOM_MID, 0, -18);
+}
 
-    lv_obj_align(overlay_bubble_, LV_ALIGN_TOP_MID, 0, 0);
+void LcdDisplay::CreateOverlayProgress(const char* title, int progress, const char* detail)
+{
+    DisplayLockGuard lock(this);
+    if (title == nullptr || strlen(title) == 0) {
+        ESP_LOGW("LcdDisplay", "CreateOverlayProgress: title is empty, skipping");
+        return;
+    }
+
+    if (progress < 0) progress = 0;
+    if (progress > 100) progress = 100;
+
+    if (overlay_container_ == nullptr) {
+        auto screen = lv_screen_active();
+        overlay_container_ = lv_obj_create(screen);
+        lv_obj_set_width(overlay_container_, LV_HOR_RES);
+        lv_obj_set_height(overlay_container_, LV_SIZE_CONTENT);
+        lv_obj_set_style_bg_opa(overlay_container_, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(overlay_container_, 0, 0);
+        lv_obj_set_style_pad_all(overlay_container_, 0, 0);
+        lv_obj_align(overlay_container_, LV_ALIGN_BOTTOM_MID, 0, -18);
+        lv_obj_move_foreground(overlay_container_);
+
+        overlay_bubble_ = lv_obj_create(overlay_container_);
+        lv_obj_set_style_radius(overlay_bubble_, 18, 0);
+        lv_obj_set_scrollbar_mode(overlay_bubble_, LV_SCROLLBAR_MODE_OFF);
+        lv_obj_set_style_border_width(overlay_bubble_, 0, 0);
+        lv_obj_set_style_border_color(overlay_bubble_, current_theme_.border, 0);
+        lv_obj_set_style_pad_hor(overlay_bubble_, 14, 0);
+        lv_obj_set_style_pad_top(overlay_bubble_, 12, 0);
+        lv_obj_set_style_pad_bottom(overlay_bubble_, 12, 0);
+        lv_obj_set_style_bg_color(overlay_bubble_, current_theme_.system_bubble, 0);
+        lv_obj_set_style_bg_opa(overlay_bubble_, LV_OPA_80, 0);
+        lv_obj_set_style_shadow_width(overlay_bubble_, 18, 0);
+        lv_obj_set_style_shadow_opa(overlay_bubble_, LV_OPA_30, 0);
+        lv_obj_set_style_shadow_color(overlay_bubble_, lv_color_black(), 0);
+        lv_obj_set_style_pad_row(overlay_bubble_, 4, 0);
+        lv_obj_set_flex_flow(overlay_bubble_, LV_FLEX_FLOW_COLUMN);
+        lv_obj_set_flex_align(overlay_bubble_, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_set_width(overlay_bubble_, LV_HOR_RES * 70 / 100);
+
+        overlay_text_ = lv_label_create(overlay_bubble_);
+        lv_label_set_long_mode(overlay_text_, LV_LABEL_LONG_WRAP);
+        lv_obj_set_style_text_font(overlay_text_, fonts_.text_font, 0);
+        lv_obj_set_style_text_color(overlay_text_, current_theme_.text, 0);
+        lv_obj_set_style_text_align(overlay_text_, LV_TEXT_ALIGN_CENTER, 0);
+        lv_label_set_long_mode(overlay_text_, LV_LABEL_LONG_DOT);
+        lv_obj_set_width(overlay_text_, LV_PCT(100));
+
+        overlay_detail_text_ = lv_label_create(overlay_bubble_);
+        lv_label_set_long_mode(overlay_detail_text_, LV_LABEL_LONG_CLIP);
+        lv_obj_set_style_text_font(overlay_detail_text_, fonts_.text_font, 0);
+        lv_obj_set_style_text_color(overlay_detail_text_, current_theme_.system_text, 0);
+        lv_obj_set_style_text_opa(overlay_detail_text_, LV_OPA_80, 0);
+        lv_obj_set_style_text_align(overlay_detail_text_, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_width(overlay_detail_text_, LV_PCT(100));
+
+        overlay_progress_bar_ = lv_bar_create(overlay_bubble_);
+        lv_bar_set_range(overlay_progress_bar_, 0, 100);
+        lv_obj_set_width(overlay_progress_bar_, LV_PCT(100));
+        lv_obj_set_height(overlay_progress_bar_, 7);
+        lv_obj_set_style_bg_color(overlay_progress_bar_, current_theme_.chat_background, LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(overlay_progress_bar_, LV_OPA_70, LV_PART_MAIN);
+        lv_obj_set_style_bg_color(overlay_progress_bar_, current_theme_.user_bubble, LV_PART_INDICATOR);
+        lv_obj_set_style_radius(overlay_progress_bar_, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+        lv_obj_set_style_radius(overlay_progress_bar_, LV_RADIUS_CIRCLE, LV_PART_INDICATOR);
+    }
+
+    lv_label_set_text(overlay_text_, title);
+    if (overlay_detail_text_ != nullptr) {
+        bool has_detail = (detail != nullptr && strlen(detail) > 0);
+        lv_label_set_text(overlay_detail_text_, has_detail ? detail : "");
+        if (has_detail) {
+            lv_obj_clear_flag(overlay_detail_text_, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(overlay_detail_text_, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    lv_bar_set_value(overlay_progress_bar_, progress, LV_ANIM_OFF);
+    lv_obj_update_layout(overlay_bubble_);
+    lv_obj_align(overlay_bubble_, LV_ALIGN_BOTTOM_MID, 0, 0);
 }
 
 void LcdDisplay::ClearOverlayMessage()
@@ -1219,11 +1302,19 @@ void LcdDisplay::ClearOverlayMessage()
         overlay_container_ = nullptr;
         overlay_bubble_ = nullptr;
         overlay_text_ = nullptr;
+        overlay_detail_text_ = nullptr;
+        overlay_progress_bar_ = nullptr;
     }
 }
 
 void LcdDisplay::SetEmotion(const char *emotion)
 {
+    if (startup_visual_locked_) {
+        ESP_LOGI(TAG, "Startup visual lock active, ignoring SetEmotion(%s)",
+                 emotion ? emotion : "<null>");
+        return;
+    }
+
     struct Emotion
     {
         const AnimationType_e animation_num;
@@ -1311,6 +1402,11 @@ void LcdDisplay::SetEmotion(const char *emotion)
 void LcdDisplay::SetEmotionImg(const lv_image_dsc_t *img)
 {
     DisplayLockGuard lock(this);
+
+    if (startup_visual_locked_) {
+        ESP_LOGI(TAG, "Startup visual lock active, ignoring SetEmotionImg");
+        return;
+    }
     
     // Hide GIF widget if it exists
     if (emotion_gif_ != nullptr) {
@@ -1347,6 +1443,11 @@ void LcdDisplay::SetEmotionGif(const uint8_t* gif_data, size_t gif_size)
 {
 #if LV_USE_GIF
     DisplayLockGuard lock(this);
+
+    if (startup_visual_locked_) {
+        ESP_LOGI(TAG, "Startup visual lock active, ignoring SetEmotionGif");
+        return;
+    }
     
     if (!gif_data || gif_size == 0) {
         ESP_LOGE(TAG, "Invalid GIF data");
@@ -1429,6 +1530,13 @@ void LcdDisplay::SetEmotionGif(const uint8_t* gif_data, size_t gif_size)
     (void)gif_data;
     (void)gif_size;
 #endif
+}
+
+void LcdDisplay::SetStartupVisualLock(bool locked)
+{
+    DisplayLockGuard lock(this);
+    startup_visual_locked_ = locked;
+    ESP_LOGI(TAG, "Startup visual lock %s", locked ? "enabled" : "disabled");
 }
 
 void LcdDisplay::SetIcon(const char *icon)

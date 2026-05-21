@@ -3,12 +3,21 @@
 
 #include "board.h"
 #include "ble_server.h"  // BLE server enabled
+#include <cstdint>
 
 class WifiBoard : public Board {
 protected:
     bool wifi_config_mode_ = false;
     bool ble_initialized_ = false;  // BLE server enabled
     std::string temp_ssid_;  // Temporary storage for SSID during BLE configuration
+    bool has_last_wifi_failure_ = false;
+    int last_wifi_failure_reason_ = 0;
+    int8_t last_wifi_failure_rssi_ = 0;
+    std::string last_wifi_failure_ssid_;
+    std::string last_wifi_failure_password_;
+    std::string last_wifi_failure_code_;
+    std::string last_wifi_failure_reason_name_;
+    std::string last_wifi_failure_screen_message_;
     void EnterWifiConfigMode();
     void EnterWifiConfigModeViaBLE();  // Enter BLE config mode after WiFi disconnect
     void InitializeBleServer();  // BLE server enabled

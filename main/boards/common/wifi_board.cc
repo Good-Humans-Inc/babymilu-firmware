@@ -14,6 +14,7 @@
 #include <tls_transport.h>
 #include <web_socket.h>
 #include <esp_log.h>
+#include <cstdio>
 
 #include <wifi_station.h>
 #include <wifi_configuration_ap.h>
@@ -23,6 +24,215 @@
 #include "error_log_uploader.h"
 
 static const char *TAG = "WifiBoard";
+
+namespace {
+
+struct WifiFailureSnapshot {
+    bool seen = false;
+    wifi_err_reason_t reason = WIFI_REASON_UNSPECIFIED;
+    int8_t rssi = 0;
+    std::string ssid;
+    std::string password;
+    std::string log_code;
+    std::string reason_name;
+    std::string screen_message;
+};
+
+bool ShouldIgnoreWifiFailure(wifi_err_reason_t reason) {
+    return reason == WIFI_REASON_ASSOC_LEAVE ||
+           reason == WIFI_REASON_AUTH_LEAVE ||
+           reason == WIFI_REASON_ROAMING;
+}
+
+void DescribeWifiFailure(wifi_err_reason_t reason, const char** log_code,
+                         const char** reason_name, const char** screen_message) {
+    switch (reason) {
+        case WIFI_REASON_NO_AP_FOUND:
+            *log_code = "NO_AP_FOUND";
+            *reason_name = "NO_AP_FOUND";
+            *screen_message = "Wi-Fi network not found";
+            break;
+        case WIFI_REASON_NO_AP_FOUND_W_COMPATIBLE_SECURITY:
+            *log_code = "NO_AP_FOUND";
+            *reason_name = "NO_AP_FOUND_W_COMPATIBLE_SECURITY";
+            *screen_message = "Wi-Fi security mismatch";
+            break;
+        case WIFI_REASON_NO_AP_FOUND_IN_AUTHMODE_THRESHOLD:
+            *log_code = "NO_AP_FOUND";
+            *reason_name = "NO_AP_FOUND_IN_AUTHMODE_THRESHOLD";
+            *screen_message = "Wi-Fi auth mode mismatch";
+            break;
+        case WIFI_REASON_NO_AP_FOUND_IN_RSSI_THRESHOLD:
+            *log_code = "NO_AP_FOUND";
+            *reason_name = "NO_AP_FOUND_IN_RSSI_THRESHOLD";
+            *screen_message = "Wi-Fi signal too weak";
+            break;
+        case WIFI_REASON_AUTH_FAIL:
+            *log_code = "AUTH_FAIL";
+            *reason_name = "AUTH_FAIL";
+            *screen_message = "Wi-Fi authentication failed";
+            break;
+        case WIFI_REASON_802_1X_AUTH_FAILED:
+            *log_code = "AUTH_FAIL";
+            *reason_name = "802_1X_AUTH_FAILED";
+            *screen_message = "Wi-Fi authentication failed";
+            break;
+        case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT:
+            *log_code = "HANDSHAKE_TIMEOUT";
+            *reason_name = "4WAY_HANDSHAKE_TIMEOUT";
+            *screen_message = "Wi-Fi handshake timed out";
+            break;
+        case WIFI_REASON_HANDSHAKE_TIMEOUT:
+            *log_code = "HANDSHAKE_TIMEOUT";
+            *reason_name = "HANDSHAKE_TIMEOUT";
+            *screen_message = "Wi-Fi handshake timed out";
+            break;
+        case WIFI_REASON_ASSOC_FAIL:
+            *log_code = "ASSOC_FAIL";
+            *reason_name = "ASSOC_FAIL";
+            *screen_message = "Wi-Fi association failed";
+            break;
+        case WIFI_REASON_ASSOC_EXPIRE:
+            *log_code = "ASSOC_FAIL";
+            *reason_name = "ASSOC_EXPIRE";
+            *screen_message = "Wi-Fi association expired";
+            break;
+        case WIFI_REASON_BEACON_TIMEOUT:
+            *log_code = "BEACON_TIMEOUT";
+            *reason_name = "BEACON_TIMEOUT";
+            *screen_message = "Wi-Fi beacon timeout";
+            break;
+        case WIFI_REASON_CONNECTION_FAIL:
+            *log_code = "CONNECTION_FAIL";
+            *reason_name = "CONNECTION_FAIL";
+            *screen_message = "Wi-Fi connection failed";
+            break;
+        case WIFI_REASON_TIMEOUT:
+            *log_code = "TIMEOUT";
+            *reason_name = "TIMEOUT";
+            *screen_message = "Wi-Fi timed out";
+            break;
+        default:
+            *log_code = "DISCONNECTED";
+            *reason_name = "DISCONNECTED";
+            *screen_message = "Wi-Fi disconnected";
+            break;
+    }
+}
+
+std::string BuildWifiFailureSummary(const char* screen_message, int reason_code) {
+    char buffer[128];
+    snprintf(buffer, sizeof(buffer), "%s (%d)", screen_message, reason_code);
+    return std::string(buffer);
+}
+
+std::string FindStoredPasswordForSsid(const std::string& ssid) {
+    auto& ssid_manager = SsidManager::GetInstance();
+    auto ssid_list = ssid_manager.GetSsidList();
+    for (const auto& item : ssid_list) {
+        if (item.ssid == ssid) {
+            return item.password;
+        }
+    }
+    return "";
+}
+
+std::string BuildWifiAttemptOverlay(const char* title,
+                                    const std::string& ssid,
+                                    const std::string& password,
+                                    const std::string& detail) {
+    std::string overlay = title;
+    if (!detail.empty()) {
+        overlay += "\n";
+        overlay += detail;
+    }
+    overlay += "\nSSID: ";
+    overlay += ssid.empty() ? "<unknown>" : ssid;
+    overlay += "\nPWD: ";
+    overlay += password.empty() ? "<not found>" : password;
+    return overlay;
+}
+
+WifiFailureSnapshot BuildWifiFailureSnapshot(const std::string& ssid,
+                                             wifi_err_reason_t reason,
+                                             int8_t rssi) {
+    const char* log_code = nullptr;
+    const char* reason_name = nullptr;
+    const char* screen_message = nullptr;
+    DescribeWifiFailure(reason, &log_code, &reason_name, &screen_message);
+
+    WifiFailureSnapshot snapshot;
+    snapshot.seen = true;
+    snapshot.reason = reason;
+    snapshot.rssi = rssi;
+    snapshot.ssid = ssid.empty() ? "<unknown>" : ssid;
+    snapshot.password = FindStoredPasswordForSsid(ssid);
+    snapshot.log_code = log_code;
+    snapshot.reason_name = reason_name;
+    snapshot.screen_message = BuildWifiFailureSummary(screen_message, reason);
+    return snapshot;
+}
+
+void ShowWifiFailureOnDisplay(const WifiFailureSnapshot& snapshot) {
+    auto display = Board::GetInstance().GetDisplay();
+    if (display == nullptr) {
+        return;
+    }
+    display->SetStatus(snapshot.screen_message.c_str());
+    display->ShowNotification(snapshot.screen_message.c_str(), 10000);
+    std::string overlay = BuildWifiAttemptOverlay("Wi-Fi failed",
+                                                  snapshot.ssid,
+                                                  snapshot.password,
+                                                  snapshot.screen_message);
+    auto* lcd_display = static_cast<LcdDisplay*>(display);
+    if (lcd_display != nullptr) {
+        lcd_display->CreateOverlayMessage(overlay.c_str());
+    } else {
+        display->SetChatMessage("system", overlay.c_str());
+    }
+}
+
+void ShowWifiConnectAttemptOnDisplay(const std::string& ssid, const std::string& password) {
+    auto display = Board::GetInstance().GetDisplay();
+    if (display == nullptr) {
+        return;
+    }
+    std::string status = std::string("Trying Wi-Fi: ") + (ssid.empty() ? "<unknown>" : ssid);
+    display->SetStatus(status.c_str());
+    std::string overlay = BuildWifiAttemptOverlay("Trying Wi-Fi credential",
+                                                  ssid,
+                                                  password,
+                                                  "Checking the saved credential now");
+    auto* lcd_display = static_cast<LcdDisplay*>(display);
+    if (lcd_display != nullptr) {
+        lcd_display->CreateOverlayMessage(overlay.c_str());
+    } else {
+        display->SetChatMessage("system", overlay.c_str());
+    }
+}
+
+void ClearWifiOverlay(Display* display) {
+    if (display == nullptr) {
+        return;
+    }
+    auto* lcd_display = static_cast<LcdDisplay*>(display);
+    if (lcd_display != nullptr) {
+        lcd_display->ClearOverlayMessage();
+    }
+}
+
+void LogWifiFailure(const WifiFailureSnapshot& snapshot) {
+    ESP_LOGW(TAG,
+             "[WIFI_FAIL] code=%s reason=%d reason_name=%s ssid=%s rssi=%d screen=\"%s\"",
+             snapshot.log_code.c_str(),
+             snapshot.reason,
+             snapshot.reason_name.c_str(),
+             snapshot.ssid.c_str(),
+             snapshot.rssi,
+             snapshot.screen_message.c_str());
+}
+
+}  // namespace
 
 // Keep newly added WiFi credentials at the lowest priority so existing
 // networks are tried first on startup.
@@ -255,6 +465,14 @@ void WifiBoard::StartNetwork() {
 
     // Start WiFi station with existing credentials
     auto& wifi_station = WifiStation::GetInstance();
+    has_last_wifi_failure_ = false;
+    last_wifi_failure_reason_ = 0;
+    last_wifi_failure_rssi_ = 0;
+    last_wifi_failure_ssid_.clear();
+    last_wifi_failure_password_.clear();
+    last_wifi_failure_code_.clear();
+    last_wifi_failure_reason_name_.clear();
+    last_wifi_failure_screen_message_.clear();
     {
         Settings settings("wifi", true);
         std::string preferred_ssid = settings.GetString("nxt_boot_ssid");
@@ -284,10 +502,12 @@ void WifiBoard::StartNetwork() {
         auto& ssid_manager = SsidManager::GetInstance();
         auto ssid_list = ssid_manager.GetSsidList();
         bool matched_ssid = false;
+        std::string matched_password;
         for (const auto& item : ssid_list) {
             if (item.ssid == ssid) {
                 ESP_LOGI(TAG, "Connecting with SSID='%s', Password='%s'", item.ssid.c_str(), item.password.c_str());
                 matched_ssid = true;
+                matched_password = item.password;
                 break;
             }
         }
@@ -300,12 +520,14 @@ void WifiBoard::StartNetwork() {
         notification += ssid;
         notification += "...";
         display->ShowNotification(notification.c_str(), 30000);
+        ShowWifiConnectAttemptOnDisplay(ssid, matched_password);
     });
     wifi_station.OnConnected([this](const std::string& ssid) {
         auto display = Board::GetInstance().GetDisplay();
         std::string notification = Lang::Strings::CONNECTED_TO;
         notification += ssid;
         display->ShowNotification(notification.c_str(), 30000);
+        ClearWifiOverlay(display);
         
         // Stop BLE server when WiFi is connected
         if (ble_initialized_) {
@@ -347,16 +569,28 @@ void WifiBoard::StartNetwork() {
             ESP_LOGI(TAG, "Animation is available, not showing connected message");
         }
     });
-    
-    // Note: OnDisconnected callback is not available in WifiStation class
-    // Disconnection handling is done internally by WifiStation with automatic reconnection
+    wifi_station.OnDisconnected([this](const std::string& ssid, wifi_err_reason_t reason, int8_t rssi) {
+        if (ShouldIgnoreWifiFailure(reason)) {
+            return;
+        }
+
+        auto snapshot = BuildWifiFailureSnapshot(ssid, reason, rssi);
+        has_last_wifi_failure_ = true;
+        last_wifi_failure_reason_ = snapshot.reason;
+        last_wifi_failure_rssi_ = snapshot.rssi;
+        last_wifi_failure_ssid_ = snapshot.ssid;
+        last_wifi_failure_password_ = snapshot.password;
+        last_wifi_failure_code_ = snapshot.log_code;
+        last_wifi_failure_reason_name_ = snapshot.reason_name;
+        last_wifi_failure_screen_message_ = snapshot.screen_message;
+        LogWifiFailure(snapshot);
+        ShowWifiFailureOnDisplay(snapshot);
+    });
     
     wifi_station.Start();
 
-    // Try to connect to WiFi, if failed, use BLE for configuration
-    // Keep this longer than per-SSID retry window (3 retries x 15s) so
-    // WifiStation can finish retries before BLE fallback.
-    if (!wifi_station.WaitForConnected(60 * 1000)) {
+    // Try to connect to WiFi with saved credentials before falling back to BLE configuration.
+    if (!wifi_station.WaitForConnected(25 * 1000)) {
         wifi_station.Stop();
         wifi_config_mode_ = true;
         ESP_LOGI(TAG, "WiFi connection failed, using BLE for configuration");
@@ -373,7 +607,13 @@ void WifiBoard::StartNetwork() {
         application.SetDeviceState(kDeviceStateWifiConfiguring);
         
         // Display BLE configuration instructions
-        std::string hint = "WiFi connection failed. Connect to BLE device 'BabyMilu' to configure WiFi";
+        std::string hint;
+        if (has_last_wifi_failure_) {
+            hint = last_wifi_failure_screen_message_ + ". Connect to BLE device 'BabyMilu' to configure WiFi";
+        } else {
+            hint = "WiFi connection timed out. Connect to BLE device 'BabyMilu' to configure WiFi";
+            ESP_LOGW(TAG, "[WIFI_FAIL] code=CONNECT_TIMEOUT reason=0 reason_name=TIMEOUT ssid=<unknown> rssi=0 screen=\"Wi-Fi connection timed out\"");
+        }
         application.Alert("WiFi Configuration", hint.c_str(), "", Lang::Sounds::P3_WIFICONFIG);
 
         // Credentials already exist on this device: do NOT show the

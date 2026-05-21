@@ -51,6 +51,34 @@
 #define DEFAULT_MQTT_PUBLISH_TEMPLATE "xiaozhi/%s/up"
 #endif
 
+namespace {
+
+void ShowStartupProgressOverlay(const char* title, int progress, const char* detail = nullptr) {
+    auto* display = Board::GetInstance().GetDisplay();
+    auto* lcd_display = static_cast<LcdDisplay*>(display);
+    if (lcd_display != nullptr) {
+        lcd_display->CreateOverlayProgress(title, progress, detail);
+    }
+}
+
+void ClearStartupProgressOverlay() {
+    auto* display = Board::GetInstance().GetDisplay();
+    auto* lcd_display = static_cast<LcdDisplay*>(display);
+    if (lcd_display != nullptr) {
+        lcd_display->ClearOverlayMessage();
+    }
+}
+
+void SetStartupVisualLock(bool locked) {
+    auto* display = Board::GetInstance().GetDisplay();
+    auto* lcd_display = static_cast<LcdDisplay*>(display);
+    if (lcd_display != nullptr) {
+        lcd_display->SetStartupVisualLock(locked);
+    }
+}
+
+}  // namespace
+
 // Minimal WAV-from-HTTP player for POC: expects mono 16-bit PCM at codec sample rate
 static bool PlayWavFromUrl(const std::string &url, float gain)
 {
@@ -477,7 +505,14 @@ void Application::CheckNewVersion()
 
         if (ota_.HasNewVersion())
         {
-            Alert(Lang::Strings::OTA_UPGRADE, Lang::Strings::UPGRADING, "happy", Lang::Sounds::P3_UPGRADE);
+            if (Board::GetInstance().GetBoardType() == "echoear") {
+                display->SetStatus(Lang::Strings::OTA_UPGRADE);
+                ShowStartupProgressOverlay("System upgrading", 0);
+                ResetDecoder();
+                PlaySound(Lang::Sounds::P3_UPGRADE);
+            } else {
+                Alert(Lang::Strings::OTA_UPGRADE, Lang::Strings::UPGRADING, "happy", Lang::Sounds::P3_UPGRADE);
+            }
 
             vTaskDelay(pdMS_TO_TICKS(3000));
 
@@ -506,8 +541,9 @@ void Application::CheckNewVersion()
 
             ota_.StartUpgrade([display](int progress, size_t speed)
                               {
-                char buffer[64];
-                snprintf(buffer, sizeof(buffer), "%d%% %uKB/s", progress, speed / 1024);
+                (void)display;
+                (void)speed;
+                ShowStartupProgressOverlay("System upgrading", progress);
                 // DISABLED: Comment out transcript display to reduce memory usage
                 // display->SetChatMessage("system", buffer); 
                 });
@@ -929,7 +965,6 @@ void Application::Start()
     } else {
         ESP_LOGI(TAG, "startup.wav playback finished");
     }
-    animation_block_startup_load(false);
 #endif
 
 #if CONFIG_USE_AUDIO_PROCESSOR
@@ -1048,6 +1083,11 @@ void Application::Start()
     // Check for new firmware version or get the MQTT broker address
     CheckNewVersion();
 
+#ifdef CONFIG_BOARD_TYPE_ECHOEAR
+    animation_block_startup_load(false);
+    SetStartupVisualLock(false);
+#endif
+
     // Check for animation updates after network is confirmed ready
     // Only trigger once after startup when server connection is established
     ESP_LOGI(TAG, "Checking if network is ready for animation update check...");
@@ -1095,6 +1135,7 @@ void Application::Start()
         } else {
             ESP_LOGW(TAG, "Startup animation update check did not start");
         }
+        ClearStartupProgressOverlay();
     } else {
         ESP_LOGW(TAG, "Network not ready yet, skipping animation update check");
     }

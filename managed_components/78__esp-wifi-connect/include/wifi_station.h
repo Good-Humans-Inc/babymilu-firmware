@@ -34,6 +34,7 @@ public:
 
     void OnConnect(std::function<void(const std::string& ssid)> on_connect);
     void OnConnected(std::function<void(const std::string& ssid)> on_connected);
+    void OnDisconnected(std::function<void(const std::string& ssid, wifi_err_reason_t reason, int8_t rssi)> on_disconnected);
     void OnScanBegin(std::function<void()> on_scan_begin);
 
 private:
@@ -55,6 +56,7 @@ private:
     int reconnect_count_ = 0;
     std::function<void(const std::string& ssid)> on_connect_;
     std::function<void(const std::string& ssid)> on_connected_;
+    std::function<void(const std::string& ssid, wifi_err_reason_t reason, int8_t rssi)> on_disconnected_;
     std::function<void()> on_scan_begin_;
     std::vector<WifiApRecord> connect_queue_;
     std::string preferred_ssid_once_;
