@@ -186,6 +186,32 @@ void ShowWifiFailureOnDisplay(const WifiFailureSnapshot& snapshot) {
                                                   snapshot.screen_message);
     auto* lcd_display = static_cast<LcdDisplay*>(display);
     if (lcd_display != nullptr) {
+        lcd_display->SetStartupVisualLock(false);
+        lcd_display->SetEmotion("wifi");
+        lcd_display->CreateOverlayMessage(overlay.c_str());
+    } else {
+        display->SetChatMessage("system", overlay.c_str());
+    }
+}
+
+void ShowWifiTimeoutOnDisplay(const std::string& ssid,
+                              const std::string& password,
+                              const std::string& screen_message) {
+    auto display = Board::GetInstance().GetDisplay();
+    if (display == nullptr) {
+        return;
+    }
+
+    display->SetStatus(screen_message.c_str());
+    display->ShowNotification(screen_message.c_str(), 10000);
+    std::string overlay = BuildWifiAttemptOverlay("Wi-Fi failed",
+                                                  ssid,
+                                                  password,
+                                                  screen_message);
+    auto* lcd_display = static_cast<LcdDisplay*>(display);
+    if (lcd_display != nullptr) {
+        lcd_display->SetStartupVisualLock(false);
+        lcd_display->SetEmotion("wifi");
         lcd_display->CreateOverlayMessage(overlay.c_str());
     } else {
         display->SetChatMessage("system", overlay.c_str());
@@ -610,11 +636,25 @@ void WifiBoard::StartNetwork() {
         std::string hint;
         if (has_last_wifi_failure_) {
             hint = last_wifi_failure_screen_message_ + ". Connect to BLE device 'BabyMilu' to configure WiFi";
+            ShowWifiTimeoutOnDisplay(last_wifi_failure_ssid_,
+                                     last_wifi_failure_password_,
+                                     last_wifi_failure_screen_message_);
         } else {
-            hint = "WiFi connection timed out. Connect to BLE device 'BabyMilu' to configure WiFi";
-            ESP_LOGW(TAG, "[WIFI_FAIL] code=CONNECT_TIMEOUT reason=0 reason_name=TIMEOUT ssid=<unknown> rssi=0 screen=\"Wi-Fi connection timed out\"");
+            std::string timeout_ssid = "<unknown>";
+            std::string timeout_password;
+            auto ssid_list = SsidManager::GetInstance().GetSsidList();
+            if (!ssid_list.empty()) {
+                timeout_ssid = ssid_list.front().ssid;
+                timeout_password = ssid_list.front().password;
+            }
+            const std::string timeout_message = "Wi-Fi connection timed out";
+            hint = timeout_message + ". Connect to BLE device 'BabyMilu' to configure WiFi";
+            ESP_LOGW(TAG, "[WIFI_FAIL] code=CONNECT_TIMEOUT reason=0 reason_name=TIMEOUT ssid=%s rssi=0 screen=\"%s\"",
+                     timeout_ssid.c_str(),
+                     timeout_message.c_str());
+            ShowWifiTimeoutOnDisplay(timeout_ssid, timeout_password, timeout_message);
         }
-        application.Alert("WiFi Configuration", hint.c_str(), "", Lang::Sounds::P3_WIFICONFIG);
+        application.Alert("WiFi Configuration", hint.c_str(), "wifi", Lang::Sounds::P3_WIFICONFIG);
 
         // Credentials already exist on this device: do NOT show the
         // "Connect me to wifi with BabyMilu App..." onboarding message.
