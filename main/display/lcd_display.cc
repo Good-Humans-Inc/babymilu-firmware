@@ -1177,12 +1177,13 @@ void LcdDisplay::CreateOverlayMessage(const char* message)
 
     auto screen = lv_screen_active();
     overlay_container_ = lv_obj_create(screen);
-    lv_obj_set_width(overlay_container_, LV_HOR_RES);
-    lv_obj_set_height(overlay_container_, LV_SIZE_CONTENT);
+    lv_obj_set_size(overlay_container_, LV_HOR_RES, LV_VER_RES);
     lv_obj_set_style_bg_opa(overlay_container_, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(overlay_container_, 0, 0);
     lv_obj_set_style_pad_all(overlay_container_, 0, 0);
-    lv_obj_align(overlay_container_, LV_ALIGN_TOP_MID, 0, 2);
+    lv_obj_clear_flag(overlay_container_, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(overlay_container_, LV_OBJ_FLAG_FLOATING);
+    lv_obj_align(overlay_container_, LV_ALIGN_CENTER, 0, 0);
     lv_obj_move_foreground(overlay_container_);
 
     overlay_bubble_ = lv_obj_create(overlay_container_);
@@ -1208,7 +1209,9 @@ void LcdDisplay::CreateOverlayMessage(const char* message)
     lv_obj_set_style_text_align(overlay_text_, LV_TEXT_ALIGN_CENTER, 0);
 
     lv_obj_set_width(overlay_text_, LV_PCT(100));
-    lv_obj_align(overlay_bubble_, LV_ALIGN_BOTTOM_MID, 0, -18);
+    lv_obj_update_layout(overlay_bubble_);
+    lv_obj_align(overlay_bubble_, LV_ALIGN_TOP_MID, 0, 28);
+    lv_obj_move_foreground(overlay_container_);
 }
 
 void LcdDisplay::CreateOverlayProgress(const char* title, int progress, const char* detail)
@@ -1225,12 +1228,13 @@ void LcdDisplay::CreateOverlayProgress(const char* title, int progress, const ch
     if (overlay_container_ == nullptr) {
         auto screen = lv_screen_active();
         overlay_container_ = lv_obj_create(screen);
-        lv_obj_set_width(overlay_container_, LV_HOR_RES);
-        lv_obj_set_height(overlay_container_, LV_SIZE_CONTENT);
+        lv_obj_set_size(overlay_container_, LV_HOR_RES, LV_VER_RES);
         lv_obj_set_style_bg_opa(overlay_container_, LV_OPA_TRANSP, 0);
         lv_obj_set_style_border_width(overlay_container_, 0, 0);
         lv_obj_set_style_pad_all(overlay_container_, 0, 0);
-        lv_obj_align(overlay_container_, LV_ALIGN_BOTTOM_MID, 0, -18);
+        lv_obj_clear_flag(overlay_container_, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_add_flag(overlay_container_, LV_OBJ_FLAG_FLOATING);
+        lv_obj_align(overlay_container_, LV_ALIGN_CENTER, 0, 0);
         lv_obj_move_foreground(overlay_container_);
 
         overlay_bubble_ = lv_obj_create(overlay_container_);
@@ -1290,7 +1294,8 @@ void LcdDisplay::CreateOverlayProgress(const char* title, int progress, const ch
     }
     lv_bar_set_value(overlay_progress_bar_, progress, LV_ANIM_OFF);
     lv_obj_update_layout(overlay_bubble_);
-    lv_obj_align(overlay_bubble_, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_align(overlay_bubble_, LV_ALIGN_BOTTOM_MID, 0, -18);
+    lv_obj_move_foreground(overlay_container_);
 }
 
 void LcdDisplay::ClearOverlayMessage()
