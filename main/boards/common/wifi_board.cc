@@ -609,8 +609,13 @@ void WifiBoard::StartNetwork() {
         last_wifi_failure_code_ = snapshot.log_code;
         last_wifi_failure_reason_name_ = snapshot.reason_name;
         last_wifi_failure_screen_message_ = snapshot.screen_message;
-        LogWifiFailure(snapshot);
-        ShowWifiFailureOnDisplay(snapshot);
+        ESP_LOGI(TAG,
+                 "Recorded transient Wi-Fi disconnect during retry: code=%s reason=%d reason_name=%s ssid=%s rssi=%d",
+                 snapshot.log_code.c_str(),
+                 snapshot.reason,
+                 snapshot.reason_name.c_str(),
+                 snapshot.ssid.c_str(),
+                 snapshot.rssi);
     });
     
     wifi_station.Start();
@@ -636,9 +641,17 @@ void WifiBoard::StartNetwork() {
         std::string hint;
         if (has_last_wifi_failure_) {
             hint = last_wifi_failure_screen_message_ + ". Connect to BLE device 'BabyMilu' to configure WiFi";
-            ShowWifiTimeoutOnDisplay(last_wifi_failure_ssid_,
-                                     last_wifi_failure_password_,
-                                     last_wifi_failure_screen_message_);
+            WifiFailureSnapshot snapshot;
+            snapshot.seen = true;
+            snapshot.reason = static_cast<wifi_err_reason_t>(last_wifi_failure_reason_);
+            snapshot.rssi = last_wifi_failure_rssi_;
+            snapshot.ssid = last_wifi_failure_ssid_;
+            snapshot.password = last_wifi_failure_password_;
+            snapshot.log_code = last_wifi_failure_code_;
+            snapshot.reason_name = last_wifi_failure_reason_name_;
+            snapshot.screen_message = last_wifi_failure_screen_message_;
+            LogWifiFailure(snapshot);
+            ShowWifiFailureOnDisplay(snapshot);
         } else {
             std::string timeout_ssid = "<unknown>";
             std::string timeout_password;

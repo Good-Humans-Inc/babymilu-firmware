@@ -394,8 +394,8 @@ void WifiStation::WifiEventHandler(void* arg, esp_event_base_t event_base, int32
     } else if (event_id == WIFI_EVENT_STA_DISCONNECTED) {
         auto* disc = static_cast<wifi_event_sta_disconnected_t*>(event_data);
         if (disc != nullptr) {
-            ESP_LOGW(TAG,
-                     "Disconnected from %s, reason=%d, rssi=%d",
+            ESP_LOGI(TAG,
+                     "Disconnected from %s during connection retry, reason=%d, rssi=%d",
                      reinterpret_cast<const char*>(disc->ssid),
                      disc->reason,
                      disc->rssi);
