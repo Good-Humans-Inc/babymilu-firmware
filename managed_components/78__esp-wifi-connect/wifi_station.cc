@@ -36,10 +36,6 @@ static std::string ToHexBytes(const char* input) {
 
 namespace {
 
-// Keep portable SAR testing below 3 mW conducted power. ESP-IDF accepts
-// quarter-dBm units here, and 8 is the minimum supported value (2 dBm).
-constexpr int8_t kPortableSarTxPowerCap = 8;
-
 std::string BytesToHex(const uint8_t* data, size_t len) {
     static const char kHex[] = "0123456789ABCDEF";
     std::string hex;
@@ -83,20 +79,21 @@ WifiStation::WifiStation() {
     }
     err = nvs_get_i8(nvs, "max_tx_power", &max_tx_power_);
     if (err != ESP_OK) {
-        max_tx_power_ = kPortableSarTxPowerCap;
-    } else if (max_tx_power_ != kPortableSarTxPowerCap) {
+        // ESP-IDF maps this onto a discrete TX ladder; 34 is the first value
+        // that yields an actual 8 dBm cap, about 6.3 mW.
+        max_tx_power_ = 34;
+    } else if (max_tx_power_ < 34 || max_tx_power_ > 43) {
         ESP_LOGW(TAG,
-                 "Overriding stored Wi-Fi TX power %d with portable SAR cap %d",
-                 max_tx_power_,
-                 kPortableSarTxPowerCap);
-        max_tx_power_ = kPortableSarTxPowerCap;
+                 "Overriding stored Wi-Fi TX power %d with 34 (8 dBm actual, about 6.3 mW)",
+                 max_tx_power_);
+        max_tx_power_ = 34;
     }
     err = nvs_get_u8(nvs, "remember_bssid", &remember_bssid_);
     if (err != ESP_OK) {
         remember_bssid_ = 0;
     }
     nvs_close(nvs);
-    ESP_LOGI(TAG, "Applying Wi-Fi max TX power cap: %d quarter-dBm (2 dBm)",
+    ESP_LOGI(TAG, "Applying Wi-Fi max TX power cap: %d quarter-dBm (8 dBm actual, about 6.3 mW)",
              max_tx_power_);
 }
 

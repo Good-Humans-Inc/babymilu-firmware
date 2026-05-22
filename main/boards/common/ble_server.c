@@ -14,7 +14,7 @@
 #include "sdkconfig.h"
 
 static const char *TAG = "BLE-Server";
-static const esp_power_level_t kPortableSarBleTxPowerCap = ESP_PWR_LVL_N0;
+static const esp_power_level_t kPortableSarBleTxPowerCap = ESP_PWR_LVL_P3;
 
 // BLE Server state
 static struct {
@@ -58,7 +58,7 @@ static void ble_apply_tx_power_cap(void)
         ESP_LOGE(TAG, "Failed to set BLE scan TX power cap: %d", rc);
     }
 
-    ESP_LOGI(TAG, "Applied BLE TX power cap: 0 dBm");
+    ESP_LOGI(TAG, "Applied BLE TX power cap: 3 dBm");
 }
 
 // GATT service definitions
