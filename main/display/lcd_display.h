@@ -41,6 +41,9 @@ protected:
     lv_obj_t* overlay_container_ = nullptr;
     lv_obj_t* overlay_bubble_ = nullptr;
     lv_obj_t* overlay_text_ = nullptr;
+    lv_obj_t* overlay_detail_text_ = nullptr;
+    lv_obj_t* overlay_progress_bar_ = nullptr;
+    bool startup_visual_locked_ = false;
 
     DisplayFonts fonts_;
     ThemeColors current_theme_;
@@ -79,7 +82,9 @@ public:
 
     // Overlay message (top, does not affect layout)
     void CreateOverlayMessage(const char* message);
+    void CreateOverlayProgress(const char* title, int progress, const char* detail = nullptr);
     void ClearOverlayMessage();
+    void SetStartupVisualLock(bool locked);
 };
 
 // RGB LCD显示器

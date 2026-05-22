@@ -1,6 +1,0 @@
-<25, not charging, shutdown
-< 25, charging, always powersaving mode + sleepy.gif
-25-40, not charging, always powersaving mode + battery.gif
-25-40, charging, 30-sec powersaving mode + sleepy.gif
-> 40, not charging, 30-sec powersaving mode + sleepy.gif
-> 40, charging, 30-sec powersaving mode + sleepy.gif

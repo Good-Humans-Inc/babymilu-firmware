@@ -1,33 +1,18 @@
-# LVGL图片转换工具  
+# LVGL Image Converter
 
-这个目录包含两个用于处理和转换图片为LVGL格式的Python脚本：
+Status: legacy/support tooling.
 
-## 1. LVGLImage (LVGLImage.py)
+This folder contains LVGL image conversion helpers. These tools are not the
+normal EchoEar emotion asset path.
 
-引用自LVGL[官方repo](https://github.com/lvgl/lvgl)的转换脚本[LVGLImage.py](https://github.com/lvgl/lvgl/blob/master/scripts/LVGLImage.py)  
+For current EchoEar animation assets, use the GIF packer at the repository root:
 
-## 2. LVGL图片转换工具 (lvgl_tools_gui.py)
-
-调用`LVGLImage.py`，将图片批量转换为LVGL图片格式  
-可用于修改小智的默认表情，具体修改教程[在这里](https://www.bilibili.com/video/BV12FQkYeEJ3/)
-
-### 特性
-
-- 图形化操作，界面更友好
-- 支持批量转换图片
-- 自动识别图片格式并选择最佳的颜色格式转换
-- 多分辨率支持
-
-### 使用方法
-
-安装Pillow
-
-```bash
-pip install Pillow # 处理图像需要
+```powershell
+python .\crop_and_pack_gifs.py .\gif_input .\test.bin
 ```
 
-运行转换工具
+Current runtime assets:
 
-```bash
-python lvgl_tools_gui.py
-```
+- `/sdcard/test.bin`: 20 packed GIFs.
+- `/sdcard/startup.gif`: startup GIF.
+- `/sdcard/startup.wav`: optional startup audio.

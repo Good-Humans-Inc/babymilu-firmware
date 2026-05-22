@@ -38,6 +38,54 @@
 
 static const char *TAG = "SD_CARD";
 
+namespace {
+
+const char* GetSdFailureCode(esp_err_t err) {
+    switch (err) {
+        case ESP_ERR_NOT_FOUND:
+            return "NOT_FOUND";
+        case ESP_ERR_TIMEOUT:
+            return "TIMEOUT";
+        case ESP_FAIL:
+            return "MOUNT_FAIL";
+        case ESP_ERR_NOT_SUPPORTED:
+            return "NOT_SUPPORTED";
+        case ESP_ERR_INVALID_STATE:
+            return "INVALID_STATE";
+        default:
+            return "INIT_FAIL";
+    }
+}
+
+const char* GetSdFailureMessage(esp_err_t err) {
+    switch (err) {
+        case ESP_ERR_NOT_FOUND:
+            return "SD card not detected";
+        case ESP_ERR_TIMEOUT:
+            return "SD card communication timeout";
+        case ESP_FAIL:
+            return "SD card mount failed";
+        case ESP_ERR_NOT_SUPPORTED:
+            return "SD card not supported on this board";
+        case ESP_ERR_INVALID_STATE:
+            return "SD card init invalid state";
+        default:
+            return "SD card initialization failed";
+    }
+}
+
+void LogSdInitFailure(const char* stage, esp_err_t err) {
+    ESP_LOGE(TAG,
+             "[SD_FAIL] code=%s err=%s stage=%s mounted=%d screen=\"%s\"",
+             GetSdFailureCode(err),
+             esp_err_to_name(err),
+             stage,
+             SdCard::IsMounted() ? 1 : 0,
+             GetSdFailureMessage(err));
+}
+
+}  // namespace
+
 // IO expander handle for LCD boards
 #if defined(CONFIG_BOARD_TYPE_ESP32S3_Touch_LCD_1_85) || defined(CONFIG_BOARD_TYPE_ESP32S3_Touch_LCD_1_85C)
 static esp_io_expander_handle_t s_io_expander_handle = NULL;
@@ -90,6 +138,7 @@ esp_err_t SdCard::Initialize()
             s_spi_host = SPI_HOST_MAX; // Mark as not initialized by us
         } else {
             ESP_LOGE(TAG, "Failed to initialize SPI bus: %s", esp_err_to_name(ret));
+            LogSdInitFailure("spi_bus_init", ret);
             return ret;
         }
     } else {
@@ -154,6 +203,7 @@ esp_err_t SdCard::Initialize()
         if (s_spi_host != SPI_HOST_MAX) {
             spi_bus_free(s_spi_host);
         }
+        LogSdInitFailure("mount", ret);
         return ret;
     }
 
@@ -195,6 +245,7 @@ esp_err_t SdCard::Initialize()
             s_spi_host = SPI_HOST_MAX; // Mark as not initialized by us
         } else {
             ESP_LOGE(TAG, "Failed to initialize SPI bus: %s", esp_err_to_name(ret));
+            LogSdInitFailure("spi_bus_init", ret);
             return ret;
         }
     } else {
@@ -258,6 +309,7 @@ esp_err_t SdCard::Initialize()
         if (s_spi_host != SPI_HOST_MAX) {
             spi_bus_free(s_spi_host);
         }
+        LogSdInitFailure("mount", ret);
         return ret;
     }
 
@@ -342,6 +394,7 @@ esp_err_t SdCard::Initialize()
         } else {
             ESP_LOGE(TAG, "Failed to initialize the card (%s). Make sure SD card lines have pull-up resistors in place.", esp_err_to_name(ret));
         }
+        LogSdInitFailure("mount", ret);
         return ret;
     }
 
@@ -405,6 +458,7 @@ esp_err_t SdCard::Initialize()
                      "Make sure SD card lines have pull-up resistors in place.",
                      esp_err_to_name(ret));
         }
+        LogSdInitFailure("mount", ret);
         return ret;
     } else {
         ESP_LOGI(TAG, "Filesystem mounted successfully");
@@ -421,6 +475,7 @@ esp_err_t SdCard::Initialize()
 
 #else
     ESP_LOGE(TAG, "SD card functionality not supported on this board");
+    LogSdInitFailure("unsupported", ESP_ERR_NOT_SUPPORTED);
     return ESP_ERR_NOT_SUPPORTED;
 #endif
 }

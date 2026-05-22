@@ -5,6 +5,7 @@
 #include "sd_card.h"
 #include "settings.h"
 #include "config.h"
+#include "display/lcd_display.h"
 #include <esp_log.h>
 #include <esp_timer.h>
 #include <esp_system.h>
@@ -21,6 +22,28 @@
 
 #define TAG "AnimationUpdater"
 #define ANIMATION_UPDATER_STACK_SIZE 10240
+
+namespace {
+
+void ShowAnimationDownloadProgress(const char* title, int progress, const std::string& detail) {
+    auto* display = Board::GetInstance().GetDisplay();
+    auto* lcd_display = static_cast<LcdDisplay*>(display);
+    if (lcd_display != nullptr) {
+        lcd_display->CreateOverlayProgress(title, progress, detail.c_str());
+    }
+}
+
+int ComputeDownloadPercent(size_t total_read, size_t content_length, bool unknown_length) {
+    if (unknown_length || content_length == 0) {
+        return 0;
+    }
+    int progress = static_cast<int>((total_read * 100) / content_length);
+    if (progress < 0) progress = 0;
+    if (progress > 100) progress = 100;
+    return progress;
+}
+
+}  // namespace
 
 // Server version - should match the lambda function's SERVER_VERSION
 #define SERVER_VERSION "1.0.1"
@@ -964,6 +987,14 @@ void AnimationUpdater::UpdateLoop() {
         vTaskDelete(NULL);
         return;
     }
+
+    size_t content_length = http->GetBodyLength();
+    bool unknown_length = (content_length == 0);
+    if (unknown_length) {
+        ESP_LOGW(TAG, "Animation file Content-Length is 0; overlay progress will stay indeterminate");
+    } else {
+        ShowAnimationDownloadProgress("Downloading animations", 0, "");
+    }
     
     // Remove existing file
     if (access(file_path, F_OK) == 0) {
@@ -1007,11 +1038,21 @@ void AnimationUpdater::UpdateLoop() {
         }
         
         total_read += bytes_read;
+
+        if (!unknown_length) {
+            ShowAnimationDownloadProgress("Downloading animations",
+                                          ComputeDownloadPercent(total_read, content_length, false),
+                                          "");
+        }
         
         // Log progress every 50KB (or at first 1KB to show download started)
         if (total_read == 1024 || total_read % 51200 == 0) {
             ESP_LOGI(TAG, "Download progress: %u bytes downloaded", (unsigned int)total_read);
         }
+    }
+
+    if (!unknown_length) {
+        ShowAnimationDownloadProgress("Downloading animations", 100, "");
     }
     
     ESP_LOGI(TAG, "Download stream completed: %u bytes received", (unsigned int)total_read);
@@ -1509,6 +1550,12 @@ bool AnimationUpdater::DownloadStartupWavFile(const std::string& url) {
             total_read += bytes_read;
             last_read_time = esp_timer_get_time() / 1000;
 
+            if (!unknown_length) {
+                ShowAnimationDownloadProgress("Downloading startup.wav",
+                                              ComputeDownloadPercent(total_read, content_length, false),
+                                              "");
+            }
+
             if (total_read == 1024 || total_read % 16384 == 0) {
                 if (unknown_length) {
                     ESP_LOGI(TAG, "startup.wav progress: %u bytes", (unsigned int)total_read);
@@ -1571,6 +1618,9 @@ bool AnimationUpdater::DownloadStartupWavFile(const std::string& url) {
     if (!unknown_length && total_read != content_length) {
         ESP_LOGW(TAG, "startup.wav size mismatch after download: expected %u bytes, got %u bytes",
                  (unsigned int)content_length, (unsigned int)total_read);
+    }
+    if (!unknown_length) {
+        ShowAnimationDownloadProgress("Downloading startup.wav", 100, "");
     }
     if (!SaveStartupWavMetadata(total_read, remote_etag, remote_last_modified)) {
         ESP_LOGW(TAG, "Failed to save startup.wav metadata cache to %s", kLocalWavMetadataPath);
@@ -1747,6 +1797,12 @@ bool AnimationUpdater::DownloadStartupGifFile(const std::string& url) {
             total_read += bytes_read;
             last_read_time = esp_timer_get_time() / 1000;
 
+            if (!unknown_length) {
+                ShowAnimationDownloadProgress("Downloading startup.gif",
+                                              ComputeDownloadPercent(total_read, content_length, false),
+                                              "");
+            }
+
             if (total_read == 1024 || total_read % 16384 == 0) {
                 if (unknown_length) {
                     ESP_LOGI(TAG, "startup.gif progress: %u bytes", (unsigned int)total_read);
@@ -1809,6 +1865,9 @@ bool AnimationUpdater::DownloadStartupGifFile(const std::string& url) {
     if (!unknown_length && total_read != content_length) {
         ESP_LOGW(TAG, "startup.gif size mismatch after download: expected %u bytes, got %u bytes",
                  (unsigned int)content_length, (unsigned int)total_read);
+    }
+    if (!unknown_length) {
+        ShowAnimationDownloadProgress("Downloading startup.gif", 100, "");
     }
     if (!SaveStartupGifMetadata(total_read, remote_etag, remote_last_modified)) {
         ESP_LOGW(TAG, "Failed to save startup.gif metadata cache to %s", kLocalGifMetadataPath);
@@ -2396,6 +2455,12 @@ bool AnimationUpdater::DownloadMegaAnimationFile(const std::string& url) {
             }
             
             total_read += bytes_read;
+
+            if (!unknown_length) {
+                ShowAnimationDownloadProgress("Downloading animations",
+                                              ComputeDownloadPercent(total_read, content_length, false),
+                                              "");
+            }
             
             // Log progress every 50KB (or at first 1KB to show download started)
             if (total_read == 1024 || total_read % 51200 == 0) {
@@ -2415,6 +2480,10 @@ bool AnimationUpdater::DownloadMegaAnimationFile(const std::string& url) {
             
             // Note: Don't stop at Content-Length - some servers report incorrect Content-Length headers
             // Continue reading until connection closes (bytes_read <= 0)
+        }
+
+        if (!unknown_length) {
+            ShowAnimationDownloadProgress("Downloading animations", 100, "");
         }
         
         // Flush and sync file to ensure all data is written to disk

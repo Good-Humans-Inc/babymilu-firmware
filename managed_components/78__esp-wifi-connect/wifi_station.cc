@@ -136,6 +136,10 @@ void WifiStation::OnConnected(std::function<void(const std::string& ssid)> on_co
     on_connected_ = on_connected;
 }
 
+void WifiStation::OnDisconnected(std::function<void(const std::string& ssid, wifi_err_reason_t reason, int8_t rssi)> on_disconnected) {
+    on_disconnected_ = on_disconnected;
+}
+
 void WifiStation::Start() {
     // Initialize the TCP/IP stack
     ESP_ERROR_CHECK(esp_netif_init());
@@ -390,14 +394,17 @@ void WifiStation::WifiEventHandler(void* arg, esp_event_base_t event_base, int32
     } else if (event_id == WIFI_EVENT_STA_DISCONNECTED) {
         auto* disc = static_cast<wifi_event_sta_disconnected_t*>(event_data);
         if (disc != nullptr) {
-            ESP_LOGW(TAG,
-                     "Disconnected from %s, reason=%d, rssi=%d",
+            ESP_LOGI(TAG,
+                     "Disconnected from %s during connection retry, reason=%d, rssi=%d",
                      reinterpret_cast<const char*>(disc->ssid),
                      disc->reason,
                      disc->rssi);
             LogSsidBytes("Disconnected SSID bytes",
                          reinterpret_cast<const uint8_t*>(disc->ssid),
                          disc->ssid_len);
+            if (this_->on_disconnected_) {
+                this_->on_disconnected_(this_->ssid_, static_cast<wifi_err_reason_t>(disc->reason), disc->rssi);
+            }
         }
         xEventGroupClearBits(this_->event_group_, WIFI_EVENT_CONNECTED);
         if (this_->reconnect_count_ < MAX_RECONNECT_COUNT) {
