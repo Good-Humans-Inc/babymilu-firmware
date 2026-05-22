@@ -18,9 +18,12 @@
 #include <esp_log.h>
 #include <esp_netif.h>
 #include <esp_random.h>
+#include <esp_flash.h>
+#include <esp_heap_caps.h>
+#include <esp_mac.h>
 #include <esp_wifi.h>
-#include <esp_bt_device.h>
 #include <esp_system.h>
+#include <nvs.h>
 
 #include <driver/i2c_master.h>
 #include "i2c_device.h"
@@ -36,6 +39,7 @@
 #include <freertos/queue.h>
 #include <freertos/task.h>
 #include <algorithm>
+#include <cstdio>
 #include <string>
 #include <ctime>
 
@@ -59,19 +63,11 @@ static void SdAnimInitTask(void* /*arg*/) {
         ESP_LOGI(TAG, "[SD/ANIM] SD card already mounted, skipping startup");
     }
 
-    const bool sd_present = SdCard::IsDetected() || SdCard::IsMounted();
+    const bool sd_present = SdCard::IsMounted();
     if (FactoryTest::IsFactoryTestMode()) {
         FactoryTest::Controller::GetInstance().OnSdSample(sd_present);
     }
 
-    // SD present => show red dot in the center during factory mode.
-    if (sd_present && FactoryTest::IsFactoryTestMode()) {
-        auto* display = Board::GetInstance().GetDisplay();
-        if (display != nullptr) {
-            display->ShowFactorySdDot(true);
-        }
-    }
-    
     if (!FactoryTest::IsFactoryTestMode()) {
         ESP_LOGI(TAG, "[SD/ANIM] === Initializing animations ===");
         animation_init();
@@ -436,7 +432,7 @@ class EchoEar : public WifiBoard {
 private:
     // I2C bus handles
     i2c_bus_handle_t shared_i2c_bus_handle_ = nullptr;  // For BMI270 (i2c_bus wrapper)
-    i2c_master_bus_handle_t i2c_bus_;                   // For other I2C devices (traditional API)
+    i2c_master_bus_handle_t i2c_bus_ = nullptr;         // For other I2C devices (traditional API)
     
     // BMI270 sensor handle
     bmi270_handle_t bmi270_handle_ = nullptr;
@@ -462,9 +458,14 @@ private:
     int previous_volume_ = -1;  // Store volume before muting (for restore on unmute)
     bool factory_audio_recording_ = false;
     bool factory_exit_requested_ = false;
+    bool factory_entry_requested_ = false;
     bool factory_ble_advertising_ = false;
     int64_t talk_button_down_ms_ = 0;
     int64_t factory_audio_record_started_ms_ = 0;
+    static constexpr int64_t kRuntimeFactoryEntryHoldMs = 3000;
+    static constexpr int kFactoryAutoStartDelayMs = 4000;
+    static constexpr int kFactoryStepDelayMs = 600;
+    static constexpr int kFactoryRadioSettleDelayMs = 1200;
 
     void InitializeVolumeMessageTimer() {
         if (volume_message_timer_ != nullptr) {
@@ -491,20 +492,14 @@ private:
             return;
         }
         InitializeVolumeMessageTimer();
-        std::string message = "volume: " + std::to_string(volume) + "%";
+        std::string message = "音量：" + std::to_string(volume) + "%";
         display_->CreateOverlayMessage(message.c_str());
         if (volume == 0) {
             esp_timer_stop(volume_message_timer_);
-            if (FactoryTest::IsFactoryTestMode()) {
-                FactoryTest::Controller::GetInstance().OnVolumeChanged(volume);
-            }
             return;
         }
         esp_timer_stop(volume_message_timer_);
         ESP_ERROR_CHECK(esp_timer_start_once(volume_message_timer_, 1000 * 1000));
-        if (FactoryTest::IsFactoryTestMode()) {
-            FactoryTest::Controller::GetInstance().OnVolumeChanged(volume);
-        }
     }
 
     static void FactoryAutoChecksTask(void* arg) {
@@ -515,19 +510,43 @@ private:
         }
 
         auto& controller = FactoryTest::Controller::GetInstance();
+        ESP_LOGI(TAG, "[FACTORY] Waiting %d ms before auto checks", kFactoryAutoStartDelayMs);
+        vTaskDelay(pdMS_TO_TICKS(kFactoryAutoStartDelayMs));
+
+        std::string detail;
+        bool ok = board->RunFactoryMemoryCheck(detail);
+        controller.OnTestFinished(FACTORY_TEST_MEMORY, ok, detail.c_str());
+        vTaskDelay(pdMS_TO_TICKS(kFactoryStepDelayMs));
+
+        detail.clear();
+        ok = board->RunFactoryI2cScanCheck(detail);
+        controller.OnTestFinished(FACTORY_TEST_I2C_BUS, ok, detail.c_str());
+        vTaskDelay(pdMS_TO_TICKS(kFactoryStepDelayMs));
+
+        detail.clear();
+        ok = board->RunFactoryCodecCheck(detail);
+        controller.OnTestFinished(FACTORY_TEST_CODEC, ok, detail.c_str());
+        vTaskDelay(pdMS_TO_TICKS(kFactoryStepDelayMs));
 
         int level = 0;
         bool charging = false;
         bool discharging = false;
         controller.OnBatterySample(board->GetBatteryLevel(level, charging, discharging), level);
-        controller.OnSdSample(SdCard::IsDetected() || SdCard::IsMounted());
+        vTaskDelay(pdMS_TO_TICKS(kFactoryStepDelayMs));
 
-        const bool bt_ok = board->StartFactoryBleAdvertising();
-        controller.OnBluetoothTestFinished(bt_ok, bt_ok ? "ADV" : "INIT FAIL");
+        detail.clear();
+        ok = board->RunFactorySdWriteCheck(detail);
+        controller.OnTestFinished(FACTORY_TEST_SD_CARD, ok, detail.c_str());
+        vTaskDelay(pdMS_TO_TICKS(kFactoryStepDelayMs));
 
         std::string wifi_detail;
         const bool wifi_ok = board->RunFactoryWifiQuickCheck(wifi_detail);
         controller.OnWifiTestFinished(wifi_ok, wifi_detail.c_str());
+
+        vTaskDelay(pdMS_TO_TICKS(kFactoryRadioSettleDelayMs));
+
+        const bool bt_ok = board->StartFactoryBleAdvertising();
+        controller.OnBluetoothTestFinished(bt_ok, bt_ok ? "广播" : "初始化失败");
 
         vTaskDelete(nullptr);
     }
@@ -545,7 +564,11 @@ private:
             playback_delay_ms = std::max<int64_t>(1200, std::min<int64_t>(recorded_ms + 300, 10000));
         }
         vTaskDelay(pdMS_TO_TICKS(playback_delay_ms));
-        FactoryTest::Controller::GetInstance().OnAudioPlaybackFinished();
+        auto& controller = FactoryTest::Controller::GetInstance();
+        if (FactoryTest::GetTestState(FACTORY_TEST_CODEC) != FACTORY_TEST_STATE_PASS) {
+            controller.OnTestFinished(FACTORY_TEST_CODEC, true, "录放OK");
+        }
+        controller.OnAudioPlaybackFinished();
         vTaskDelete(nullptr);
     }
 
@@ -565,7 +588,7 @@ private:
     }
 
     bool RunFactoryWifiQuickCheck(std::string& detail) {
-        detail = "INIT FAIL";
+        detail = "初始化失败";
 
         esp_err_t ret = esp_netif_init();
         if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
@@ -586,7 +609,7 @@ private:
         uint8_t mac[6] = {0};
         ret = esp_read_mac(mac, ESP_MAC_WIFI_STA);
         if (ret != ESP_OK) {
-            detail = "MAC FAIL";
+            detail = "MAC失败";
             esp_wifi_deinit();
             if (sta_netif != nullptr) {
                 esp_netif_destroy(sta_netif);
@@ -604,7 +627,7 @@ private:
         }
 
         const bool ok = (ret == ESP_OK);
-        detail = ok ? "SCAN OK" : "SCAN FAIL";
+        detail = ok ? "扫描OK" : "扫描失败";
 
         esp_wifi_stop();
         esp_wifi_deinit();
@@ -614,17 +637,159 @@ private:
         return ok;
     }
 
+    static uint8_t NormalizeI2cAddress(uint8_t address) {
+        if (address == AUDIO_CODEC_ES8311_ADDR || address == AUDIO_CODEC_ES7210_ADDR) {
+            return address >> 1;
+        }
+        return address > 0x7F ? (address >> 1) : address;
+    }
+
+    bool ProbeI2cAddress(uint8_t address, TickType_t timeout = pdMS_TO_TICKS(150), int attempts = 4) {
+        if (!i2c_bus_) {
+            return false;
+        }
+        const uint8_t normalized = NormalizeI2cAddress(address);
+        esp_log_level_set("i2c.master", ESP_LOG_NONE);
+        for (int attempt = 0; attempt < attempts; ++attempt) {
+            if (i2c_master_probe(i2c_bus_, normalized, timeout) == ESP_OK) {
+                esp_log_level_set("i2c.master", ESP_LOG_ERROR);
+                return true;
+            }
+            if (attempt + 1 < attempts) {
+                vTaskDelay(pdMS_TO_TICKS(80));
+            }
+        }
+        esp_log_level_set("i2c.master", ESP_LOG_ERROR);
+        return false;
+    }
+
+    bool RunFactoryMemoryCheck(std::string& detail) {
+        uint32_t flash_size = 0;
+        const bool flash_ok = esp_flash_get_size(nullptr, &flash_size) == ESP_OK && flash_size >= (4 * 1024 * 1024);
+        const size_t heap_free = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+        const bool heap_ok = heap_free >= (64 * 1024);
+
+        bool nvs_ok = false;
+        nvs_handle_t handle = 0;
+        const uint32_t marker = esp_random();
+        if (nvs_open("factory_ft", NVS_READWRITE, &handle) == ESP_OK) {
+            uint32_t readback = 0;
+            esp_err_t err = nvs_set_u32(handle, "rw", marker);
+            if (err == ESP_OK) {
+                err = nvs_commit(handle);
+            }
+            if (err == ESP_OK) {
+                err = nvs_get_u32(handle, "rw", &readback);
+            }
+            nvs_ok = (err == ESP_OK && readback == marker);
+            nvs_close(handle);
+        }
+
+        char buffer[64];
+        snprintf(buffer, sizeof(buffer), "闪%luM 内%uK NVS%s",
+                 static_cast<unsigned long>(flash_size / (1024 * 1024)),
+                 static_cast<unsigned>(heap_free / 1024),
+                 nvs_ok ? " OK" : " 失败");
+        detail = buffer;
+        return flash_ok && heap_ok && nvs_ok;
+    }
+
+    bool RunFactoryI2cScanCheck(std::string& detail) {
+        bool found[128] = {};
+
+        struct ExpectedDevice {
+            uint8_t address;
+            const char* name;
+        };
+        const ExpectedDevice expected[] = {
+            {0x15, "TP"},
+            {0x55, "BAT"},
+            {BMI270_I2C_ADDR, "BMI"},
+            {NormalizeI2cAddress(AUDIO_CODEC_ES8311_ADDR), "8311"},
+            {NormalizeI2cAddress(AUDIO_CODEC_ES7210_ADDR), "7210"},
+        };
+
+        int expected_ok = 0;
+        std::string seen;
+        std::string missing;
+        for (const auto& device : expected) {
+            const uint8_t address = NormalizeI2cAddress(device.address);
+            if (address < sizeof(found) &&
+                ProbeI2cAddress(address, pdMS_TO_TICKS(250), 8)) {
+                found[address] = true;
+            }
+            if (address < sizeof(found) && found[address]) {
+                expected_ok++;
+                if (!seen.empty()) {
+                    seen += ",";
+                }
+                seen += device.name;
+            } else {
+                if (!missing.empty()) {
+                    missing += ",";
+                }
+                missing += device.name;
+            }
+        }
+
+        char buffer[96];
+        const unsigned expected_count = sizeof(expected) / sizeof(expected[0]);
+        if (missing.empty()) {
+            snprintf(buffer, sizeof(buffer), "%d/%u 通过 %s", expected_ok, expected_count, seen.c_str());
+        } else {
+            snprintf(buffer, sizeof(buffer), "%d/%u 缺 %s", expected_ok, expected_count, missing.c_str());
+        }
+        detail = buffer;
+        return expected_ok == static_cast<int>(expected_count);
+    }
+
+    bool RunFactoryCodecCheck(std::string& detail) {
+        const bool out_ok = ProbeI2cAddress(AUDIO_CODEC_ES8311_ADDR, pdMS_TO_TICKS(250), 8);
+        const bool in_ok = ProbeI2cAddress(AUDIO_CODEC_ES7210_ADDR, pdMS_TO_TICKS(250), 8);
+
+        if (out_ok && in_ok) {
+            detail = "8311+7210";
+            return true;
+        }
+
+        detail = "缺 ";
+        if (!out_ok) {
+            detail += "8311";
+        }
+        if (!in_ok) {
+            if (!out_ok) {
+                detail += ",";
+            }
+            detail += "7210";
+        }
+        return false;
+    }
+
+    bool RunFactorySdWriteCheck(std::string& detail) {
+        for (int i = 0; i < 50 && !SdCard::IsMounted(); ++i) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
+        if (!SdCard::IsMounted()) {
+            detail = "未挂载";
+            return false;
+        }
+
+        const esp_err_t ret = SdCard::TestWriteCapability();
+        if (ret == ESP_OK) {
+            detail = "读写OK";
+            return true;
+        }
+        detail = esp_err_to_name(ret);
+        return false;
+    }
+
     void ExitFactoryMode() {
         if (factory_exit_requested_) {
             return;
         }
         factory_exit_requested_ = true;
-        if (factory_ble_advertising_) {
-            ble_server_stop_advertising();
-            ble_server_deinit();
-            factory_ble_advertising_ = false;
-        }
         FactoryTest::SetFactoryMode(false);
+        vTaskDelay(pdMS_TO_TICKS(200));
         esp_restart();
     }
 
@@ -654,7 +819,7 @@ private:
         }
         InitializeTouchMessageTimer();
         // Place below the center SD indicator dot.
-        display_->CreateCenteredOverlayMessage("touched", 26);
+        display_->CreateCenteredOverlayMessage("已触摸", 26);
         esp_timer_stop(touch_message_timer_);
         // Show briefly so the operator can see it per touch.
         ESP_LOGI(TAG, "[TOUCH] Showing on-screen 'touched' overlay");
@@ -664,6 +829,20 @@ private:
     void InitializeI2c() {
         ESP_LOGI(TAG, "[BMI270] Initializing I2C bus for BMI270 compatibility");
         
+        i2c_master_bus_config_t i2c_master_cfg = {
+            .i2c_port = I2C_NUM_0,
+            .sda_io_num = AUDIO_CODEC_I2C_SDA_PIN,
+            .scl_io_num = AUDIO_CODEC_I2C_SCL_PIN,
+            .clk_source = I2C_CLK_SRC_DEFAULT,
+            .glitch_ignore_cnt = 7,
+            .intr_priority = 0,
+            .trans_queue_depth = 0,
+            .flags = {
+                .enable_internal_pullup = 1,
+            },
+        };
+        ESP_ERROR_CHECK(i2c_new_master_bus(&i2c_master_cfg, &i2c_bus_));
+
         // Create shared I2C bus using i2c_bus wrapper (REQUIRED for BMI270)
         // All I2C devices (BMI270, and others) share the same physical bus
         i2c_config_t i2c_bus_cfg = {
@@ -712,12 +891,13 @@ private:
             ESP_LOGE(TAG, "[I2C] Probe failed for %s: bus not ready", name);
             return false;
         }
-        esp_err_t ret = i2c_master_probe(i2c_bus_, address, pdMS_TO_TICKS(200));
+        const uint8_t normalized = NormalizeI2cAddress(address);
+        esp_err_t ret = i2c_master_probe(i2c_bus_, normalized, pdMS_TO_TICKS(200));
         if (ret != ESP_OK) {
-            ESP_LOGW(TAG, "[I2C] %s not detected at 0x%02X: %s", name, address, esp_err_to_name(ret));
+            ESP_LOGW(TAG, "[I2C] %s not detected at 0x%02X: %s", name, normalized, esp_err_to_name(ret));
             return false;
         }
-        ESP_LOGI(TAG, "[I2C] %s detected at 0x%02X", name, address);
+        ESP_LOGI(TAG, "[I2C] %s detected at 0x%02X", name, normalized);
         return true;
     }
 
@@ -826,6 +1006,8 @@ private:
         uint32_t dummy;
         static bool last_touch_state = false;
         static Cst816s::GestureType last_gesture = Cst816s::GESTURE_NONE;
+        static int64_t touch_down_ms = 0;
+        static bool long_press_reported = false;
 
         while (true) {
             // Wait for touch events from ISR
@@ -861,6 +1043,9 @@ private:
                                     codec->SetOutputVolume(new_volume);
                                     ESP_LOGI(TAG, "[TOUCH] Swipe UP detected - Volume: %d -> %d", current_volume, new_volume);
                                     show_volume(new_volume);
+                                    if (FactoryTest::IsFactoryTestMode()) {
+                                        FactoryTest::Controller::GetInstance().OnVolumeSwipe(true, new_volume);
+                                    }
                                     break;
                                     
                                 case Cst816s::GESTURE_SWIPE_DOWN:
@@ -869,15 +1054,40 @@ private:
                                     codec->SetOutputVolume(new_volume);
                                     ESP_LOGI(TAG, "[TOUCH] Swipe DOWN detected - Volume: %d -> %d", current_volume, new_volume);
                                     show_volume(new_volume);
+                                    if (FactoryTest::IsFactoryTestMode()) {
+                                        FactoryTest::Controller::GetInstance().OnVolumeSwipe(false, new_volume);
+                                    }
                                     break;
                                     
-                                case Cst816s::GESTURE_SWIPE_LEFT:
-                                    ESP_LOGI(TAG, "[TOUCH] Swipe LEFT detected");
+                                case Cst816s::GESTURE_SWIPE_LEFT: {
+                                    int current_brightness = board->backlight_ ? board->backlight_->brightness() : 0;
+                                    int new_brightness = current_brightness - 20;
+                                    if (new_brightness < 20) new_brightness = 20;
+                                    if (board->backlight_) {
+                                        board->backlight_->SetBrightness(new_brightness, false);
+                                    }
+                                    ESP_LOGI(TAG, "[TOUCH] Swipe LEFT detected - Brightness: %d -> %d",
+                                             current_brightness, new_brightness);
+                                    if (FactoryTest::IsFactoryTestMode()) {
+                                        FactoryTest::Controller::GetInstance().OnBrightnessSwipe(true, new_brightness);
+                                    }
                                     break;
+                                }
                                     
-                                case Cst816s::GESTURE_SWIPE_RIGHT:
-                                    ESP_LOGI(TAG, "[TOUCH] Swipe RIGHT detected");
+                                case Cst816s::GESTURE_SWIPE_RIGHT: {
+                                    int current_brightness = board->backlight_ ? board->backlight_->brightness() : 0;
+                                    int new_brightness = current_brightness + 20;
+                                    if (new_brightness > 100) new_brightness = 100;
+                                    if (board->backlight_) {
+                                        board->backlight_->SetBrightness(new_brightness, false);
+                                    }
+                                    ESP_LOGI(TAG, "[TOUCH] Swipe RIGHT detected - Brightness: %d -> %d",
+                                             current_brightness, new_brightness);
+                                    if (FactoryTest::IsFactoryTestMode()) {
+                                        FactoryTest::Controller::GetInstance().OnBrightnessSwipe(false, new_brightness);
+                                    }
                                     break;
+                                }
                                     
                                 case Cst816s::GESTURE_SINGLE_TAP:
                                     ESP_LOGI(TAG, "[TOUCH] Single tap detected");
@@ -905,14 +1115,18 @@ private:
                     
                     // Process touch coordinates
                     if (touch_point.num > 0 && touch_point.x >= 0 && touch_point.y >= 0) {
+                        const int64_t now_ms = esp_timer_get_time() / 1000;
                         // Touch is active - clamp coordinates to display bounds
                         int x = (touch_point.x < DISPLAY_WIDTH) ? touch_point.x : (DISPLAY_WIDTH - 1);
                         int y = (touch_point.y < DISPLAY_HEIGHT) ? touch_point.y : (DISPLAY_HEIGHT - 1);
                         
                         if (!last_touch_state) {
+                            touch_down_ms = now_ms;
+                            long_press_reported = false;
                             ESP_LOGI(TAG, "[TOUCH] Touch pressed at (%d, %d)", x, y);
                             if (FactoryTest::IsFactoryTestMode()) {
                                 FactoryTest::Controller::GetInstance().OnTouchDetected();
+                                board->ApplyFactoryDisplayBacklight();
                             }
                             if (board->power_save_timer_) {
                                 // If in sleep mode, just wake up and return to idle state
@@ -925,6 +1139,12 @@ private:
                                     board->power_save_timer_->WakeUp();
                                 }
                             }
+                        } else if (FactoryTest::IsFactoryTestMode() &&
+                                   !long_press_reported &&
+                                   touch_down_ms > 0 &&
+                                   (now_ms - touch_down_ms) >= 1000) {
+                            long_press_reported = true;
+                            FactoryTest::Controller::GetInstance().OnTouchscreenLongPress();
                         }
                         last_touch_state = true;
                         
@@ -935,8 +1155,18 @@ private:
                     } else {
                         // Touch released
                         if (last_touch_state) {
+                            const int64_t now_ms = esp_timer_get_time() / 1000;
+                            if (FactoryTest::IsFactoryTestMode() &&
+                                !long_press_reported &&
+                                touch_down_ms > 0 &&
+                                (now_ms - touch_down_ms) >= 1000) {
+                                long_press_reported = true;
+                                FactoryTest::Controller::GetInstance().OnTouchscreenLongPress();
+                            }
                             ESP_LOGI(TAG, "[TOUCH] Touch released");
                         }
+                        touch_down_ms = 0;
+                        long_press_reported = false;
                         last_touch_state = false;
                     }
                 }
@@ -1043,6 +1273,11 @@ private:
                     // driver callback lightweight and prevents it from blocking
                     // higher-priority tasks such as audio streaming.
 
+                    if (FactoryTest::IsFactoryTestMode()) {
+                        FactoryTest::Controller::GetInstance().OnGpioTouchDetected();
+                        continue;
+                    }
+
                     // Wake up power save timer
                     if (board->power_save_timer_) {
                         board->power_save_timer_->WakeUp();
@@ -1082,8 +1317,8 @@ private:
                     // Start timer to restore previous emotion after one animation cycle
                     if (board->emotion_reset_timer_ != nullptr) {
                         esp_timer_start_once(board->emotion_reset_timer_, animation_duration_us);
-                        ESP_LOGI(TAG, "[TOUCH] Timer set to restore emotion '%s' after %lld ms (one cycle)",
-                                 board->previous_emotion_.c_str(), animation_duration_us / 1000);
+                        ESP_LOGI(TAG, "[TOUCH] Timer set to restore emotion '%s' after %ld ms (one cycle)",
+                                 board->previous_emotion_.c_str(), static_cast<long>(animation_duration_us / 1000));
                     }
                 } else {
                     // Logging disabled to avoid I2C contention
@@ -1731,6 +1966,13 @@ private:
         ESP_LOGI(TAG, "[BATTERY] Battery monitoring task started for always power saving mode");
     }
 
+    void ApplyFactoryDisplayBacklight() {
+        if (!FactoryTest::IsFactoryTestMode() || backlight_ == nullptr) {
+            return;
+        }
+        backlight_->SetBrightness(FactoryTest::Controller::GetInstance().GetDisplayTestBacklight(), false);
+    }
+
     void InitializeEmotionResetTimer() {
         // Create timer to reset emotion to previous state after one animation cycle
         const esp_timer_create_args_t timer_args = {
@@ -1755,8 +1997,9 @@ private:
 
     void InitializeButtons() {
         boot_button_.OnPressDown([this]() {
+            talk_button_down_ms_ = esp_timer_get_time() / 1000;
+            factory_entry_requested_ = false;
             if (FactoryTest::IsFactoryTestMode()) {
-                talk_button_down_ms_ = esp_timer_get_time() / 1000;
                 factory_exit_requested_ = false;
             }
         });
@@ -1764,6 +2007,7 @@ private:
         boot_button_.OnPressUp([this]() {
             talk_button_down_ms_ = 0;
             factory_exit_requested_ = false;
+            factory_entry_requested_ = false;
         });
 
         boot_button_.OnClick([this]() {
@@ -1840,7 +2084,24 @@ private:
         });
 
         boot_button_.OnLongPressHold([this]() {
-            if (!FactoryTest::IsFactoryTestMode() || talk_button_down_ms_ == 0 || factory_exit_requested_) {
+            if (talk_button_down_ms_ == 0) {
+                return;
+            }
+
+            const int64_t held_ms = (esp_timer_get_time() / 1000) - talk_button_down_ms_;
+            if (!FactoryTest::IsFactoryTestMode()) {
+                if (!factory_entry_requested_ && held_ms >= kRuntimeFactoryEntryHoldMs) {
+                    factory_entry_requested_ = true;
+                    ESP_LOGI(TAG, "[FACTORY] TALK held for %ld ms, enabling factory mode and rebooting",
+                             static_cast<long>(held_ms));
+                    FactoryTest::SetFactoryMode(true);
+                    vTaskDelay(pdMS_TO_TICKS(200));
+                    esp_restart();
+                }
+                return;
+            }
+
+            if (factory_exit_requested_) {
                 return;
             }
 
@@ -1849,10 +2110,9 @@ private:
                 return;
             }
 
-            const int64_t held_ms = (esp_timer_get_time() / 1000) - talk_button_down_ms_;
             if (controller.ShouldExitFactoryMode(held_ms)) {
-                ESP_LOGI(TAG, "[FACTORY] TALK held for %lld ms on QR page, exiting factory mode",
-                         static_cast<long long>(held_ms));
+                ESP_LOGI(TAG, "[FACTORY] TALK held for %ld ms on QR page, exiting factory mode",
+                         static_cast<long>(held_ms));
                 ExitFactoryMode();
             }
         });
@@ -1868,7 +2128,7 @@ private:
     }
 
 public:
-    EchoEar() : boot_button_(BOOT_BUTTON_GPIO, false, 5000, 0) {
+    EchoEar() : boot_button_(BOOT_BUTTON_GPIO, false, 3000, 0) {
         InitializeI2c();
         InitializeBmi270();  // Initialize BMI270 after I2C bus is ready
         InitializeCharge();
@@ -1892,6 +2152,7 @@ public:
 
         if (FactoryTest::IsFactoryTestMode()) {
             FactoryTest::Controller::GetInstance().Start(display_, FACTORY_FIRMWARE_TAG, FACTORY_HW_TAG);
+            ApplyFactoryDisplayBacklight();
             xTaskCreatePinnedToCore(FactoryAutoChecksTask, "factory_auto", 6144, this, 1, nullptr, 0);
         }
     }

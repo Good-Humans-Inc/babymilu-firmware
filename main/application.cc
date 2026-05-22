@@ -465,12 +465,61 @@ void Application::ExitAudioTestingMode()
 
 void Application::StartFactoryAudioTest()
 {
+    StartAudioPipeline();
     EnterAudioTestingMode();
 }
 
 void Application::FinishFactoryAudioTest()
 {
     ExitAudioTestingMode();
+}
+
+void Application::StartAudioPipeline()
+{
+    if (audio_loop_task_handle_ != nullptr) {
+        return;
+    }
+
+    auto &board = Board::GetInstance();
+    auto codec = board.GetAudioCodec();
+    opus_decoder_ = std::make_unique<OpusDecoderWrapper>(codec->output_sample_rate(), 1, OPUS_FRAME_DURATION_MS);
+    opus_encoder_ = std::make_unique<OpusEncoderWrapper>(16000, 1, OPUS_FRAME_DURATION_MS);
+    if (aec_mode_ != kAecOff)
+    {
+        ESP_LOGI(TAG, "AEC mode: %d, setting opus encoder complexity to 0", aec_mode_);
+        opus_encoder_->SetComplexity(0);
+    }
+    else if (board.GetBoardType() == "ml307")
+    {
+        ESP_LOGI(TAG, "ML307 board detected, setting opus encoder complexity to 5");
+        opus_encoder_->SetComplexity(5);
+    }
+    else
+    {
+        ESP_LOGI(TAG, "WiFi board detected, setting opus encoder complexity to 0");
+        opus_encoder_->SetComplexity(0);
+    }
+
+    if (codec->input_sample_rate() != 16000)
+    {
+        input_resampler_.Configure(codec->input_sample_rate(), 16000);
+        reference_resampler_.Configure(codec->input_sample_rate(), 16000);
+    }
+    codec->Start();
+
+#if CONFIG_USE_AUDIO_PROCESSOR
+    xTaskCreatePinnedToCore([](void *arg)
+                            {
+        Application* app = (Application*)arg;
+        app->AudioLoop();
+        vTaskDelete(NULL); }, "audio_loop", 4096 * 2, this, 8, &audio_loop_task_handle_, 1);
+#else
+    xTaskCreate([](void *arg)
+                {
+        Application* app = (Application*)arg;
+        app->AudioLoop();
+        vTaskDelete(NULL); }, "audio_loop", 4096 * 2, this, 8, &audio_loop_task_handle_);
+#endif
 }
 
 void Application::ToggleChatState()
@@ -696,56 +745,18 @@ void Application::Start()
     /* Setup the display */
     auto display = board.GetDisplay();
 
-    /* Setup the audio codec */
-    auto codec = board.GetAudioCodec();
-    opus_decoder_ = std::make_unique<OpusDecoderWrapper>(codec->output_sample_rate(), 1, OPUS_FRAME_DURATION_MS);
-    opus_encoder_ = std::make_unique<OpusEncoderWrapper>(16000, 1, OPUS_FRAME_DURATION_MS);
-    if (aec_mode_ != kAecOff)
-    {
-        ESP_LOGI(TAG, "AEC mode: %d, setting opus encoder complexity to 0", aec_mode_);
-        opus_encoder_->SetComplexity(0);
-    }
-    else if (board.GetBoardType() == "ml307")
-    {
-        ESP_LOGI(TAG, "ML307 board detected, setting opus encoder complexity to 5");
-        opus_encoder_->SetComplexity(5);
-    }
-    else
-    {
-        ESP_LOGI(TAG, "WiFi board detected, setting opus encoder complexity to 0");
-        opus_encoder_->SetComplexity(0);
-    }
-
-    if (codec->input_sample_rate() != 16000)
-    {
-        input_resampler_.Configure(codec->input_sample_rate(), 16000);
-        reference_resampler_.Configure(codec->input_sample_rate(), 16000);
-    }
-    codec->Start();
-
-#if CONFIG_USE_AUDIO_PROCESSOR
-    xTaskCreatePinnedToCore([](void *arg)
-                            {
-        Application* app = (Application*)arg;
-        app->AudioLoop();
-        vTaskDelete(NULL); }, "audio_loop", 4096 * 2, this, 8, &audio_loop_task_handle_, 1);
-#else
-    xTaskCreate([](void *arg)
-                {
-        Application* app = (Application*)arg;
-        app->AudioLoop();
-        vTaskDelete(NULL); }, "audio_loop", 4096 * 2, this, 8, &audio_loop_task_handle_);
-#endif
-
     /* Start the clock timer to update the status bar */
     esp_timer_start_periodic(clock_timer_handle_, 1000000);
 
     if (IsFactoryTestMode())
     {
-        ESP_LOGI(TAG, "Factory mode active, skipping normal network / OTA / protocol startup");
+        ESP_LOGI(TAG, "Factory mode active, skipping normal audio/network / OTA / protocol startup");
         SetDeviceState(kDeviceStateIdle);
         return;
     }
+
+    StartAudioPipeline();
+    auto codec = board.GetAudioCodec();
 
     /* Check if we should clear WiFi configuration to force nimBLE setup */
     // Only clear WiFi if no credentials exist (first boot or manual clearing)

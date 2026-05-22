@@ -132,10 +132,10 @@ void WifiBoard::EnterWifiConfigModeViaBLE() {
     application.SetDeviceState(kDeviceStateWifiConfiguring);
     
     // Display BLE configuration instructions for reconnection
-    std::string hint = "WiFi disconnected. Connect to BLE device 'BabyMilu' to reconfigure WiFi";
+    std::string hint = "WiFi已断开，请连接BLE设备 BabyMilu 重新配网";
     {
         const bool bench_quick_mode = IsFactoryTestMode() || SdCard::IsMounted();
-        application.Alert("WiFi Reconfiguration", hint.c_str(), "", bench_quick_mode ? "" : Lang::Sounds::P3_WIFICONFIG);
+        application.Alert("WiFi重新配置", hint.c_str(), "", bench_quick_mode ? "" : Lang::Sounds::P3_WIFICONFIG);
     }
     
     // Wait for BLE configuration
@@ -167,8 +167,8 @@ void WifiBoard::StartNetwork() {
             auto& application = Application::GetInstance();
             application.SetDeviceState(kDeviceStateWifiConfiguring);
 
-            std::string hint = "Connect to BLE device 'BabyMilu' to add WiFi credentials";
-            application.Alert("WiFi Configuration", hint.c_str(), "", (IsFactoryTestMode() || SdCard::IsMounted()) ? "" : Lang::Sounds::P3_WIFICONFIG);
+            std::string hint = "请连接BLE设备 BabyMilu 添加WiFi";
+            application.Alert("WiFi配置", hint.c_str(), "", (IsFactoryTestMode() || SdCard::IsMounted()) ? "" : Lang::Sounds::P3_WIFICONFIG);
 
             while (wifi_config_mode_) {
                 vTaskDelay(pdMS_TO_TICKS(1000));
@@ -193,11 +193,10 @@ void WifiBoard::StartNetwork() {
                  ssid_list[i].password.c_str());
     }
     
-    // Bench/factory quick mode:
-    // We must enable this early because on EchoEar the SD mount may happen
-    // in a background task after Wi-Fi startup.
-    // Use IsDetected() (assumed true for EchoEar) instead of IsMounted().
-    const bool bench_quick_mode = IsFactoryTestMode() || SdCard::IsDetected();
+    // Factory quick mode must not leak into normal mode. EchoEar's SD
+    // detection path currently assumes "detected", so using SD presence here
+    // would erase freshly provisioned Wi-Fi credentials on every normal boot.
+    const bool bench_quick_mode = IsFactoryTestMode();
 
     // By default forget saved Wi-Fi credentials in bench mode so we don't
     // scan/reconnect on boot. This makes the Wi-Fi module "functional"
@@ -215,7 +214,7 @@ void WifiBoard::StartNetwork() {
         auto& application = Application::GetInstance();
         application.SetDeviceState(kDeviceStateWifiConfiguring);
 
-        const char* wifi_message = "Connect me to wifi with BabyMilu App. Audio test is ready (Boot=record, Boot again=play).";
+        const char* wifi_message = "请用BabyMilu App配网。音频测试已就绪：按说话键录音，再按说话键回放。";
 
         if (ssid_list.empty()) {
             // No saved networks: skip scan/BLE wait, just show the audio prompt quickly.
@@ -241,7 +240,7 @@ void WifiBoard::StartNetwork() {
         } else {
             auto display = Board::GetInstance().GetDisplay();
             if (display) {
-                display->ShowNotification("WiFi connected (factory fast check)", 3000);
+                display->ShowNotification("WiFi已连接（工厂快检）", 3000);
             }
         }
         return;
@@ -264,8 +263,8 @@ void WifiBoard::StartNetwork() {
         application.SetDeviceState(kDeviceStateWifiConfiguring);
         
         // Display BLE configuration instructions
-        std::string hint = "Connect to BLE device 'BabyMilu' to configure WiFi";
-        application.Alert("WiFi Configuration", hint.c_str(), "", Lang::Sounds::P3_WIFICONFIG);
+        std::string hint = "请连接BLE设备 BabyMilu 配置WiFi";
+        application.Alert("WiFi配置", hint.c_str(), "", Lang::Sounds::P3_WIFICONFIG);
         
         // Show message to guide user to connect WiFi (display in center of screen)
         ESP_LOGI(TAG, "Attempting to display WiFi connection message...");
@@ -279,7 +278,7 @@ void WifiBoard::StartNetwork() {
             ESP_LOGI(TAG, "Waiting for display to be fully initialized...");
             vTaskDelay(pdMS_TO_TICKS(bench_quick_mode ? 100 : 2000)); // Wait shorter in bench mode
             
-            const char* wifi_message = "Connect me to wifi with BabyMilu App. Can't wait to meet you again.";
+            const char* wifi_message = "请用BabyMilu App帮我连接WiFi。";
             
             // Try to cast to LcdDisplay to use CreateSystemMessage
             // Use static_cast since we know the display type for LCD boards
@@ -365,7 +364,7 @@ void WifiBoard::StartNetwork() {
         if (current_anim == NULL || current_anim->len == 0) {
             ESP_LOGI(TAG, "No animation available, showing connected message");
             // No animation available, show connected message (display in center of screen)
-            const char* connected_message = "Connected! I am traveling over :D";
+            const char* connected_message = "已连接！我正在赶来。";
             
             // Try to use LcdDisplay::CreateSystemMessage if available
             LcdDisplay* lcd_display = static_cast<LcdDisplay*>(display);
@@ -416,8 +415,8 @@ void WifiBoard::StartNetwork() {
         application.SetDeviceState(kDeviceStateWifiConfiguring);
         
         // Display BLE configuration instructions
-        std::string hint = "WiFi connection failed. Connect to BLE device 'BabyMilu' to configure WiFi";
-        application.Alert("WiFi Configuration", hint.c_str(), "", bench_quick_mode ? "" : Lang::Sounds::P3_WIFICONFIG);
+        std::string hint = "WiFi连接失败，请连接BLE设备 BabyMilu 配置WiFi";
+        application.Alert("WiFi配置", hint.c_str(), "", bench_quick_mode ? "" : Lang::Sounds::P3_WIFICONFIG);
         
         // Show message to guide user to connect WiFi (display in center of screen)
         ESP_LOGI(TAG, "Attempting to display WiFi connection message (connection failed)...");
@@ -431,7 +430,7 @@ void WifiBoard::StartNetwork() {
             ESP_LOGI(TAG, "Waiting for display to be fully initialized...");
             vTaskDelay(pdMS_TO_TICKS(2000)); // Wait 2 seconds for LVGL to initialize
             
-            const char* wifi_message = "Connect me to wifi with BabyMilu App. Can't wait to meet you again.";
+            const char* wifi_message = "请用BabyMilu App帮我连接WiFi。";
             
             // Try to cast to LcdDisplay to use CreateSystemMessage
             // Use static_cast since we know the display type for LCD boards

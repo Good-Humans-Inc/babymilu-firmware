@@ -1380,13 +1380,13 @@ bool LcdDisplay::RenderFactoryQr(const char* payload)
         lv_obj_set_style_text_align(factory_qr_hint_label_, LV_TEXT_ALIGN_CENTER, 0);
         lv_obj_set_style_text_color(factory_qr_hint_label_, current_theme_.text, 0);
     }
-    lv_label_set_text(factory_qr_hint_label_, "Scan to Register\nLong press TALK to exit");
+    lv_label_set_text(factory_qr_hint_label_, "扫码注册\n长按说话键退出");
     lv_obj_clear_flag(factory_qr_hint_label_, LV_OBJ_FLAG_HIDDEN);
     lv_obj_align(factory_qr_hint_label_, LV_ALIGN_BOTTOM_MID, 0, -18);
     lv_obj_move_foreground(factory_qr_hint_label_);
     return true;
 #else
-    CreateSystemMessage("QR unsupported in this build");
+    CreateSystemMessage("当前固件不支持二维码");
     return false;
 #endif
 }

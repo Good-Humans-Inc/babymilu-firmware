@@ -8,8 +8,13 @@ class Display;
 
 typedef enum {
     FACTORY_TEST_POWER = 0,
+    FACTORY_TEST_MEMORY,
+    FACTORY_TEST_I2C_BUS,
+    FACTORY_TEST_DISPLAY,
     FACTORY_TEST_VOLUME,
+    FACTORY_TEST_BRIGHTNESS,
     FACTORY_TEST_BMI270,
+    FACTORY_TEST_CODEC,
     FACTORY_TEST_BLUETOOTH,
     FACTORY_TEST_WIFI,
     FACTORY_TEST_RTC,
@@ -30,6 +35,7 @@ typedef enum {
 typedef struct {
     bool touch_triggered;
     bool volume_changed;
+    bool brightness_changed;
     bool audio_executed;
 } factory_required_actions_t;
 
@@ -53,6 +59,7 @@ bool CanEnterQrPage();
 
 void MarkTouchTriggered();
 void MarkVolumeChanged();
+void MarkBrightnessChanged();
 void MarkAudioExecuted();
 factory_required_actions_t GetRequiredActions();
 
@@ -66,16 +73,22 @@ public:
     void OnTouchDetected();
     void OnTouchscreenLongPress();
     void OnVolumeChanged(int volume);
+    void OnGpioTouchDetected();
+    void OnVolumeSwipe(bool up, int volume);
+    void OnBrightnessSwipe(bool left, int brightness);
     void OnAudioRecordingStarted();
     void OnAudioPlaybackTriggered();
     void OnAudioPlaybackFinished();
     void OnBmiDotMoved(int x, int y);
+    void OnTestFinished(factory_test_id_t id, bool passed, const char* detail);
     void OnWifiTestFinished(bool passed, const char* detail);
     void OnBluetoothTestFinished(bool passed, const char* detail);
     void OnBatterySample(bool passed, int level);
     void OnSdSample(bool present);
 
     bool IsQrPageVisible() const;
+    bool IsDisplayTestActive() const;
+    uint8_t GetDisplayTestBacklight() const;
     bool ShouldExitFactoryMode(int64_t held_ms) const;
     void Render();
 

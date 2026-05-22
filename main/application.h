@@ -144,6 +144,7 @@ private:
     OpusResampler reference_resampler_;
     OpusResampler output_resampler_;
 
+    void StartAudioPipeline();
     void MainEventLoop();
     void OnAudioInput();
     void OnAudioOutput();

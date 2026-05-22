@@ -43,7 +43,6 @@ private:
 
     EventGroupHandle_t event_group_;
     esp_timer_handle_t timer_handle_ = nullptr;
-    esp_timer_handle_t reconnect_timer_handle_ = nullptr;
     esp_event_handler_instance_t instance_any_id_ = nullptr;
     esp_event_handler_instance_t instance_got_ip_ = nullptr;
     std::string ssid_;
