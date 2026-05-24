@@ -1036,36 +1036,10 @@ void Application::ToggleChatState()
     else if (device_state_ == kDeviceStateSpeaking)
     {
         Schedule([this]()
-                 { 
-                     ESP_LOGI(TAG, "Boot button pressed during speaking - forcefully closing audio channel");
-                     
-                     // Immediately close the audio channel to stop all audio operations
-                     auto* active_protocol = GetActiveProtocol();
-                     if (active_protocol && active_protocol->IsAudioChannelOpened()) {
-                         ESP_LOGI(TAG, "Closing audio channel immediately");
-                         active_protocol->CloseAudioChannel();
-                     }
-                     
-                     // Clear all pending audio decode queue
-                     {
-                         std::lock_guard<std::mutex> lock(mutex_);
-                         audio_decode_queue_.clear();
-                         audio_decode_cv_.notify_all();
-                     }
-                     
-                     // Reset decoder state
-                     ResetDecoder();
-                     
-                     // Set abort flag and reset state
-                     aborted_ = true;
-                     state_before_tts_ = kDeviceStateUnknown;
-                     
-                     // Force immediate transition to idle - no waiting for server
-                     ESP_LOGI(TAG, "Forcefully transitioning to idle state");
-                     SetDeviceState(kDeviceStateIdle);
-                     
-                     // Reset abort flag after state change
-                     aborted_ = false;
+                 {
+                     ESP_LOGI(TAG, "Boot button pressed during speaking - abort active speech and listen");
+                     AbortSpeaking(kAbortReasonNone);
+                     SetListeningMode(kListeningModeManualStop);
                  });
     }
     else if (device_state_ == kDeviceStateListening)
@@ -2255,7 +2229,12 @@ void Application::AbortSpeaking(AbortReason reason)
 {
     ESP_LOGI(TAG, "Abort speaking");
     aborted_ = true;
-    protocol_->SendAbortSpeaking(reason);
+    auto* active_protocol = GetActiveProtocol();
+    if (active_protocol) {
+        active_protocol->SendAbortSpeaking(reason);
+    } else if (protocol_) {
+        protocol_->SendAbortSpeaking(reason);
+    }
 }
 
 void Application::SetListeningMode(ListeningMode mode)
