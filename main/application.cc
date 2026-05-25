@@ -56,6 +56,13 @@
 
 static bool PlayWavFromMemory(const std::string& label, const uint8_t* wav_data, size_t wav_size, float gain, bool require_codec_sample_rate = false);
 
+namespace {
+struct VadDebounceRecheckTaskArgs {
+    EventGroupHandle_t event_group;
+    int delay_ms;
+};
+}
+
 static bool DownloadUrlToBuffer(const std::string& url, const char* accept, int timeout_ms, std::vector<uint8_t>& out)
 {
     auto &board = Board::GetInstance();
@@ -1908,6 +1915,32 @@ void Application::Schedule(std::function<void()> callback)
     xEventGroupSetBits(event_group_, SCHEDULE_EVENT);
 }
 
+void Application::ScheduleVadDebounceRecheck(int delay_ms)
+{
+    if (vad_debounce_recheck_scheduled_) {
+        return;
+    }
+    vad_debounce_recheck_scheduled_ = true;
+
+    auto* args = new VadDebounceRecheckTaskArgs{
+        event_group_,
+        std::max(delay_ms, 20),
+    };
+    auto result = xTaskCreate([](void* arg) {
+        auto* task_args = static_cast<VadDebounceRecheckTaskArgs*>(arg);
+        vTaskDelay(pdMS_TO_TICKS(task_args->delay_ms));
+        xEventGroupSetBits(task_args->event_group, MAIN_EVENT_VAD_CHANGE);
+        delete task_args;
+        vTaskDelete(nullptr);
+    }, "vad_debounce", 2048, args, 3, nullptr);
+
+    if (result != pdPASS) {
+        delete args;
+        vad_debounce_recheck_scheduled_ = false;
+        ESP_LOGW(TAG, "Failed to schedule VAD debounce recheck");
+    }
+}
+
 // The Main Event Loop controls the chat state and websocket connection
 // If other tasks need to access the websocket or chat state,
 // they should use Schedule to call this function
@@ -1958,6 +1991,7 @@ void Application::MainEventLoop()
 
         if (bits & MAIN_EVENT_VAD_CHANGE)
         {
+            vad_debounce_recheck_scheduled_ = false;
             // Handle VAD interrupt during speaking state with debounce mechanism
             if (device_state_ == kDeviceStateSpeaking && 
                 aec_mode_ == kAecOnDeviceSide && 
@@ -1968,51 +2002,52 @@ void Application::MainEventLoop()
                 // Grace period: ignore interruptions for first 1 second after speaking starts
                 int64_t time_since_speaking_start = now_us - speaking_start_time_us_;
                 const int64_t GRACE_PERIOD_US = 1000000; // 1 second
+                const int64_t DEBOUNCE_DURATION_US = 400000; // 400ms
+
+                if (!vad_debounce_active_)
+                {
+                    // VAD just became active, start debounce timer.
+                    vad_detected_time_us_ = now_us;
+                    vad_debounce_active_ = true;
+                    ESP_LOGD(TAG, "VAD detected, starting debounce timer");
+                }
                 
                 if (time_since_speaking_start >= GRACE_PERIOD_US)
                 {
-                    // Debounce: require VAD to be active for at least 400ms before interrupting
-                    const int64_t DEBOUNCE_DURATION_US = 400000; // 400ms
-                    
-                    if (!vad_debounce_active_)
+                    // Debounce: require VAD to be active for at least 400ms before interrupting.
+                    int64_t vad_duration = now_us - vad_detected_time_us_;
+                    if (vad_duration >= DEBOUNCE_DURATION_US)
                     {
-                        // VAD just became active, start debounce timer
-                        vad_detected_time_us_ = now_us;
-                        vad_debounce_active_ = true;
-                        ESP_LOGD(TAG, "VAD detected, starting debounce timer");
+                        ESP_LOGI(TAG, "VAD detected real voice during playback (confirmed for %lld ms), interrupting",
+                            vad_duration / 1000);
+                        vad_debounce_active_ = false; // Reset debounce state
+                        Schedule([this]() {
+                            AbortSpeaking(kAbortReasonNone);
+                            // Switch to listening mode to capture the user's voice
+                            SetListeningMode(aec_mode_ == kAecOff ? kListeningModeAutoStop : kListeningModeRealtime);
+                        });
                     }
                     else
                     {
-                        // VAD still active, check if debounce period has elapsed
-                        int64_t vad_duration = now_us - vad_detected_time_us_;
-                        if (vad_duration >= DEBOUNCE_DURATION_US)
-                        {
-                            ESP_LOGI(TAG, "VAD detected real voice during playback (confirmed for %lld ms), interrupting",
-                                vad_duration / 1000);
-                            vad_debounce_active_ = false; // Reset debounce state
-                            Schedule([this]() {
-                                AbortSpeaking(kAbortReasonNone);
-                                // Switch to listening mode to capture the user's voice
-                                SetListeningMode(aec_mode_ == kAecOff ? kListeningModeAutoStop : kListeningModeRealtime);
-                            });
-                        }
-                        else
-                        {
-                            ESP_LOGD(TAG, "VAD still in debounce period (%lld ms / %lld ms)",
-                                vad_duration / 1000, DEBOUNCE_DURATION_US / 1000);
-                        }
+                        int delay_ms = static_cast<int>((DEBOUNCE_DURATION_US - vad_duration + 999) / 1000);
+                        ESP_LOGD(TAG, "VAD still in debounce period (%lld ms / %lld ms), rechecking in %d ms",
+                            vad_duration / 1000, DEBOUNCE_DURATION_US / 1000, delay_ms);
+                        ScheduleVadDebounceRecheck(delay_ms);
                     }
                 }
                 else
                 {
-                    ESP_LOGD(TAG, "VAD detected during grace period, ignoring (elapsed: %lld ms)",
-                        time_since_speaking_start / 1000);
+                    int delay_ms = static_cast<int>((GRACE_PERIOD_US - time_since_speaking_start + 999) / 1000);
+                    ESP_LOGD(TAG, "VAD detected during grace period, rechecking in %d ms (elapsed: %lld ms)",
+                        delay_ms, time_since_speaking_start / 1000);
+                    ScheduleVadDebounceRecheck(delay_ms);
                 }
             }
             else
             {
                 // VAD not detected or AEC not enabled, reset debounce state
                 vad_debounce_active_ = false;
+                vad_debounce_recheck_scheduled_ = false;
             }
         }
     }

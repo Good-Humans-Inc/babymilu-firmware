@@ -96,6 +96,7 @@ public:
 private:
     Application();
     ~Application();
+    void ScheduleVadDebounceRecheck(int delay_ms);
 
     std::unique_ptr<WakeWord> wake_word_;
     std::unique_ptr<AudioProcessor> audio_processor_;
@@ -123,6 +124,7 @@ private:
     int64_t speaking_start_time_us_ = 0;  // When speaking state started (for grace period)
     int64_t vad_detected_time_us_ = 0;   // When VAD was first detected during speaking (for debounce)
     bool vad_debounce_active_ = false;    // Whether we're currently in a debounce period
+    bool vad_debounce_recheck_scheduled_ = false; // Recheck continuous speech after debounce delay
     int clock_ticks_ = 0;
     TaskHandle_t check_new_version_task_handle_ = nullptr;
 
