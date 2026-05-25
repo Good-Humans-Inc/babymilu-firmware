@@ -1474,15 +1474,19 @@ void Application::Start()
                         // Save state before TTS to determine if we should resume listening after TTS
                         state_before_tts_ = device_state_;
                         
-                        // If we're in LISTENING state, stop listening before TTS starts
-                        // This ensures no microphone audio interference during TTS playback
+                        // With device-side AEC, keep uplink audio alive during playback so
+                        // barge-in can be detected. Without AEC, stop listening to avoid echo.
                         if (device_state_ == kDeviceStateListening) {
                             auto* active_protocol = GetActiveProtocol();
                             if (active_protocol && active_protocol->IsAudioChannelOpened()) {
-                                ESP_LOGI(TAG, "TTS starting while listening - stopping listening before TTS");
-                                active_protocol->SendStopListening();
-                                // Small delay to ensure server receives listen:stop before TTS starts
-                                vTaskDelay(pdMS_TO_TICKS(50));
+                                if (aec_mode_ == kAecOnDeviceSide) {
+                                    ESP_LOGI(TAG, "TTS starting while listening - keeping audio uplink active for device-side AEC barge-in");
+                                } else {
+                                    ESP_LOGI(TAG, "TTS starting while listening - stopping listening before TTS");
+                                    active_protocol->SendStopListening();
+                                    // Small delay to ensure server receives listen:stop before TTS starts
+                                    vTaskDelay(pdMS_TO_TICKS(50));
+                                }
                             }
                         }
                         
@@ -2683,15 +2687,19 @@ void Application::OpenWebSocketConnection() {
                             // Save state before TTS to determine if we should resume listening after TTS
                             state_before_tts_ = device_state_;
                             
-                            // If we're in LISTENING state, stop listening before TTS starts
-                            // This ensures no microphone audio interference during TTS playback
+                            // With device-side AEC, keep uplink audio alive during playback so
+                            // barge-in can be detected. Without AEC, stop listening to avoid echo.
                             if (device_state_ == kDeviceStateListening) {
                                 auto* active_protocol = GetActiveProtocol();
                                 if (active_protocol && active_protocol->IsAudioChannelOpened()) {
-                                    ESP_LOGI(TAG, "TTS starting while listening (WebSocket) - stopping listening before TTS");
-                                    active_protocol->SendStopListening();
-                                    // Small delay to ensure server receives listen:stop before TTS starts
-                                    vTaskDelay(pdMS_TO_TICKS(50));
+                                    if (aec_mode_ == kAecOnDeviceSide) {
+                                        ESP_LOGI(TAG, "TTS starting while listening (WebSocket) - keeping audio uplink active for device-side AEC barge-in");
+                                    } else {
+                                        ESP_LOGI(TAG, "TTS starting while listening (WebSocket) - stopping listening before TTS");
+                                        active_protocol->SendStopListening();
+                                        // Small delay to ensure server receives listen:stop before TTS starts
+                                        vTaskDelay(pdMS_TO_TICKS(50));
+                                    }
                                 }
                             }
                             
