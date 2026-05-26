@@ -5,6 +5,7 @@
 #include <web_socket.h>
 #include <mqtt.h>
 #include <udp.h>
+#include <ctime>
 #include <string>
 
 #include "led/led.h"
@@ -53,6 +54,7 @@ public:
     virtual void ClearWifiConfiguration() {}
     virtual void EnterBleWifiConfigMode() {}
     virtual void WaitForStartupNetworkTasks() {}
+    virtual void SyncRtcFromSystemTime(time_t /*now*/) {}
     virtual std::string GetBoardJson() = 0;
     virtual std::string GetDeviceStatusJson() = 0;
 };

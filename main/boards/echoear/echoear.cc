@@ -23,6 +23,8 @@
 #include <cJSON.h>
 #include <cstdio>
 #include <cstdlib>
+#include <ctime>
+#include <time.h>
 
 #include <driver/i2c_master.h>
 #include <driver/rtc_io.h>
@@ -685,14 +687,122 @@ private:
 
 class Bm8563 : public I2cDevice {
 public:
+    struct DateTime {
+        uint16_t year = 0;
+        uint8_t month = 0;
+        uint8_t day = 0;
+        uint8_t weekday = 0;
+        uint8_t hour = 0;
+        uint8_t minute = 0;
+        uint8_t second = 0;
+    };
+
     explicit Bm8563(i2c_master_bus_handle_t i2c_bus, uint8_t addr) : I2cDevice(i2c_bus, addr) {}
 
     bool ClearInterrupts() {
         return TryWriteReg(0x01, 0x00) == ESP_OK && TryWriteReg(0x0E, 0x00) == ESP_OK;
     }
 
+    /*
     bool ScheduleWakeInSeconds(uint8_t seconds) {
-        if (seconds == 0) {
+        ...
+    }
+    */
+
+    bool ReadDateTime(DateTime& dt) {
+        uint8_t regs[7] = {};
+        if (TryReadRegs(0x02, regs, sizeof(regs)) != ESP_OK) {
+            return false;
+        }
+
+        if ((regs[0] & 0x80) != 0) {
+            ESP_LOGW(TAG, "[SLEEP] BM8563 VL flag is set; RTC clock time may be invalid");
+            return false;
+        }
+
+        dt.second = BcdToDec(regs[0] & 0x7F);
+        dt.minute = BcdToDec(regs[1] & 0x7F);
+        dt.hour = BcdToDec(regs[2] & 0x3F);
+        dt.day = BcdToDec(regs[3] & 0x3F);
+        dt.weekday = BcdToDec(regs[4] & 0x07);
+        dt.month = BcdToDec(regs[5] & 0x1F);
+        dt.year = static_cast<uint16_t>(2000 + BcdToDec(regs[6]));
+
+        return IsValidDateTime(dt);
+    }
+
+    bool SetDateTime(const DateTime& dt) {
+        if (!IsValidDateTime(dt)) {
+            return false;
+        }
+
+        if (TryWriteReg(0x02, DecToBcd(dt.second) & 0x7F) != ESP_OK) return false;
+        if (TryWriteReg(0x03, DecToBcd(dt.minute) & 0x7F) != ESP_OK) return false;
+        if (TryWriteReg(0x04, DecToBcd(dt.hour) & 0x3F) != ESP_OK) return false;
+        if (TryWriteReg(0x05, DecToBcd(dt.day) & 0x3F) != ESP_OK) return false;
+        if (TryWriteReg(0x06, DecToBcd(dt.weekday) & 0x07) != ESP_OK) return false;
+        if (TryWriteReg(0x07, DecToBcd(dt.month) & 0x1F) != ESP_OK) return false;
+        return TryWriteReg(0x08, DecToBcd(static_cast<uint8_t>(dt.year - 2000))) == ESP_OK;
+    }
+
+    bool EnsureValidClock() {
+        DateTime now;
+        if (ReadDateTime(now)) {
+            char now_text[32] = {};
+            FormatDateTime(now, now_text, sizeof(now_text));
+            ESP_LOGI(TAG, "[SLEEP] BM8563 clock is valid at startup: %s", now_text);
+            return true;
+        }
+
+        DateTime fallback;
+        fallback.year = 2026;
+        fallback.month = 1;
+        fallback.day = 1;
+        fallback.weekday = 4;
+        fallback.hour = 0;
+        fallback.minute = 0;
+        fallback.second = 0;
+
+        if (!SetDateTime(fallback)) {
+            ESP_LOGE(TAG, "[SLEEP] Failed to initialize BM8563 fallback clock");
+            return false;
+        }
+
+        char fallback_text[32] = {};
+        FormatDateTime(fallback, fallback_text, sizeof(fallback_text));
+        ESP_LOGW(TAG, "[SLEEP] BM8563 clock was invalid; initialized fallback time to %s", fallback_text);
+        return true;
+    }
+
+    bool SyncFromSystemTime(time_t now) {
+        struct tm timeinfo = {};
+        if (gmtime_r(&now, &timeinfo) == nullptr) {
+            ESP_LOGE(TAG, "[SLEEP] Failed to convert system time for BM8563 sync");
+            return false;
+        }
+
+        DateTime dt;
+        dt.year = static_cast<uint16_t>(timeinfo.tm_year + 1900);
+        dt.month = static_cast<uint8_t>(timeinfo.tm_mon + 1);
+        dt.day = static_cast<uint8_t>(timeinfo.tm_mday);
+        dt.weekday = static_cast<uint8_t>(timeinfo.tm_wday);
+        dt.hour = static_cast<uint8_t>(timeinfo.tm_hour);
+        dt.minute = static_cast<uint8_t>(timeinfo.tm_min);
+        dt.second = static_cast<uint8_t>(timeinfo.tm_sec);
+
+        if (!SetDateTime(dt)) {
+            ESP_LOGE(TAG, "[SLEEP] Failed to write OTA server time into BM8563");
+            return false;
+        }
+
+        char sync_text[32] = {};
+        FormatDateTime(dt, sync_text, sizeof(sync_text));
+        ESP_LOGI(TAG, "[SLEEP] BM8563 clock synced from OTA server time: %s", sync_text);
+        return true;
+    }
+
+    bool ScheduleAlarmAt(const DateTime& alarm) {
+        if (!IsValidDateTime(alarm)) {
             return false;
         }
 
@@ -700,17 +810,92 @@ public:
             return false;
         }
 
-        if (TryWriteReg(0x0F, seconds) != ESP_OK) {
+        // Disable countdown timer; this path uses the BM8563 clock alarm mode.
+        if (TryWriteReg(0x0E, 0x00) != ESP_OK || TryWriteReg(0x0F, 0x00) != ESP_OK) {
             return false;
         }
 
-        // TE=1, TD=10: use the 1 Hz countdown source.
-        if (TryWriteReg(0x0E, 0x82) != ESP_OK) {
+        if (TryWriteReg(0x09, DecToBcd(alarm.minute) & 0x7F) != ESP_OK) return false;
+        if (TryWriteReg(0x0A, DecToBcd(alarm.hour) & 0x3F) != ESP_OK) return false;
+        if (TryWriteReg(0x0B, DecToBcd(alarm.day) & 0x3F) != ESP_OK) return false;
+        if (TryWriteReg(0x0C, 0x80) != ESP_OK) return false; // Weekday alarm disabled.
+
+        uint8_t control2 = 0;
+        if (TryReadReg(0x01, &control2) != ESP_OK) {
             return false;
         }
 
-        // TIE=1, TI_TP=0: active-low level interrupt until cleared.
-        return TryWriteReg(0x01, 0x01) == ESP_OK;
+        control2 &= ~0x08; // Clear AF.
+        control2 |= 0x02;  // Enable AIE.
+        control2 &= ~0x01; // Disable TIE.
+        control2 &= ~0x04; // Clear TF.
+        return TryWriteReg(0x01, control2) == ESP_OK;
+    }
+
+    static DateTime AddMinutes(DateTime dt, uint16_t minutes_to_add) {
+        uint32_t total_minutes = static_cast<uint32_t>(dt.hour) * 60U + dt.minute + minutes_to_add;
+        dt.hour = static_cast<uint8_t>((total_minutes / 60U) % 24U);
+        dt.minute = static_cast<uint8_t>(total_minutes % 60U);
+        dt.second = 0;
+
+        uint32_t day_carry = total_minutes / (24U * 60U);
+        while (day_carry > 0) {
+            dt.day++;
+            if (dt.day > DaysInMonth(dt.year, dt.month)) {
+                dt.day = 1;
+                dt.month++;
+                if (dt.month > 12) {
+                    dt.month = 1;
+                    dt.year++;
+                }
+            }
+            day_carry--;
+        }
+
+        return dt;
+    }
+
+    static void FormatDateTime(const DateTime& dt, char* buffer, size_t buffer_size) {
+        snprintf(buffer, buffer_size, "%04u-%02u-%02u %02u:%02u:%02u",
+                 static_cast<unsigned>(dt.year),
+                 static_cast<unsigned>(dt.month),
+                 static_cast<unsigned>(dt.day),
+                 static_cast<unsigned>(dt.hour),
+                 static_cast<unsigned>(dt.minute),
+                 static_cast<unsigned>(dt.second));
+    }
+
+private:
+    static uint8_t BcdToDec(uint8_t value) {
+        return static_cast<uint8_t>(((value >> 4) * 10) + (value & 0x0F));
+    }
+
+    static uint8_t DecToBcd(uint8_t value) {
+        return static_cast<uint8_t>(((value / 10) << 4) | (value % 10));
+    }
+
+    static bool IsLeapYear(uint16_t year) {
+        if (year % 400 == 0) return true;
+        if (year % 100 == 0) return false;
+        return (year % 4) == 0;
+    }
+
+    static uint8_t DaysInMonth(uint16_t year, uint8_t month) {
+        static const uint8_t kDays[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+        if (month == 2 && IsLeapYear(year)) {
+            return 29;
+        }
+        return kDays[month - 1];
+    }
+
+    static bool IsValidDateTime(const DateTime& dt) {
+        if (dt.year < 2000 || dt.year > 2099) return false;
+        if (dt.month < 1 || dt.month > 12) return false;
+        if (dt.day < 1 || dt.day > DaysInMonth(dt.year, dt.month)) return false;
+        if (dt.hour > 23) return false;
+        if (dt.minute > 59) return false;
+        if (dt.second > 59) return false;
+        return true;
     }
 };
 
@@ -807,22 +992,35 @@ private:
     int previous_volume_ = -1;  // Store volume before muting (for restore on unmute)
     bool deep_sleep_pending_on_boot_release_ = false;
     bool deep_sleep_entry_started_ = false;
-    static constexpr uint8_t kRtcDeepSleepWakeSeconds = 10;
+    static constexpr uint16_t kRtcClockWakeMinutes = 1;
 
-    bool PrepareRtcWake(uint8_t wake_after_seconds) {
+    bool PrepareRtcClockAlarm() {
         if (rtc_ == nullptr) {
             ESP_LOGW(TAG, "[SLEEP] BM8563 RTC unavailable, cannot enter RTC timed deep sleep");
             return false;
         }
 
-        if (!rtc_->ScheduleWakeInSeconds(wake_after_seconds)) {
-            ESP_LOGE(TAG, "[SLEEP] Failed to arm BM8563 wake timer for %u seconds",
-                     static_cast<unsigned>(wake_after_seconds));
+        Bm8563::DateTime now;
+        if (!rtc_->ReadDateTime(now)) {
+            ESP_LOGE(TAG, "[SLEEP] Failed to read valid BM8563 clock time; skipping deep sleep");
             return false;
         }
 
-        ESP_LOGI(TAG, "[SLEEP] BM8563 wake timer armed for %u seconds on GPIO %d",
-                 static_cast<unsigned>(wake_after_seconds),
+        char now_text[32] = {};
+        Bm8563::FormatDateTime(now, now_text, sizeof(now_text));
+        ESP_LOGI(TAG, "[SLEEP] BM8563 current clock time before deep sleep: %s", now_text);
+
+        Bm8563::DateTime alarm = Bm8563::AddMinutes(now, kRtcClockWakeMinutes);
+        char alarm_text[32] = {};
+        Bm8563::FormatDateTime(alarm, alarm_text, sizeof(alarm_text));
+
+        if (!rtc_->ScheduleAlarmAt(alarm)) {
+            ESP_LOGE(TAG, "[SLEEP] Failed to arm BM8563 clock alarm for %s", alarm_text);
+            return false;
+        }
+
+        ESP_LOGI(TAG, "[SLEEP] BM8563 clock alarm armed for %s on GPIO %d",
+                 alarm_text,
                  static_cast<int>(BM8563_INT_GPIO));
         return true;
     }
@@ -837,7 +1035,7 @@ private:
         ESP_LOGI(TAG, "[SLEEP] BOOT released after long press, entering RTC timed deep sleep");
         vTaskDelay(pdMS_TO_TICKS(200));
 
-        if (!PrepareRtcWake(kRtcDeepSleepWakeSeconds)) {
+        if (!PrepareRtcClockAlarm()) {
             deep_sleep_entry_started_ = false;
             deep_sleep_pending_on_boot_release_ = false;
             return;
@@ -866,8 +1064,8 @@ private:
         ESP_ERROR_CHECK(esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL));
         ESP_ERROR_CHECK(esp_sleep_enable_ext1_wakeup(wake_mask, ESP_EXT1_WAKEUP_ANY_LOW));
 
-        ESP_LOGI(TAG, "[SLEEP] Entering deep sleep now, RTC wake in %u seconds or BOOT tap",
-                 static_cast<unsigned>(kRtcDeepSleepWakeSeconds));
+        ESP_LOGI(TAG, "[SLEEP] Entering deep sleep now, RTC clock alarm in %u minute or BOOT tap",
+                 static_cast<unsigned>(kRtcClockWakeMinutes));
         vTaskDelay(pdMS_TO_TICKS(200));
         esp_deep_sleep_start();
     }
@@ -1794,6 +1992,8 @@ private:
             ESP_LOGW(TAG, "[SLEEP] BM8563 detected but interrupt clear failed");
         }
 
+        rtc_->EnsureValidClock();
+
         ESP_LOGI(TAG, "[SLEEP] BM8563 RTC initialized on GPIO %d", static_cast<int>(BM8563_INT_GPIO));
     }
 
@@ -2269,6 +2469,14 @@ public:
             vTaskDelay(wait_step);
         }
         ESP_LOGI(TAG, "[FIRESTORE] Startup Firestore request finished");
+    }
+
+    virtual void SyncRtcFromSystemTime(time_t now) override {
+        if (rtc_ == nullptr) {
+            ESP_LOGW(TAG, "[SLEEP] Skipping BM8563 sync because RTC is unavailable");
+            return;
+        }
+        rtc_->SyncFromSystemTime(now);
     }
 
     virtual void StartNetwork() override {

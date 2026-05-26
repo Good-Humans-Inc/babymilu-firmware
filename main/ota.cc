@@ -19,6 +19,7 @@
 #include <vector>
 #include <sstream>
 #include <algorithm>
+#include <sys/time.h>
 
 #define TAG "Ota"
 namespace {
@@ -242,6 +243,7 @@ bool Ota::CheckVersion() {
             tv.tv_sec = (time_t)(ts / 1000);  // 转换毫秒为秒
             tv.tv_usec = (suseconds_t)((long long)ts % 1000) * 1000;  // 剩余的毫秒转换为微秒
             settimeofday(&tv, NULL);
+            Board::GetInstance().SyncRtcFromSystemTime(tv.tv_sec);
             has_server_time_ = true;
         }
     } else {
