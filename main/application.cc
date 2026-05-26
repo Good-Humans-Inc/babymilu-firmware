@@ -1430,6 +1430,13 @@ void Application::Start()
     protocol_->OnAudioChannelOpened([this, codec, &board]()
                                     {
                                         board.SetPowerSaveMode(false);
+                                        {
+                                            std::lock_guard<std::mutex> lock(mutex_);
+                                            audio_send_queue_.clear();
+                                            audio_uplink_sequence_ = 0;
+                                            audio_uplink_dropped_frames_ = 0;
+                                        }
+                                        ESP_LOGI(TAG, "Audio uplink queue reset for new primary audio channel");
                                         if (protocol_->server_sample_rate() != codec->output_sample_rate())
                                         {
                                             ESP_LOGW(TAG, "Server sample rate %d does not match device output sample rate %d, resampling may cause distortion",
@@ -2003,10 +2010,11 @@ void Application::MainEventLoop()
             {
                 int64_t now_us = esp_timer_get_time();
                 
-                // Grace period: ignore interruptions for first 1 second after speaking starts
+                // Grace/debounce are intentionally conservative because EchoEar
+                // can false-trigger on residual playback even with device AEC.
                 int64_t time_since_speaking_start = now_us - speaking_start_time_us_;
-                const int64_t GRACE_PERIOD_US = 1000000; // 1 second
-                const int64_t DEBOUNCE_DURATION_US = 400000; // 400ms
+                const int64_t GRACE_PERIOD_US = 2000000; // 2 seconds
+                const int64_t DEBOUNCE_DURATION_US = 800000; // 800ms
 
                 if (!vad_debounce_active_)
                 {
@@ -2022,14 +2030,18 @@ void Application::MainEventLoop()
                     int64_t vad_duration = now_us - vad_detected_time_us_;
                     if (vad_duration >= DEBOUNCE_DURATION_US)
                     {
-                        ESP_LOGI(TAG, "VAD detected real voice during playback (confirmed for %lld ms), interrupting",
+                        ESP_LOGI(TAG, "VAD detected voice during playback (confirmed for %lld ms)",
                             vad_duration / 1000);
                         vad_debounce_active_ = false; // Reset debounce state
+#if CONFIG_USE_DEVICE_VAD_BARGE_IN
                         Schedule([this]() {
                             AbortSpeaking(kAbortReasonNone);
                             // Switch to listening mode to capture the user's voice
                             SetListeningMode(aec_mode_ == kAecOff ? kListeningModeAutoStop : kListeningModeRealtime);
                         });
+#else
+                        ESP_LOGW(TAG, "Device VAD barge-in is disabled; keeping playback active and letting server validate audio");
+#endif
                     }
                     else
                     {
@@ -2654,6 +2666,13 @@ void Application::OpenWebSocketConnection() {
         
         websocket_protocol_->OnAudioChannelOpened([this, codec = Board::GetInstance().GetAudioCodec(), &board = Board::GetInstance()]() {
             board.SetPowerSaveMode(false);
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                audio_send_queue_.clear();
+                audio_uplink_sequence_ = 0;
+                audio_uplink_dropped_frames_ = 0;
+            }
+            ESP_LOGI(TAG, "Audio uplink queue reset for new WebSocket audio channel");
             if (websocket_protocol_->server_sample_rate() != codec->output_sample_rate()) {
                 ESP_LOGW(TAG, "Server sample rate %d does not match device output sample rate %d, resampling may cause distortion",
                          websocket_protocol_->server_sample_rate(), codec->output_sample_rate());

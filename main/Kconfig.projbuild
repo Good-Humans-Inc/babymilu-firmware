@@ -405,6 +405,15 @@ config USE_SERVER_AEC
     help
         启用服务器端 AEC，需要服务器支持
 
+config USE_DEVICE_VAD_BARGE_IN
+    bool "Enable Device VAD Barge-In (Experimental)"
+    default n
+    depends on USE_DEVICE_AEC
+    help
+        Let firmware-local VAD abort playback during device-side AEC. This is
+        experimental because EchoEar VAD can false-trigger on residual playback
+        echo. Keep disabled unless testing a tuned AEC/VAD build.
+
 config USE_AUDIO_DEBUGGER
     bool "Enable Audio Debugger"
     default n
