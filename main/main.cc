@@ -12,11 +12,33 @@
 #include "animation.h"
 #include "sd_card.h"
 #include "sd_card_startup.h"
+#include "config.h"
 
 #define TAG "main"
 
+#if defined(CONFIG_BOARD_TYPE_ECHOEAR)
+namespace {
+constexpr gpio_num_t kRtcWakeGpio = BM8563_INT_GPIO;
+constexpr gpio_num_t kBootWakeGpio = BOOT_BUTTON_GPIO;
+
+uint64_t GetEchoEarWakeMask() {
+    return (1ULL << kRtcWakeGpio) | (1ULL << kBootWakeGpio);
+}
+
+void ReenterEchoEarDeepSleep() {
+    ESP_LOGI(TAG, "Re-entering EchoEar deep sleep");
+    ESP_ERROR_CHECK(esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL));
+    ESP_ERROR_CHECK(esp_sleep_enable_ext1_wakeup(GetEchoEarWakeMask(), ESP_EXT1_WAKEUP_ANY_LOW));
+    esp_deep_sleep_start();
+    while (true) {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+}
+}  // namespace
+#else
 // Power button GPIO for wake-up check (matches esp32-s3-touch-lcd-1.85 board)
 #define PWR_BUTTON_GPIO GPIO_NUM_6
+#endif
 
 extern "C" void app_main(void)
 {
@@ -25,6 +47,25 @@ extern "C" void app_main(void)
     // Check if we woke from deep sleep
     esp_sleep_wakeup_cause_t wake_cause = esp_sleep_get_wakeup_cause();
     if (wake_cause == ESP_SLEEP_WAKEUP_EXT1) {
+#if defined(CONFIG_BOARD_TYPE_ECHOEAR)
+        const uint64_t wake_status = esp_sleep_get_ext1_wakeup_status();
+        const bool rtc_wake = (wake_status & (1ULL << kRtcWakeGpio)) != 0;
+        const bool boot_wake = (wake_status & (1ULL << kBootWakeGpio)) != 0;
+
+        ESP_LOGI(TAG, "Woke from deep sleep via GPIO (ext1), status=0x%llx",
+                 static_cast<unsigned long long>(wake_status));
+
+        if (rtc_wake) {
+            ESP_LOGI(TAG, "BM8563 RTC wake detected on GPIO %d, continuing normal boot",
+                     static_cast<int>(kRtcWakeGpio));
+        } else if (boot_wake) {
+            ESP_LOGI(TAG, "BOOT button wake detected on GPIO %d, continuing normal boot",
+                     static_cast<int>(kBootWakeGpio));
+        } else {
+            ESP_LOGW(TAG, "ext1 wake reported with no recognized EchoEar source, returning to deep sleep");
+            ReenterEchoEarDeepSleep();
+        }
+#else
         ESP_LOGI(TAG, "Woke from deep sleep via GPIO (ext1)");
         
         // Configure power button GPIO to check if it's still pressed
@@ -76,6 +117,7 @@ extern "C" void app_main(void)
             esp_deep_sleep_start();
             return; // Should never reach here
         }
+#endif
     } else if (wake_cause != ESP_SLEEP_WAKEUP_UNDEFINED) {
         ESP_LOGI(TAG, "Woke from sleep, cause: %d", wake_cause);
     }

@@ -19,11 +19,13 @@
 #include "settings.h"
 #include <esp_log.h>
 #include <esp_random.h>
+#include <esp_sleep.h>
 #include <cJSON.h>
 #include <cstdio>
 #include <cstdlib>
 
 #include <driver/i2c_master.h>
+#include <driver/rtc_io.h>
 #include "i2c_device.h"
 #include <esp_lcd_panel_io.h>
 #include <esp_lcd_panel_ops.h>
@@ -681,6 +683,37 @@ private:
     bool enabled_ = true;
 };
 
+class Bm8563 : public I2cDevice {
+public:
+    explicit Bm8563(i2c_master_bus_handle_t i2c_bus, uint8_t addr) : I2cDevice(i2c_bus, addr) {}
+
+    bool ClearInterrupts() {
+        return TryWriteReg(0x01, 0x00) == ESP_OK && TryWriteReg(0x0E, 0x00) == ESP_OK;
+    }
+
+    bool ScheduleWakeInSeconds(uint8_t seconds) {
+        if (seconds == 0) {
+            return false;
+        }
+
+        if (!ClearInterrupts()) {
+            return false;
+        }
+
+        if (TryWriteReg(0x0F, seconds) != ESP_OK) {
+            return false;
+        }
+
+        // TE=1, TD=10: use the 1 Hz countdown source.
+        if (TryWriteReg(0x0E, 0x82) != ESP_OK) {
+            return false;
+        }
+
+        // TIE=1, TI_TP=0: active-low level interrupt until cleared.
+        return TryWriteReg(0x01, 0x01) == ESP_OK;
+    }
+};
+
 
 class Cst816s : public I2cDevice {
 public:
@@ -756,6 +789,7 @@ private:
     
     Cst816s* cst816s_;
     Charge* charge_;
+    Bm8563* rtc_ = nullptr;
     Button boot_button_;
     LcdDisplay* display_;
     PwmBacklight* backlight_ = nullptr;
@@ -771,6 +805,72 @@ private:
     esp_timer_handle_t volume_message_timer_ = nullptr;  // Timer to clear volume message
     std::string previous_emotion_ = "normal";  // Store previous emotion string to restore
     int previous_volume_ = -1;  // Store volume before muting (for restore on unmute)
+    bool deep_sleep_pending_on_boot_release_ = false;
+    bool deep_sleep_entry_started_ = false;
+    static constexpr uint8_t kRtcDeepSleepWakeSeconds = 10;
+
+    bool PrepareRtcWake(uint8_t wake_after_seconds) {
+        if (rtc_ == nullptr) {
+            ESP_LOGW(TAG, "[SLEEP] BM8563 RTC unavailable, cannot enter RTC timed deep sleep");
+            return false;
+        }
+
+        if (!rtc_->ScheduleWakeInSeconds(wake_after_seconds)) {
+            ESP_LOGE(TAG, "[SLEEP] Failed to arm BM8563 wake timer for %u seconds",
+                     static_cast<unsigned>(wake_after_seconds));
+            return false;
+        }
+
+        ESP_LOGI(TAG, "[SLEEP] BM8563 wake timer armed for %u seconds on GPIO %d",
+                 static_cast<unsigned>(wake_after_seconds),
+                 static_cast<int>(BM8563_INT_GPIO));
+        return true;
+    }
+
+    void EnterRtcTimedDeepSleep() {
+        if (deep_sleep_entry_started_) {
+            ESP_LOGI(TAG, "[SLEEP] RTC timed deep sleep already in progress");
+            return;
+        }
+        deep_sleep_entry_started_ = true;
+
+        ESP_LOGI(TAG, "[SLEEP] BOOT released after long press, entering RTC timed deep sleep");
+        vTaskDelay(pdMS_TO_TICKS(200));
+
+        if (!PrepareRtcWake(kRtcDeepSleepWakeSeconds)) {
+            deep_sleep_entry_started_ = false;
+            deep_sleep_pending_on_boot_release_ = false;
+            return;
+        }
+
+        if (backlight_ != nullptr) {
+            backlight_->SetBrightness(0, false);
+        }
+        if (display_ != nullptr) {
+            display_->ShowNotification("Sleep", 500);
+        }
+
+        gpio_reset_pin(BM8563_INT_GPIO);
+        gpio_set_direction(BM8563_INT_GPIO, GPIO_MODE_INPUT);
+        gpio_set_pull_mode(BM8563_INT_GPIO, GPIO_PULLUP_ONLY);
+        rtc_gpio_pullup_en(BM8563_INT_GPIO);
+        rtc_gpio_pulldown_dis(BM8563_INT_GPIO);
+
+        gpio_reset_pin(BOOT_BUTTON_GPIO);
+        gpio_set_direction(BOOT_BUTTON_GPIO, GPIO_MODE_INPUT);
+        gpio_set_pull_mode(BOOT_BUTTON_GPIO, GPIO_PULLUP_ONLY);
+        rtc_gpio_pullup_en(BOOT_BUTTON_GPIO);
+        rtc_gpio_pulldown_dis(BOOT_BUTTON_GPIO);
+
+        const uint64_t wake_mask = (1ULL << BM8563_INT_GPIO) | (1ULL << BOOT_BUTTON_GPIO);
+        ESP_ERROR_CHECK(esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL));
+        ESP_ERROR_CHECK(esp_sleep_enable_ext1_wakeup(wake_mask, ESP_EXT1_WAKEUP_ANY_LOW));
+
+        ESP_LOGI(TAG, "[SLEEP] Entering deep sleep now, RTC wake in %u seconds or BOOT tap",
+                 static_cast<unsigned>(kRtcDeepSleepWakeSeconds));
+        vTaskDelay(pdMS_TO_TICKS(200));
+        esp_deep_sleep_start();
+    }
 
     void InitializeVolumeMessageTimer() {
         if (volume_message_timer_ != nullptr) {
@@ -1682,6 +1782,21 @@ private:
         xTaskCreatePinnedToCore(Charge::TaskFunction, "batterydecTask", 3 * 1024, charge_, 6, NULL, 0);
     }
 
+    void InitializeRtc() {
+        if (!ProbeI2cDevice(BM8563_I2C_ADDR, "BM8563 RTC")) {
+            ESP_LOGW(TAG, "[SLEEP] BM8563 RTC not detected, RTC timed deep sleep disabled");
+            rtc_ = nullptr;
+            return;
+        }
+
+        rtc_ = new Bm8563(i2c_bus_, BM8563_I2C_ADDR);
+        if (!rtc_->ClearInterrupts()) {
+            ESP_LOGW(TAG, "[SLEEP] BM8563 detected but interrupt clear failed");
+        }
+
+        ESP_LOGI(TAG, "[SLEEP] BM8563 RTC initialized on GPIO %d", static_cast<int>(BM8563_INT_GPIO));
+    }
+
     void InitializeCst816sTouchPad() {
         if (!ProbeI2cDevice(0x15, "CST816S")) {
             ESP_LOGW(TAG, "[TOUCH] CST816S not detected, touch disabled");
@@ -2014,7 +2129,16 @@ private:
         });
 
         boot_button_.OnLongPress([this]() {
-            ToggleMute();
+            ESP_LOGI(TAG, "[SLEEP] BOOT held for 3 seconds - waiting for release before deep sleep");
+            deep_sleep_pending_on_boot_release_ = true;
+        });
+
+        boot_button_.OnPressUp([this]() {
+            if (!deep_sleep_pending_on_boot_release_) {
+                return;
+            }
+            deep_sleep_pending_on_boot_release_ = false;
+            EnterRtcTimedDeepSleep();
         });
 
          gpio_config_t power_gpio_config = {
@@ -2028,10 +2152,11 @@ private:
     }
 
 public:
-    EchoEar() : boot_button_(BOOT_BUTTON_GPIO, false, 5000, 0) {  // 5-second long press time
+    EchoEar() : boot_button_(BOOT_BUTTON_GPIO, false, 3000, 0) {  // 3-second long press enters deep sleep
         InitializeI2c();
         InitializeBmi270();  // Initialize BMI270 after I2C bus is ready
         InitializeCharge();
+        InitializeRtc();
         InitializeCst816sTouchPad();
         
         InitializeSpi();

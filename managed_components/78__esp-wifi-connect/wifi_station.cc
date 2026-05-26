@@ -36,6 +36,8 @@ static std::string ToHexBytes(const char* input) {
 
 namespace {
 
+constexpr int8_t kFirmwareMaxTxPowerQuarterDbm = 80;  // 20 dBm = 100 mW
+
 std::string BytesToHex(const uint8_t* data, size_t len) {
     static const char kHex[] = "0123456789ABCDEF";
     std::string hex;
@@ -165,9 +167,17 @@ void WifiStation::Start() {
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_start());
 
-    if (max_tx_power_ != 0) {
-        ESP_ERROR_CHECK(esp_wifi_set_max_tx_power(max_tx_power_));
+    int8_t applied_tx_power = kFirmwareMaxTxPowerQuarterDbm;
+    if (max_tx_power_ > 0) {
+        applied_tx_power = std::min(max_tx_power_, kFirmwareMaxTxPowerQuarterDbm);
+        if (max_tx_power_ > kFirmwareMaxTxPowerQuarterDbm) {
+            ESP_LOGW(TAG,
+                     "Configured WiFi TX power %d exceeds firmware limit %d, clamping",
+                     static_cast<int>(max_tx_power_),
+                     static_cast<int>(kFirmwareMaxTxPowerQuarterDbm));
+        }
     }
+    ESP_ERROR_CHECK(esp_wifi_set_max_tx_power(applied_tx_power));
 
     // Setup the timer to scan WiFi
     esp_timer_create_args_t timer_args = {

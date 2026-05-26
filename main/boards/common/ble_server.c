@@ -3,6 +3,8 @@
 #include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "esp_bt.h"
+#include "esp_err.h"
 #include "esp_log.h"
 #include "esp_nimble_hci.h"
 #include "nimble/nimble_port.h"
@@ -34,6 +36,7 @@ static uint16_t ble_read_len = 0;
 static void ble_app_advertise(void);
 static int ble_gap_event(struct ble_gap_event *event, void *arg);
 static void ble_app_on_sync(void);
+static void ble_apply_tx_power_limit(void);
 static void host_task(void *param);
 static int ble_device_read(uint16_t con_handle, uint16_t attr_handle, struct ble_gatt_access_ctxt *ctxt, void *arg);
 static int ble_device_write(uint16_t conn_handle, uint16_t attr_handle, struct ble_gatt_access_ctxt *ctxt, void *arg);
@@ -209,10 +212,31 @@ static void ble_app_advertise(void)
     ESP_LOGI(TAG, "BLE advertising started successfully, device name: %s", device_name);
 }
 
+static void ble_apply_tx_power_limit(void)
+{
+    const esp_power_level_t ble_limit = ESP_PWR_LVL_P3;  // +3 dBm, below 3 mW
+
+    esp_err_t err = esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_DEFAULT, ble_limit);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to set BLE default TX power: %s", esp_err_to_name(err));
+    }
+
+    err = esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_ADV, ble_limit);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to set BLE advertising TX power: %s", esp_err_to_name(err));
+    }
+
+    err = esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_SCAN, ble_limit);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to set BLE scan TX power: %s", esp_err_to_name(err));
+    }
+}
+
 // The application
 static void ble_app_on_sync(void)
 {
     ble_hs_id_infer_auto(0, &ble_server_state.addr_type);
+    ble_apply_tx_power_limit();
     ble_app_advertise();
 }
 
