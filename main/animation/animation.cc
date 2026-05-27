@@ -31,6 +31,7 @@
 
 namespace {
 static std::atomic<bool> g_startup_load_blocked{false};
+static std::atomic<bool> g_power_save_paused{false};
 }
 
 // Minimum plausible size for a valid animation bundle. Anything smaller is
@@ -62,6 +63,14 @@ void animation_wait_for_startup_load_clear(uint32_t poll_ticks_ms) {
         }
         vTaskDelay(pdMS_TO_TICKS(poll_ticks_ms));
     }
+}
+
+void animation_set_power_save_paused(bool paused) {
+    g_power_save_paused.store(paused, std::memory_order_release);
+}
+
+bool animation_get_power_save_paused(void) {
+    return g_power_save_paused.load(std::memory_order_acquire);
 }
 
 static bool find_sdcard_test_bin_path(char* out_path, size_t out_path_size) {
@@ -394,6 +403,11 @@ void plat_animation_task(void *arg)
     while (1)
     {
         ESP_LOGD("plat_animation_task", "now_animation: %d, pos: %d", now_animation, pos);
+
+        if (animation_get_power_save_paused()) {
+            vTaskDelay(pdMS_TO_TICKS(500));
+            continue;
+        }
         
         // Use get_animation() to get the appropriate animation (SD card only)
         Animation_t* current_anim = get_animation(now_animation);
@@ -514,6 +528,11 @@ void plat_animation_task(void *arg)
 
 void animation_set_now_animation(int animation)
 {
+    if (animation_get_power_save_paused()) {
+        ESP_LOGI("animation_set_now_animation", "Power save pause active, ignoring request for animation %d", animation);
+        return;
+    }
+
     // If animation is locked by silence, only allow silence animation
     if (animation_locked_by_silence && animation != ANIMATION_SILENCE) {
         ESP_LOGI("animation_set_now_animation", "Animation locked by silence, ignoring request for animation %d", animation);

@@ -12,6 +12,8 @@
 #include <vector>
 #include <condition_variable>
 #include <memory>
+#include <atomic>
+#include <functional>
 
 #include <opus_encoder.h>
 #include <opus_decoder.h>
@@ -78,6 +80,10 @@ public:
     void Reboot();
     void WakeWordInvoke(const std::string& wake_word);
     void PlaySound(const std::string_view& sound);
+    void EnterCustomPowerSaveMode();
+    void ExitCustomPowerSaveMode(std::function<void()> on_restored = nullptr);
+    bool IsCustomPowerSaveMode() const { return custom_power_save_mode_.load(std::memory_order_acquire); }
+    bool IsCustomPowerSaveRestoring() const { return custom_power_save_restore_in_progress_.load(std::memory_order_acquire); }
     bool CanEnterSleepMode();
     void SendMcpMessage(const std::string& payload);
     void SetAecMode(AecMode mode);
@@ -114,6 +120,9 @@ private:
     bool voice_detected_ = false;
     bool busy_decoding_audio_ = false;
     bool wifi_error_reminder_active_ = false;  // First press shows wifi face, second press exits to normal.
+    std::atomic<bool> custom_power_save_mode_{false};
+    std::atomic<bool> custom_power_save_restore_in_progress_{false};
+    std::atomic<bool> custom_power_save_restore_memory_ready_{true};
     
     // VAD interrupt debounce state
     int64_t speaking_start_time_us_ = 0;  // When speaking state started (for grace period)

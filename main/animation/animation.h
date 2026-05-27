@@ -43,6 +43,8 @@ typedef enum _AnimationType_e {
 }AnimationType_e;
 
 void animation_set_now_animation(int animation);
+void animation_set_power_save_paused(bool paused);
+bool animation_get_power_save_paused(void);
 void animation_check_volume_and_lock(int volume);  // Check volume and lock/unlock silence animation
 void animation_init(void);
 // Used by startup to prevent animation_init() heavy test.bin loading from

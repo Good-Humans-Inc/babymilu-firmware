@@ -18,6 +18,7 @@
 #include <ssid_manager.h>
 #include "settings.h"
 #include <esp_log.h>
+#include <esp_pm.h>
 #include <esp_random.h>
 #include <esp_sleep.h>
 #include <cJSON.h>
@@ -57,19 +58,12 @@ LV_FONT_DECLARE(font_awesome_20_4);
 temperature_sensor_handle_t temp_sensor = NULL;
 float tsens_value;
 static std::atomic<bool> s_firestore_startup_done{false};
+static std::atomic<bool> s_echoear_custom_power_save_active{false};
+static std::atomic<bool> s_echoear_custom_power_save_restoring{false};
 
-static void ChipTemperatureLogTask(void* /*arg*/) {
-    while (true) {
-        float chip_temperature = 0.0f;
-        esp_err_t ret = temperature_sensor_get_celsius(temp_sensor, &chip_temperature);
-        if (ret == ESP_OK) {
-            tsens_value = chip_temperature;
-            ESP_LOGE(TAG, "[TEMP] Chip temperature: %.1f C", chip_temperature);
-        } else {
-            ESP_LOGW(TAG, "[TEMP] Failed to read chip temperature: %s", esp_err_to_name(ret));
-        }
-        vTaskDelay(pdMS_TO_TICKS(20000));
-    }
+static bool IsEchoEarCustomPowerSaveActive() {
+    return s_echoear_custom_power_save_active.load(std::memory_order_acquire) ||
+           s_echoear_custom_power_save_restoring.load(std::memory_order_acquire);
 }
 
 static bool WaitForAnimationUpdaterCheckToFinish() {
@@ -354,9 +348,21 @@ static void ShowSdCardFailureOnDisplay(esp_err_t ret) {
     }
 }
 
+static void WaitWhileCustomPowerSaveActive(const char* owner) {
+    bool logged = false;
+    while (IsEchoEarCustomPowerSaveActive()) {
+        if (!logged) {
+            ESP_LOGI(TAG, "[PWR_SAVE] Pausing %s while custom power-save mode is active", owner);
+            logged = true;
+        }
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+}
+
 static void SdAnimInitTask(void* /*arg*/) {
     ESP_LOGI(TAG, "[SD/ANIM] Background init task started on core %d", xPortGetCoreID());
     s_firestore_startup_done.store(false);
+    WaitWhileCustomPowerSaveActive("SD/animation init");
     
     if (!SdCard::IsMounted()) {
         esp_err_t ret = SdCardStartup::ProcessStartup();
@@ -370,9 +376,11 @@ static void SdAnimInitTask(void* /*arg*/) {
 
     // Play startup.gif as soon as SD is up, before the slower
     // animation_init() pulls the rest of test.bin into RAM.
+    WaitWhileCustomPowerSaveActive("startup GIF");
     ShowStartupGifFromSdCard();
 
     ESP_LOGI(TAG, "[SD/ANIM] === Initializing animations ===");
+    WaitWhileCustomPowerSaveActive("animation init");
     animation_init();
     ESP_LOGI(TAG, "[SD/ANIM] === Animations initialization completed ===");
 
@@ -389,6 +397,7 @@ static void SdAnimInitTask(void* /*arg*/) {
     }
 
     if (wifi_ready) {
+        WaitWhileCustomPowerSaveActive("Firestore startup check");
         ESP_LOGI(TAG, "[FIRESTORE] WiFi connected");
         WaitForAnimationUpdaterCheckToFinish();
         ESP_LOGI(TAG, "[FIRESTORE] Requesting device document after animation updater check");
@@ -659,6 +668,10 @@ public:
     static void TaskFunction(void *pvParameters) {
         Charge* charge = static_cast<Charge*>(pvParameters);
         while (true) {
+            if (IsEchoEarCustomPowerSaveActive()) {
+                vTaskDelay(pdMS_TO_TICKS(5000));
+                continue;
+            }
             charge->Printcharge();
             vTaskDelay(pdMS_TO_TICKS(300));
         }
@@ -990,71 +1003,186 @@ private:
     esp_timer_handle_t volume_message_timer_ = nullptr;  // Timer to clear volume message
     std::string previous_emotion_ = "normal";  // Store previous emotion string to restore
     int previous_volume_ = -1;  // Store volume before muting (for restore on unmute)
-    bool deep_sleep_entry_started_ = false;
-    bool fake_sleep_cue_shown_ = false;
-    static constexpr uint16_t kRtcClockWakeMinutes = 1;
+    esp_lcd_panel_handle_t lcd_panel_ = nullptr;
+    std::atomic<bool> custom_power_save_active_{false};
+    TaskHandle_t custom_power_save_status_task_handle_ = nullptr;
+    bool boot_long_press_pending_release_ = false;
+    int64_t custom_power_save_exit_guard_until_ms_ = 0;
+    esp_pm_config_t custom_power_save_previous_pm_config_ = {};
+    bool custom_power_save_previous_pm_config_valid_ = false;
+    static constexpr int kCustomPowerSaveCpuFreqMhz = 80;
+    static constexpr int64_t kCustomPowerSaveStatusLogIntervalMs = 60000;
+    static constexpr int64_t kCustomPowerSaveExitGuardMs = 1000;
 
-    bool PrepareRtcClockAlarm() {
-        if (rtc_ == nullptr) {
-            ESP_LOGW(TAG, "[SLEEP] BM8563 RTC unavailable, cannot enter RTC timed deep sleep");
+    struct BatterySnapshot {
+        int voltage_mv = 0;
+        int current_ma = 0;
+        int level = 0;
+        bool charging = false;
+        bool discharging = false;
+    };
+
+    bool ReadBatterySnapshot(BatterySnapshot& snapshot) {
+        if (charge_ == nullptr || !charge_->IsAvailable()) {
             return false;
         }
 
-        Bm8563::DateTime now;
-        if (!rtc_->ReadDateTime(now)) {
-            ESP_LOGE(TAG, "[SLEEP] Failed to read valid BM8563 clock time; skipping deep sleep");
-            return false;
-        }
+        int voltage_mv = charge_->GetVoltage();
+        int current_ma = charge_->GetCurrent();
 
-        char now_text[32] = {};
-        Bm8563::FormatDateTime(now, now_text, sizeof(now_text));
-        ESP_LOGI(TAG, "[SLEEP] BM8563 current clock time before deep sleep: %s", now_text);
+        snapshot.charging = (current_ma > 50);
+        snapshot.discharging = (current_ma < -50);
 
-        Bm8563::DateTime alarm = Bm8563::AddMinutes(now, kRtcClockWakeMinutes);
-        char alarm_text[32] = {};
-        Bm8563::FormatDateTime(alarm, alarm_text, sizeof(alarm_text));
-
-        if (!rtc_->ScheduleAlarmAt(alarm)) {
-            ESP_LOGE(TAG, "[SLEEP] Failed to arm BM8563 clock alarm for %s", alarm_text);
-            return false;
-        }
-
-        ESP_LOGI(TAG, "[SLEEP] BM8563 clock alarm armed for %s on GPIO %d",
-                 alarm_text,
-                 static_cast<int>(BM8563_INT_GPIO));
+        const int min_voltage_mv = 3000;
+        const int max_voltage_mv = 4200;
+        voltage_mv = std::clamp(voltage_mv, min_voltage_mv, max_voltage_mv);
+        snapshot.voltage_mv = voltage_mv;
+        snapshot.current_ma = current_ma;
+        snapshot.level = ((voltage_mv - min_voltage_mv) * 100) / (max_voltage_mv - min_voltage_mv);
+        snapshot.level = std::clamp(snapshot.level, 0, 100);
         return true;
     }
 
-    void ShowFakeSleepCue() {
-        if (backlight_ != nullptr) {
-            backlight_->SetBrightness(0, false);
-        }
-        if (!fake_sleep_cue_shown_ && display_ != nullptr) {
-            display_->ShowNotification("Sleep", 500);
-            fake_sleep_cue_shown_ = true;
+    void LogCustomPowerSaveStatus() {
+        SystemInfo::PrintHeapStats();
+
+        BatterySnapshot battery;
+        if (ReadBatterySnapshot(battery)) {
+            ESP_LOGI(TAG,
+                     "[PWR_SAVE] Battery status: Voltage: %d mV, Current: %d mA, Level: %d%%, Charging: %s, Discharging: %s",
+                     battery.voltage_mv,
+                     battery.current_ma,
+                     battery.level,
+                     battery.charging ? "yes" : "no",
+                     battery.discharging ? "yes" : "no");
+        } else {
+            ESP_LOGW(TAG, "[PWR_SAVE] Battery status unavailable");
         }
     }
 
-    void WaitForBootReleaseBeforeWakeArm() {
-        gpio_set_direction(BOOT_BUTTON_GPIO, GPIO_MODE_INPUT);
-        gpio_set_pull_mode(BOOT_BUTTON_GPIO, GPIO_PULLUP_ONLY);
+    bool IsCustomPowerSaveExitGuardActive() const {
+        return s_echoear_custom_power_save_restoring.load(std::memory_order_acquire) ||
+               (esp_timer_get_time() / 1000) < custom_power_save_exit_guard_until_ms_;
+    }
 
-        ESP_LOGI(TAG, "[SLEEP] Waiting for BOOT release before arming BOOT wake");
-        do {
-            while (gpio_get_level(BOOT_BUTTON_GPIO) == 0) {
-                vTaskDelay(pdMS_TO_TICKS(50));
+    void SetCustomPowerSaveCpuFrequency() {
+        esp_pm_config_t previous_config = {};
+        esp_err_t err = esp_pm_get_configuration(&previous_config);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "[PWR_SAVE] Failed to read CPU power config: %s", esp_err_to_name(err));
+            return;
+        }
+
+        esp_pm_config_t low_power_config = {
+            .max_freq_mhz = kCustomPowerSaveCpuFreqMhz,
+            .min_freq_mhz = kCustomPowerSaveCpuFreqMhz,
+            .light_sleep_enable = false,
+        };
+
+        err = esp_pm_configure(&low_power_config);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "[PWR_SAVE] Failed to set CPU frequency to %d MHz: %s",
+                     kCustomPowerSaveCpuFreqMhz,
+                     esp_err_to_name(err));
+            return;
+        }
+
+        custom_power_save_previous_pm_config_ = previous_config;
+        custom_power_save_previous_pm_config_valid_ = true;
+        ESP_LOGI(TAG, "[PWR_SAVE] CPU frequency changed: max %d MHz/min %d MHz -> %d MHz fixed",
+                 previous_config.max_freq_mhz,
+                 previous_config.min_freq_mhz,
+                 kCustomPowerSaveCpuFreqMhz);
+    }
+
+    void RestoreCustomPowerSaveCpuFrequency() {
+        if (!custom_power_save_previous_pm_config_valid_) {
+            return;
+        }
+
+        esp_err_t err = esp_pm_configure(&custom_power_save_previous_pm_config_);
+        if (err == ESP_OK) {
+            ESP_LOGI(TAG, "[PWR_SAVE] CPU frequency restored: max %d MHz/min %d MHz",
+                     custom_power_save_previous_pm_config_.max_freq_mhz,
+                     custom_power_save_previous_pm_config_.min_freq_mhz);
+        } else {
+            ESP_LOGW(TAG, "[PWR_SAVE] Failed to restore CPU frequency: %s", esp_err_to_name(err));
+        }
+
+        custom_power_save_previous_pm_config_valid_ = false;
+    }
+
+    void SetLcdPanelPower(bool enabled) {
+        if (lcd_panel_ == nullptr) {
+            return;
+        }
+        esp_err_t err = esp_lcd_panel_disp_on_off(lcd_panel_, enabled);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "[PWR_SAVE] Failed to turn LCD panel %s: %s",
+                     enabled ? "on" : "off",
+                     esp_err_to_name(err));
+        }
+    }
+
+    void StartCustomPowerSaveStatusTask() {
+        if (custom_power_save_status_task_handle_ != nullptr) {
+            return;
+        }
+
+        BaseType_t task_ok = xTaskCreatePinnedToCore(
+            CustomPowerSaveStatusTask,
+            "custom_ps_status",
+            3072,
+            this,
+            3,
+            &custom_power_save_status_task_handle_,
+            1);
+        if (task_ok != pdPASS) {
+            custom_power_save_status_task_handle_ = nullptr;
+            ESP_LOGE(TAG, "[PWR_SAVE] Failed to create custom power-save status task");
+        }
+    }
+
+    static void CustomPowerSaveStatusTask(void* arg) {
+        auto* board = static_cast<EchoEar*>(arg);
+        if (board == nullptr) {
+            vTaskDelete(nullptr);
+            return;
+        }
+
+        int64_t last_status_log_ms = 0;
+        while (board->custom_power_save_active_.load(std::memory_order_acquire)) {
+            int64_t now_ms = esp_timer_get_time() / 1000;
+            if (last_status_log_ms == 0 ||
+                now_ms - last_status_log_ms >= kCustomPowerSaveStatusLogIntervalMs) {
+                board->LogCustomPowerSaveStatus();
+                last_status_log_ms = now_ms;
             }
-            vTaskDelay(pdMS_TO_TICKS(200));
-        } while (gpio_get_level(BOOT_BUTTON_GPIO) == 0);
-        ESP_LOGI(TAG, "[SLEEP] BOOT released and debounced; future BOOT tap can wake deep sleep");
-    }
 
-    void EnterRtcTimedDeepSleepAfterRelease() {
-        if (!deep_sleep_entry_started_) {
-            deep_sleep_entry_started_ = true;
+            vTaskDelay(pdMS_TO_TICKS(500));
         }
 
-        ESP_LOGI(TAG, "[SLEEP] BOOT held for 3 seconds, waiting for release before real deep sleep");
+        board->custom_power_save_status_task_handle_ = nullptr;
+        vTaskDelete(nullptr);
+    }
+
+    void EnterCustomPowerSaveMode() {
+        bool expected = false;
+        if (!custom_power_save_active_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+            ESP_LOGI(TAG, "[PWR_SAVE] Custom power-save mode already active");
+            return;
+        }
+
+        s_echoear_custom_power_save_active.store(true, std::memory_order_release);
+        ESP_LOGI(TAG, "[PWR_SAVE] Entering custom power-save mode");
+
+        if (power_save_timer_ != nullptr) {
+            power_save_timer_->SetEnabled(false);
+        }
+
+        AnimationUpdater::GetInstance().Stop();
+        animation_set_power_save_paused(true);
+        Application::GetInstance().EnterCustomPowerSaveMode();
 
         auto codec = GetAudioCodec();
         if (codec != nullptr) {
@@ -1062,43 +1190,58 @@ private:
             codec->EnableOutput(false);
         }
 
-        ShowFakeSleepCue();
+        if (emotion_reset_timer_ != nullptr) {
+            esp_timer_stop(emotion_reset_timer_);
+        }
+        if (volume_message_timer_ != nullptr) {
+            esp_timer_stop(volume_message_timer_);
+        }
+        if (display_ != nullptr) {
+            display_->ClearOverlayMessage();
+        }
+        if (backlight_ != nullptr) {
+            backlight_->SetBrightness(0, false);
+        }
+        SetLcdPanelPower(false);
+        if (WifiStation::GetInstance().IsConnected()) {
+            WifiBoard::SetPowerSaveMode(true);
+        }
 
-        WaitForBootReleaseBeforeWakeArm();
+        ESP_LOGI(TAG, "[PWR_SAVE] RTC auto-exit disabled; BOOT long press is the only custom-mode exit");
+        SetCustomPowerSaveCpuFrequency();
+        StartCustomPowerSaveStatusTask();
+    }
 
-        if (!PrepareRtcClockAlarm()) {
-            deep_sleep_entry_started_ = false;
-            fake_sleep_cue_shown_ = false;
+    void ExitCustomPowerSaveMode(const char* reason) {
+        bool expected = true;
+        if (!custom_power_save_active_.compare_exchange_strong(expected, false, std::memory_order_acq_rel)) {
             return;
         }
 
-        gpio_reset_pin(BM8563_INT_GPIO);
-        gpio_set_direction(BM8563_INT_GPIO, GPIO_MODE_INPUT);
-        gpio_set_pull_mode(BM8563_INT_GPIO, GPIO_PULLUP_ONLY);
-        rtc_gpio_pullup_en(BM8563_INT_GPIO);
-        rtc_gpio_pulldown_dis(BM8563_INT_GPIO);
+        ESP_LOGI(TAG, "[PWR_SAVE] Exiting custom power-save mode via %s", reason ? reason : "unknown");
+        s_echoear_custom_power_save_restoring.store(true, std::memory_order_release);
+        s_echoear_custom_power_save_active.store(false, std::memory_order_release);
+        custom_power_save_exit_guard_until_ms_ = (esp_timer_get_time() / 1000) + kCustomPowerSaveExitGuardMs;
+        RestoreCustomPowerSaveCpuFrequency();
 
-        gpio_set_direction(BOOT_BUTTON_GPIO, GPIO_MODE_INPUT);
-        gpio_set_pull_mode(BOOT_BUTTON_GPIO, GPIO_PULLUP_ONLY);
-        rtc_gpio_pullup_en(BOOT_BUTTON_GPIO);
-        rtc_gpio_pulldown_dis(BOOT_BUTTON_GPIO);
-
-        const uint64_t wake_mask = (1ULL << BM8563_INT_GPIO) | (1ULL << BOOT_BUTTON_GPIO);
-        ESP_ERROR_CHECK(esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL));
-        ESP_ERROR_CHECK(esp_sleep_enable_ext1_wakeup(wake_mask, ESP_EXT1_WAKEUP_ANY_LOW));
-
-        ESP_LOGI(TAG, "[SLEEP] Entering deep sleep now, RTC clock alarm in %u minute or future BOOT tap",
-                 static_cast<unsigned>(kRtcClockWakeMinutes));
-        vTaskDelay(pdMS_TO_TICKS(200));
-        esp_deep_sleep_start();
-    }
-
-    static void DeepSleepTask(void* arg) {
-        auto* board = static_cast<EchoEar*>(arg);
-        if (board != nullptr) {
-            board->EnterRtcTimedDeepSleepAfterRelease();
+        SetLcdPanelPower(true);
+        if (backlight_ != nullptr) {
+            backlight_->RestoreBrightness();
         }
-        vTaskDelete(nullptr);
+
+        animation_set_power_save_paused(false);
+        if (WifiStation::GetInstance().IsConnected()) {
+            WifiBoard::SetPowerSaveMode(false);
+        }
+        Application::GetInstance().ExitCustomPowerSaveMode([this]() {
+            s_echoear_custom_power_save_restoring.store(false, std::memory_order_release);
+            custom_power_save_exit_guard_until_ms_ = (esp_timer_get_time() / 1000) + kCustomPowerSaveExitGuardMs;
+            ESP_LOGI(TAG, "[PWR_SAVE] Board wake restore gate cleared");
+        });
+
+        if (display_ != nullptr) {
+            display_->SetEmotion("normal");
+        }
     }
 
     void InitializeVolumeMessageTimer() {
@@ -1236,17 +1379,7 @@ private:
         temperature_sensor_config_t temp_sensor_config = TEMPERATURE_SENSOR_CONFIG_DEFAULT(10, 50);
         ESP_ERROR_CHECK(temperature_sensor_install(&temp_sensor_config, &temp_sensor));
         ESP_ERROR_CHECK(temperature_sensor_enable(temp_sensor));
-        BaseType_t temp_task_ret = xTaskCreatePinnedToCore(
-            ChipTemperatureLogTask,
-            "chip_temp_log",
-            3 * 1024,
-            nullptr,
-            1,
-            nullptr,
-            0);
-        if (temp_task_ret != pdPASS) {
-            ESP_LOGW(TAG, "[TEMP] Failed to start chip temperature log task");
-        }
+        ESP_LOGI(TAG, "[TEMP] Periodic chip temperature task disabled");
         
         ESP_LOGI(TAG, "[BMI270] I2C bus initialization complete");
     }
@@ -1267,6 +1400,10 @@ private:
 
     static void touchpad_timer_callback(void* arg) {
         auto& board = (EchoEar&)Board::GetInstance();
+        if (board.custom_power_save_active_.load(std::memory_order_acquire) ||
+            board.IsCustomPowerSaveExitGuardActive()) {
+            return;
+        }
         auto touchpad = board.GetTouchpad();
         static bool was_touched = false;
         static int64_t touch_start_time = 0;
@@ -1308,6 +1445,10 @@ private:
     }
     static void touchpad_callback(Cst816s::TouchPoint_t touch_point) {
         auto& board = (EchoEar&)Board::GetInstance();
+        if (board.custom_power_save_active_.load(std::memory_order_acquire) ||
+            board.IsCustomPowerSaveExitGuardActive()) {
+            return;
+        }
         static bool was_touched = false;
         static int64_t touch_start_time = 0;
         const int64_t TOUCH_THRESHOLD_MS = 500;
@@ -1400,7 +1541,8 @@ private:
             if (xQueueReceive(board->touch_event_queue_, &dummy, portMAX_DELAY) != pdTRUE) {
                 continue;
             }
-            if (board->deep_sleep_entry_started_) {
+            if (board->custom_power_save_active_.load(std::memory_order_acquire) ||
+                board->IsCustomPowerSaveExitGuardActive()) {
                 continue;
             }
             if (board->cst816s_ == nullptr) {
@@ -1585,7 +1727,8 @@ private:
         // ESP_LOGI(TAG, "[TOUCH] touch_button_event_task handle=%p", (void*)board->touch_button_handle_);
         // ESP_LOGI(TAG, "[TOUCH] touch_button_event_task entering main loop");
         while (true) {
-            if (board->deep_sleep_entry_started_) {
+            if (board->custom_power_save_active_.load(std::memory_order_acquire) ||
+                board->IsCustomPowerSaveExitGuardActive()) {
                 vTaskDelay(pdMS_TO_TICKS(100));
                 continue;
             }
@@ -1625,7 +1768,8 @@ private:
         TouchButtonAppEvent_t event;
         while (true) {
             if (xQueueReceive(board->touch_button_app_queue_, &event, portMAX_DELAY) == pdTRUE) {
-                if (board->deep_sleep_entry_started_) {
+                if (board->custom_power_save_active_.load(std::memory_order_acquire) ||
+                    board->IsCustomPowerSaveExitGuardActive()) {
                     continue;
                 }
 
@@ -1764,6 +1908,11 @@ private:
                                              // We only bump a counter and push a small event to a
                                              // queue that is handled by a separate, lower-priority task.
 
+                                             EchoEar* board = static_cast<EchoEar*>(cb_arg);
+                                             if (board != nullptr && IsEchoEarCustomPowerSaveActive()) {
+                                                 return;
+                                             }
+
                                              // CRITICAL: Skip all touch processing when device is speaking or listening
                                              auto& app = Application::GetInstance();
                                              DeviceState current_state = app.GetDeviceState();
@@ -1774,7 +1923,6 @@ private:
 
                                              EchoEar::touch_event_count_++;  // Increment on any touch event
 
-                                             EchoEar* board = static_cast<EchoEar*>(cb_arg);
                                              if (board != nullptr && board->touch_button_app_queue_ != nullptr) {
                                                  TouchButtonAppEvent_t evt = {
                                                      .state = state,
@@ -1969,6 +2117,11 @@ private:
         uint32_t error_count = 0;
 
         while (true) {
+            if (IsEchoEarCustomPowerSaveActive()) {
+                vTaskDelay(pdMS_TO_TICKS(5000));
+                continue;
+            }
+
             // Read sensor data
             int8_t rslt = bmi2_get_sensor_data(&sensor_data, board->bmi270_handle_);
             if (rslt == BMI2_OK) {
@@ -2025,7 +2178,7 @@ private:
 
     void InitializeRtc() {
         if (!ProbeI2cDevice(BM8563_I2C_ADDR, "BM8563 RTC")) {
-            ESP_LOGW(TAG, "[SLEEP] BM8563 RTC not detected, RTC timed deep sleep disabled");
+            ESP_LOGW(TAG, "[PWR_SAVE] BM8563 RTC not detected; RTC clock sync unavailable");
             rtc_ = nullptr;
             return;
         }
@@ -2118,6 +2271,7 @@ private:
             .vendor_config = &vendor_config,
         };
         ESP_ERROR_CHECK(esp_lcd_new_panel_st77916(panel_io, &panel_config, &panel));
+        lcd_panel_ = panel;
 
         esp_lcd_panel_reset(panel);
         esp_lcd_panel_init(panel);
@@ -2139,127 +2293,8 @@ private:
     }
 
     void InitializePowerSaveTimer() {
-        // Create power save timer: -1 (no CPU freq limit), 30 seconds to sleep, -1 (no shutdown)
-        power_save_timer_ = new PowerSaveTimer(-1, 30, -1);
-        power_save_timer_->OnEnterSleepMode([this]() {
-            if (deep_sleep_entry_started_) {
-                ESP_LOGI(TAG, "[SLEEP] Ignoring timer power-save entry while fake sleep is waiting for BOOT release");
-                ShowFakeSleepCue();
-                return;
-            }
-
-            // Check battery level to determine sleep behavior
-            int battery_level = 0;
-            bool charging = false;
-            bool discharging = false;
-
-            if (GetBatteryLevel(battery_level, charging, discharging)) {
-                if (battery_level < 25 && !charging) {
-                    // < 25%, not charging: shutdown
-                    ESP_LOGW(TAG, "Battery level %d%% < 25%% and not charging - shutting down", battery_level);
-                    gpio_set_level(POWER_CTRL, 1);
-                    return;
-                } else if (battery_level < 25 && charging) {
-                    // < 25%, charging: always powersaving mode + sleepy.gif
-                    ESP_LOGI(TAG, "Always power saving mode - battery %d%% < 25%% and charging, setting brightness to 20 and switching to sleepy animation", battery_level);
-                    GetBacklight()->SetBrightness(20, false);
-                    auto display = GetDisplay();
-                    if (display) {
-                        display->SetEmotion("sleepy");
-                    }
-                } else if (battery_level >= 25 && battery_level <= 40 && !charging) {
-                    // 25-40%, not charging: always powersaving mode + battery.gif
-                    ESP_LOGI(TAG, "Always power saving mode - battery %d%% (25-40%% range) and not charging, setting brightness to 20 and switching to battery animation", battery_level);
-                    GetBacklight()->SetBrightness(20, false);
-                    auto display = GetDisplay();
-                    if (display) {
-                        display->SetEmotion("battery");
-                    }
-                } else if (battery_level >= 25 && battery_level <= 40 && charging) {
-                    // 25-40%, charging: 30-sec powersaving mode + sleepy.gif
-                    ESP_LOGI(TAG, "30-sec power saving mode - battery %d%% (25-40%% range) and charging, setting brightness to 20 and switching to sleepy animation", battery_level);
-                    GetBacklight()->SetBrightness(20, false);
-                    auto display = GetDisplay();
-                    if (display) {
-                        display->SetEmotion("sleepy");
-                    }
-                } else {
-                    // > 40%: 30-sec powersaving mode + sleepy.gif (regardless of charging)
-                    ESP_LOGI(TAG, "30-sec power saving mode - battery %d%% (>40%%), setting brightness to 20 and switching to sleepy animation", battery_level);
-                    GetBacklight()->SetBrightness(20, false);
-                    auto display = GetDisplay();
-                    if (display) {
-                        display->SetEmotion("sleepy");
-                    }
-                }
-            } else {
-                // Can't read battery - use default behavior (30-sec mode with sleepy)
-                ESP_LOGI(TAG, "30-sec power saving mode - battery level unknown, setting brightness to 20 and switching to sleepy animation");
-                GetBacklight()->SetBrightness(20, false);
-                auto display = GetDisplay();
-                if (display) {
-                    display->SetEmotion("sleepy");
-                }
-            }
-        });
-        power_save_timer_->OnExitSleepMode([this]() {
-            if (deep_sleep_entry_started_) {
-                ESP_LOGI(TAG, "[SLEEP] Ignoring power-save exit while fake sleep is waiting for BOOT release");
-                ShowFakeSleepCue();
-                return;
-            }
-
-            // Check if we're in "always powersaving" mode - if so, immediately put back to sleep
-            int battery_level = 0;
-            bool charging = false;
-            bool discharging = false;
-
-            if (GetBatteryLevel(battery_level, charging, discharging)) {
-                bool always_powersaving = false;
-                if (battery_level < 25 && charging) {
-                    // < 25%, charging: always powersaving
-                    always_powersaving = true;
-                } else if (battery_level >= 25 && battery_level <= 40 && !charging) {
-                    // 25-40%, not charging: always powersaving
-                    always_powersaving = true;
-                }
-
-                if (always_powersaving) {
-                    ESP_LOGI(TAG, "Always power saving mode active - immediately re-entering sleep mode");
-                    // Immediately re-apply sleep settings
-                    GetBacklight()->SetBrightness(20, false);
-                    auto display = GetDisplay();
-                    if (display) {
-                        if (battery_level < 25 && charging) {
-                            display->SetEmotion("sleepy");
-                        } else if (battery_level >= 25 && battery_level <= 40 && !charging) {
-                            display->SetEmotion("battery");
-                        }
-                    }
-                    return;  // Don't restore brightness/animation for always powersaving mode
-                }
-            }
-
-            ESP_LOGI(TAG, "Exiting sleep mode - restoring brightness and animation");
-            GetBacklight()->RestoreBrightness();
-
-            // Small delay to allow I2C bus and other peripherals to stabilize after wake
-            vTaskDelay(pdMS_TO_TICKS(100));
-
-            auto display = GetDisplay();
-            if (display) {
-                display->SetEmotion("normal");  // Restore to normal animation (maps to ANIMATION_NORMAL)
-            }
-            // Ensure application state is idle after waking from sleep
-            auto& app = Application::GetInstance();
-            if (app.GetDeviceState() != kDeviceStateIdle) {
-                ESP_LOGI(TAG, "Waking from sleep - setting device state to idle");
-                app.SetDeviceState(kDeviceStateIdle);
-            }
-        });
-        power_save_timer_->SetEnabled(true);
-
-        // Start battery monitoring task for "always powersaving" mode
+        ESP_LOGI(TAG, "[PWR_SAVE] Legacy 30-second soft sleep disabled; BOOT long press controls custom mode");
+        power_save_timer_ = nullptr;
         InitializeBatteryMonitor();
     }
 
@@ -2271,17 +2306,16 @@ private:
             int log_counter = 0;  // Counter for 5-minute battery logging (60 iterations * 5 seconds = 5 minutes)
             
             while (true) {
+                if (IsEchoEarCustomPowerSaveActive()) {
+                    vTaskDelay(pdMS_TO_TICKS(5000));
+                    continue;
+                }
+
                 int battery_level = 0;
                 bool charging = false;
                 bool discharging = false;
 
                 if (board->GetBatteryLevel(battery_level, charging, discharging)) {
-                    if (board->deep_sleep_entry_started_) {
-                        board->ShowFakeSleepCue();
-                        vTaskDelay(pdMS_TO_TICKS(5000));
-                        continue;
-                    }
-
                     bool always_powersaving = false;
                     if (battery_level < 25 && charging) {
                         // < 25%, charging: always powersaving
@@ -2351,6 +2385,9 @@ private:
             .callback = [](void* arg) {
                 EchoEar* board = static_cast<EchoEar*>(arg);
                 if (board != nullptr) {
+                    if (IsEchoEarCustomPowerSaveActive()) {
+                        return;
+                    }
                     // Restore previous emotion
                     auto display = board->GetDisplay();
                     if (display != nullptr) {
@@ -2368,10 +2405,33 @@ private:
     }
 
     void InitializeButtons() {
+        boot_button_.OnPressDown([this]() {
+            boot_long_press_pending_release_ = false;
+        });
+
+        boot_button_.OnPressUp([this]() {
+            if (!boot_long_press_pending_release_) {
+                return;
+            }
+            boot_long_press_pending_release_ = false;
+
+            if (custom_power_save_active_.load(std::memory_order_acquire)) {
+                ExitCustomPowerSaveMode("boot_long_press_release");
+            } else if (IsCustomPowerSaveExitGuardActive()) {
+                ESP_LOGI(TAG, "[PWR_SAVE] Ignoring BOOT long-press release while custom wake restore is in progress");
+            } else {
+                EnterCustomPowerSaveMode();
+            }
+        });
+
         boot_button_.OnClick([this]() {
-            if (deep_sleep_entry_started_) {
-                ESP_LOGI(TAG, "[SLEEP] Ignoring BOOT click while fake sleep is waiting for release");
-                ShowFakeSleepCue();
+            if (IsCustomPowerSaveExitGuardActive()) {
+                ESP_LOGI(TAG, "[PWR_SAVE] Ignoring BOOT click while custom wake cleanup settles");
+                return;
+            }
+
+            if (custom_power_save_active_.load(std::memory_order_acquire)) {
+                ESP_LOGI(TAG, "[PWR_SAVE] Ignoring BOOT click while custom power-save mode is active");
                 return;
             }
 
@@ -2396,25 +2456,8 @@ private:
         });
 
         boot_button_.OnLongPress([this]() {
-            if (deep_sleep_entry_started_) {
-                ESP_LOGI(TAG, "[SLEEP] Ignoring BOOT long press because deep sleep is already in progress");
-                return;
-            }
-            deep_sleep_entry_started_ = true;
-            ShowFakeSleepCue();
-            BaseType_t task_ok = xTaskCreatePinnedToCore(
-                DeepSleepTask,
-                "rtc_deep_sleep",
-                4096,
-                this,
-                5,
-                nullptr,
-                1);
-            if (task_ok != pdPASS) {
-                deep_sleep_entry_started_ = false;
-                fake_sleep_cue_shown_ = false;
-                ESP_LOGE(TAG, "[SLEEP] Failed to create RTC deep sleep task");
-            }
+            boot_long_press_pending_release_ = true;
+            ESP_LOGI(TAG, "[PWR_SAVE] BOOT long press detected; waiting for release");
         });
 
          gpio_config_t power_gpio_config = {
@@ -2428,7 +2471,7 @@ private:
     }
 
 public:
-    EchoEar() : boot_button_(BOOT_BUTTON_GPIO, false, 3000, 0) {  // 3-second long press starts fake sleep, release enters deep sleep
+    EchoEar() : boot_button_(BOOT_BUTTON_GPIO, false, 3000, 0) {  // 3-second BOOT long press toggles custom power-save mode
         InitializeI2c();
         InitializeBmi270();  // Initialize BMI270 after I2C bus is ready
         InitializeCharge();
@@ -2486,39 +2529,14 @@ public:
     }
 
     virtual bool GetBatteryLevel(int &level, bool& charging, bool& discharging) override {
-        if (charge_ == nullptr || !charge_->IsAvailable()) {
+        BatterySnapshot battery;
+        if (!ReadBatterySnapshot(battery)) {
             return false;
         }
-        
-        // Read voltage and current from charge IC
-        uint16_t voltage_mv = charge_->GetVoltage();
-        int16_t current_ma = charge_->GetCurrent();
-        
-        // Determine charging/discharging status based on current
-        // Positive current typically means charging, negative means discharging
-        charging = (current_ma > 50);  // Threshold: > 50mA considered charging
-        discharging = (current_ma < -50);  // Threshold: < -50mA considered discharging
-        
-        // Convert voltage to battery level percentage
-        // Typical Li-ion battery: 3.0V (0%) to 4.2V (100%)
-        // Voltage register might be in different units - adjust based on actual chip
-        // Assuming voltage is in millivolts, typical range: 3000mV (0%) to 4200mV (100%)
-        const uint16_t MIN_VOLTAGE_MV = 3000;  // 3.0V = 0%
-        const uint16_t MAX_VOLTAGE_MV = 4200;  // 4.2V = 100%
-        
-        // Clamp voltage to valid range
-        if (voltage_mv < MIN_VOLTAGE_MV) {
-            voltage_mv = MIN_VOLTAGE_MV;
-        } else if (voltage_mv > MAX_VOLTAGE_MV) {
-            voltage_mv = MAX_VOLTAGE_MV;
-        }
-        
-        // Calculate percentage using linear interpolation
-        level = ((voltage_mv - MIN_VOLTAGE_MV) * 100) / (MAX_VOLTAGE_MV - MIN_VOLTAGE_MV);
-        
-        // Ensure level is in valid range
-        if (level < 0) level = 0;
-        if (level > 100) level = 100;
+
+        level = battery.level;
+        charging = battery.charging;
+        discharging = battery.discharging;
         
         // Log as E so the SD error-log hook captures battery telemetry in err.txt.
         static int64_t last_log_time = 0;
@@ -2527,7 +2545,11 @@ public:
         
         if (current_time - last_log_time >= LOG_INTERVAL_MS) {
             ESP_LOGE(TAG, "[BATTERY] Voltage: %d mV, Current: %d mA, Level: %d%%, Charging: %s, Discharging: %s",
-                     voltage_mv, current_ma, level, charging ? "yes" : "no", discharging ? "yes" : "no");
+                     battery.voltage_mv,
+                     battery.current_ma,
+                     battery.level,
+                     battery.charging ? "yes" : "no",
+                     battery.discharging ? "yes" : "no");
             last_log_time = current_time;
         }
         
@@ -2549,17 +2571,18 @@ public:
 
     virtual void SyncRtcFromSystemTime(time_t now) override {
         if (rtc_ == nullptr) {
-            ESP_LOGW(TAG, "[SLEEP] Skipping BM8563 sync because RTC is unavailable");
+            ESP_LOGW(TAG, "[PWR_SAVE] Skipping BM8563 sync because RTC is unavailable");
             return;
         }
         rtc_->SyncFromSystemTime(now);
     }
 
     virtual bool IsSleepTransitionActive() override {
-        return deep_sleep_entry_started_;
+        return IsEchoEarCustomPowerSaveActive();
     }
 
     virtual void StartNetwork() override {
+        WaitWhileCustomPowerSaveActive("network startup");
         // Call parent's StartNetwork to proceed with normal WiFi initialization
         WifiBoard::StartNetwork();
     }

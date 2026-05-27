@@ -100,6 +100,11 @@ void AnimationUpdater::Initialize() {
 }
 
 void AnimationUpdater::Start() {
+    if (Board::GetInstance().IsSleepTransitionActive()) {
+        ESP_LOGI(TAG, "Custom power-save mode active, not starting animation updater");
+        return;
+    }
+
     if (is_running_.load()) {
         ESP_LOGW(TAG, "Animation updater is already running");
         return;
@@ -179,6 +184,11 @@ void AnimationUpdater::SetEnabled(bool enabled) {
 }
 
 void AnimationUpdater::CheckForUpdates() {
+    if (Board::GetInstance().IsSleepTransitionActive()) {
+        ESP_LOGI(TAG, "Custom power-save mode active, skipping animation update check");
+        return;
+    }
+
     if (!enabled_.load()) {
         ESP_LOGD(TAG, "Animation updater is disabled, skipping check");
         return;
@@ -193,6 +203,11 @@ void AnimationUpdater::CheckForUpdates() {
 
 bool AnimationUpdater::DownloadMegaFileNow() {
     ESP_LOGI(TAG, "Manual download of animations_mega.bin requested");
+
+    if (Board::GetInstance().IsSleepTransitionActive()) {
+        ESP_LOGI(TAG, "Custom power-save mode active, skipping manual animation download");
+        return false;
+    }
     
     if (!enabled_.load()) {
         ESP_LOGW(TAG, "Animation updater is disabled, cannot download");
@@ -219,6 +234,11 @@ bool AnimationUpdater::DownloadMegaFileNow() {
 
 bool AnimationUpdater::DownloadMegaFileFromUrl(const std::string& url) {
     ESP_LOGI(TAG, "Downloading animations_mega.bin from URL: %s", url.c_str());
+
+    if (Board::GetInstance().IsSleepTransitionActive()) {
+        ESP_LOGI(TAG, "Custom power-save mode active, skipping URL animation download");
+        return false;
+    }
     
     if (url.empty()) {
         ESP_LOGE(TAG, "URL is empty, cannot download");
@@ -241,6 +261,11 @@ bool AnimationUpdater::DownloadMegaFileFromUrl(const std::string& url) {
 
 bool AnimationUpdater::ForceUpdateCheck() {
     ESP_LOGI(TAG, "Force update check requested - bypassing success flag");
+
+    if (Board::GetInstance().IsSleepTransitionActive()) {
+        ESP_LOGI(TAG, "Custom power-save mode active, skipping forced animation update check");
+        return false;
+    }
     
     if (!enabled_.load()) {
         ESP_LOGW(TAG, "Animation updater is disabled, cannot check for updates");
@@ -772,6 +797,11 @@ void AnimationUpdater::RemoteUpdateTask(void* parameter) {
 void AnimationUpdater::TriggerUpdateLoop() {
     ESP_LOGI(TAG, "Triggering update loop from remote request");
 
+    if (Board::GetInstance().IsSleepTransitionActive()) {
+        ESP_LOGI(TAG, "Custom power-save mode active, skipping remote animation update");
+        return;
+    }
+
     if (is_running_.load()) {
         ESP_LOGW(TAG, "Animation updater is already running, skipping duplicate remote trigger");
         return;
@@ -821,6 +851,14 @@ void AnimationUpdater::TriggerUpdateLoop() {
 
 void AnimationUpdater::UpdateLoop() {
     ESP_LOGI(TAG, "Animation updater task started");
+
+    if (Board::GetInstance().IsSleepTransitionActive()) {
+        ESP_LOGI(TAG, "Custom power-save mode active, exiting animation updater task");
+        is_running_.store(false);
+        update_task_handle_ = nullptr;
+        vTaskDelete(NULL);
+        return;
+    }
     
     // Wait 10 seconds to ensure network is fully ready
     //ESP_LOGI(TAG, "Waiting 10 seconds before starting download...");
@@ -1020,6 +1058,17 @@ void AnimationUpdater::UpdateLoop() {
     ESP_LOGI(TAG, "Starting download stream to %s...", file_path);
     
     while (true) {
+        if (Board::GetInstance().IsSleepTransitionActive()) {
+            ESP_LOGI(TAG, "Custom power-save mode entered during animation download; aborting");
+            fclose(file);
+            unlink(file_path);
+            http->Close();
+            is_running_.store(false);
+            update_task_handle_ = nullptr;
+            vTaskDelete(NULL);
+            return;
+        }
+
         int bytes_read = http->Read(buffer.get(), 8192);
         if (bytes_read <= 0) {
             break; // End of data

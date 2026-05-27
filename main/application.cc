@@ -36,6 +36,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <esp_log.h>
+#include <esp_heap_caps.h>
 #include <cJSON.h>
 #include <driver/gpio.h>
 #include <arpa/inet.h>
@@ -52,6 +53,11 @@
 #endif
 
 namespace {
+
+constexpr size_t kCustomRestoreMinFreeSram = 16 * 1024;
+constexpr size_t kCustomRestoreMinLargestBlock = 8 * 1024;
+constexpr int kCustomRestoreMemoryWaitMs = 5000;
+constexpr int kCustomRestoreMemoryPollMs = 500;
 
 void ShowStartupProgressOverlay(const char* title, int progress, const char* detail = nullptr) {
     auto* display = Board::GetInstance().GetDisplay();
@@ -75,6 +81,25 @@ void SetStartupVisualLock(bool locked) {
     if (lcd_display != nullptr) {
         lcd_display->SetStartupVisualLock(locked);
     }
+}
+
+bool CustomRestoreMemoryReady(bool log_status) {
+    const size_t free_sram = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    const size_t min_free_sram = heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);
+    const size_t largest_block = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+    const bool ready = free_sram >= kCustomRestoreMinFreeSram &&
+                       largest_block >= kCustomRestoreMinLargestBlock;
+
+    if (log_status) {
+        ESP_LOGI(TAG,
+                 "[PWR_SAVE] Restore memory check: free_sram=%u min_sram=%u largest_block=%u ready=%s",
+                 static_cast<unsigned>(free_sram),
+                 static_cast<unsigned>(min_free_sram),
+                 static_cast<unsigned>(largest_block),
+                 ready ? "yes" : "no");
+    }
+
+    return ready;
 }
 
 }  // namespace
@@ -636,6 +661,12 @@ void Application::ShowActivationCode()
 
 void Application::Alert(const char *status, const char *message, const char *emotion, const std::string_view &sound)
 {
+    if (custom_power_save_mode_.load(std::memory_order_acquire) || Board::GetInstance().IsSleepTransitionActive())
+    {
+        ESP_LOGI(TAG, "Suppressing alert while custom power-save mode is active");
+        return;
+    }
+
     ESP_LOGW(TAG, "Alert %s: %s [%s]", status, message, emotion);
     auto display = Board::GetInstance().GetDisplay();
     display->SetStatus(status);
@@ -651,6 +682,11 @@ void Application::Alert(const char *status, const char *message, const char *emo
 
 void Application::DismissAlert()
 {
+    if (custom_power_save_mode_.load(std::memory_order_acquire) || Board::GetInstance().IsSleepTransitionActive())
+    {
+        return;
+    }
+
     if (device_state_ == kDeviceStateIdle)
     {
         auto display = Board::GetInstance().GetDisplay();
@@ -663,6 +699,12 @@ void Application::DismissAlert()
 
 void Application::PlaySound(const std::string_view &sound)
 {
+    if (custom_power_save_mode_.load(std::memory_order_acquire) || Board::GetInstance().IsSleepTransitionActive())
+    {
+        ESP_LOGI(TAG, "Suppressing sound while custom power-save mode is active");
+        return;
+    }
+
     // Wait for the previous sound to finish
     {
         std::unique_lock<std::mutex> lock(mutex_);
@@ -710,6 +752,21 @@ void Application::ExitAudioTestingMode()
 
 void Application::ToggleChatState()
 {
+    if (custom_power_save_restore_in_progress_.load(std::memory_order_acquire))
+    {
+        ESP_LOGI(TAG, "[PWR_SAVE] Ignoring talk request while custom wake restore is in progress");
+        return;
+    }
+    if (!custom_power_save_restore_memory_ready_.load(std::memory_order_acquire))
+    {
+        if (!CustomRestoreMemoryReady(true)) {
+            ESP_LOGW(TAG, "[PWR_SAVE] Ignoring talk request until custom wake SRAM gate is ready");
+            return;
+        }
+        custom_power_save_restore_memory_ready_.store(true, std::memory_order_release);
+        ESP_LOGI(TAG, "[PWR_SAVE] Custom wake SRAM gate recovered; talk request allowed");
+    }
+
     if (device_state_ == kDeviceStateActivating)
     {
         SetDeviceState(kDeviceStateIdle);
@@ -1624,6 +1681,11 @@ void Application::Start()
 
 void Application::OnClockTimer()
 {
+    if (custom_power_save_mode_.load(std::memory_order_acquire) || Board::GetInstance().IsSleepTransitionActive())
+    {
+        return;
+    }
+
     clock_ticks_++;
 
     auto display = Board::GetInstance().GetDisplay();
@@ -1678,15 +1740,23 @@ void Application::MainEventLoop()
 
         if (bits & SEND_AUDIO_EVENT)
         {
-            std::unique_lock<std::mutex> lock(mutex_);
-            auto packets = std::move(audio_send_queue_);
-            lock.unlock();
-            for (auto &packet : packets)
+            if (custom_power_save_mode_.load(std::memory_order_acquire) || Board::GetInstance().IsSleepTransitionActive())
             {
-                auto* active_protocol = GetActiveProtocol();
-                if (!active_protocol || !active_protocol->SendAudio(packet))
+                std::lock_guard<std::mutex> lock(mutex_);
+                audio_send_queue_.clear();
+            }
+            else
+            {
+                std::unique_lock<std::mutex> lock(mutex_);
+                auto packets = std::move(audio_send_queue_);
+                lock.unlock();
+                for (auto &packet : packets)
                 {
-                    break;
+                    auto* active_protocol = GetActiveProtocol();
+                    if (!active_protocol || !active_protocol->SendAudio(packet))
+                    {
+                        break;
+                    }
                 }
             }
         }
@@ -1780,6 +1850,12 @@ void Application::AudioLoop()
 
 void Application::OnAudioOutput()
 {
+    if (custom_power_save_mode_.load(std::memory_order_acquire) || Board::GetInstance().IsSleepTransitionActive())
+    {
+        vTaskDelay(pdMS_TO_TICKS(OPUS_FRAME_DURATION_MS));
+        return;
+    }
+
     if (busy_decoding_audio_)
     {
         return;
@@ -1992,6 +2068,14 @@ void Application::SetListeningMode(ListeningMode mode)
 
 void Application::SetDeviceState(DeviceState state)
 {
+    if (custom_power_save_restore_in_progress_.load(std::memory_order_acquire) &&
+        state != kDeviceStateIdle)
+    {
+        ESP_LOGI(TAG, "[PWR_SAVE] Ignoring state change to %s while custom wake restore is in progress",
+                 STATE_STRINGS[state]);
+        return;
+    }
+
     if (device_state_ == state)
     {
         return;
@@ -2001,6 +2085,13 @@ void Application::SetDeviceState(DeviceState state)
     auto previous_state = device_state_;
     device_state_ = state;
     ESP_LOGI(TAG, "STATE: %s", STATE_STRINGS[device_state_]);
+
+    if (custom_power_save_mode_.load(std::memory_order_acquire) || Board::GetInstance().IsSleepTransitionActive())
+    {
+        ESP_LOGI(TAG, "Custom power-save mode active, suppressing state side effects");
+        return;
+    }
+
     // The state is changed, wait for all background tasks to finish
     background_task_->WaitForCompletion();
 
@@ -2219,8 +2310,136 @@ void Application::Reboot()
     esp_restart();
 }
 
+void Application::EnterCustomPowerSaveMode()
+{
+    custom_power_save_mode_.store(true, std::memory_order_release);
+    custom_power_save_restore_in_progress_.store(false, std::memory_order_release);
+    custom_power_save_restore_memory_ready_.store(false, std::memory_order_release);
+    Schedule([this]() {
+        ESP_LOGI(TAG, "Entering custom power-save mode: stopping audio and wake detection");
+        aborted_ = true;
+        voice_detected_ = false;
+        vad_debounce_active_ = false;
+        is_alarm_mode_ = false;
+        state_before_tts_ = kDeviceStateUnknown;
+
+        if (protocol_ && protocol_->IsAudioChannelOpened()) {
+            protocol_->CloseAudioChannel();
+        }
+        if (websocket_protocol_ && websocket_protocol_->IsAudioChannelOpened()) {
+            websocket_protocol_->CloseAudioChannel();
+        }
+
+        if (audio_processor_) {
+            audio_processor_->Stop();
+        }
+        if (wake_word_) {
+            wake_word_->StopDetection();
+        }
+
+        auto codec = Board::GetInstance().GetAudioCodec();
+        if (codec != nullptr) {
+            codec->EnableInput(false);
+            codec->EnableOutput(false);
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            audio_send_queue_.clear();
+            audio_decode_queue_.clear();
+            audio_testing_queue_.clear();
+        }
+        audio_decode_cv_.notify_all();
+
+        if (device_state_ != kDeviceStateIdle) {
+            device_state_ = kDeviceStateIdle;
+            ESP_LOGI(TAG, "STATE: %s", STATE_STRINGS[device_state_]);
+        }
+    });
+}
+
+void Application::ExitCustomPowerSaveMode(std::function<void()> on_restored)
+{
+    custom_power_save_mode_.store(false, std::memory_order_release);
+    custom_power_save_restore_in_progress_.store(true, std::memory_order_release);
+    Schedule([this, on_restored]() {
+        ESP_LOGI(TAG, "[PWR_SAVE] Custom wake restore started; BOOT/touch/talk ignored until ready");
+        aborted_ = false;
+        voice_detected_ = false;
+        vad_debounce_active_ = false;
+        is_alarm_mode_ = false;
+        state_before_tts_ = kDeviceStateUnknown;
+
+        if (audio_processor_) {
+            audio_processor_->Stop();
+        }
+        if (wake_word_) {
+            wake_word_->StopDetection();
+        }
+
+        auto codec = Board::GetInstance().GetAudioCodec();
+        if (codec != nullptr) {
+            codec->EnableOutput(false);
+            codec->EnableInput(true);
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            audio_send_queue_.clear();
+            audio_decode_queue_.clear();
+            audio_testing_queue_.clear();
+            timestamp_queue_.clear();
+        }
+        audio_decode_cv_.notify_all();
+
+        device_state_ = kDeviceStateIdle;
+        ESP_LOGI(TAG, "STATE: %s", STATE_STRINGS[device_state_]);
+
+        auto& board = Board::GetInstance();
+        auto display = board.GetDisplay();
+        auto led = board.GetLed();
+        if (display != nullptr) {
+            display->SetStatus(Lang::Strings::STANDBY);
+            display->SetEmotion("normal");
+        }
+        if (led != nullptr) {
+            led->OnStateChanged();
+        }
+        if (wake_word_ && audio_loop_task_handle_ != nullptr) {
+            wake_word_->StartDetection();
+        }
+
+        bool memory_ready = false;
+        for (int elapsed_ms = 0; elapsed_ms <= kCustomRestoreMemoryWaitMs; elapsed_ms += kCustomRestoreMemoryPollMs) {
+            memory_ready = CustomRestoreMemoryReady(true);
+            if (memory_ready) {
+                break;
+            }
+            vTaskDelay(pdMS_TO_TICKS(kCustomRestoreMemoryPollMs));
+        }
+
+        if (!memory_ready) {
+            ESP_LOGW(TAG, "[PWR_SAVE] Custom wake restore memory gate timed out; talk stays blocked until SRAM recovers");
+        }
+        custom_power_save_restore_memory_ready_.store(memory_ready, std::memory_order_release);
+
+        custom_power_save_restore_in_progress_.store(false, std::memory_order_release);
+        if (on_restored) {
+            on_restored();
+        }
+        ESP_LOGI(TAG, "[PWR_SAVE] Custom wake restore complete; BOOT click %s",
+                 memory_ready ? "enabled" : "will enable talk after memory recovers");
+    });
+}
+
 void Application::WakeWordInvoke(const std::string &wake_word)
 {
+    if (custom_power_save_mode_.load(std::memory_order_acquire) || Board::GetInstance().IsSleepTransitionActive())
+    {
+        ESP_LOGI(TAG, "Ignoring wake word while custom power-save mode is active");
+        return;
+    }
+
     if (device_state_ == kDeviceStateIdle)
     {
         ToggleChatState();
@@ -2247,6 +2466,11 @@ void Application::WakeWordInvoke(const std::string &wake_word)
 
 bool Application::CanEnterSleepMode()
 {
+    if (custom_power_save_mode_.load(std::memory_order_acquire) || Board::GetInstance().IsSleepTransitionActive())
+    {
+        return false;
+    }
+
     if (device_state_ != kDeviceStateIdle)
     {
         return false;

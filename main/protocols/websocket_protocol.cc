@@ -303,6 +303,8 @@ bool WebsocketProtocol::OpenAudioChannel() {
     ESP_LOGI(TAG, "Connecting to websocket server: %s with version: %d", url.c_str(), version_);
     if (!websocket_->Connect(url.c_str())) {
         ESP_LOGE(TAG, "Failed to connect to websocket server");
+        delete websocket_;
+        websocket_ = nullptr;
         SetError(Lang::Strings::SERVER_NOT_CONNECTED);
         return false;
     }
