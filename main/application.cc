@@ -1841,6 +1841,12 @@ void Application::OnAudioOutput()
 
 void Application::OnAudioInput()
 {
+    if (Board::GetInstance().IsSleepTransitionActive())
+    {
+        vTaskDelay(pdMS_TO_TICKS(OPUS_FRAME_DURATION_MS));
+        return;
+    }
+
     if (device_state_ == kDeviceStateAudioTesting)
     {
         if (audio_testing_queue_.size() >= AUDIO_TESTING_MAX_DURATION_MS / OPUS_FRAME_DURATION_MS)

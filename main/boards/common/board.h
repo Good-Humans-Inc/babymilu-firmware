@@ -55,6 +55,7 @@ public:
     virtual void EnterBleWifiConfigMode() {}
     virtual void WaitForStartupNetworkTasks() {}
     virtual void SyncRtcFromSystemTime(time_t /*now*/) {}
+    virtual bool IsSleepTransitionActive() { return false; }
     virtual std::string GetBoardJson() = 0;
     virtual std::string GetDeviceStatusJson() = 0;
 };

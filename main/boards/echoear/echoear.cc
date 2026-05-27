@@ -990,24 +990,25 @@ private:
     esp_timer_handle_t volume_message_timer_ = nullptr;  // Timer to clear volume message
     std::string previous_emotion_ = "normal";  // Store previous emotion string to restore
     int previous_volume_ = -1;  // Store volume before muting (for restore on unmute)
-    bool light_sleep_entry_started_ = false;
+    bool deep_sleep_entry_started_ = false;
+    bool fake_sleep_cue_shown_ = false;
     static constexpr uint16_t kRtcClockWakeMinutes = 1;
 
     bool PrepareRtcClockAlarm() {
         if (rtc_ == nullptr) {
-            ESP_LOGW(TAG, "[SLEEP] BM8563 RTC unavailable, cannot enter RTC timed light sleep");
+            ESP_LOGW(TAG, "[SLEEP] BM8563 RTC unavailable, cannot enter RTC timed deep sleep");
             return false;
         }
 
         Bm8563::DateTime now;
         if (!rtc_->ReadDateTime(now)) {
-            ESP_LOGE(TAG, "[SLEEP] Failed to read valid BM8563 clock time; skipping light sleep");
+            ESP_LOGE(TAG, "[SLEEP] Failed to read valid BM8563 clock time; skipping deep sleep");
             return false;
         }
 
         char now_text[32] = {};
         Bm8563::FormatDateTime(now, now_text, sizeof(now_text));
-        ESP_LOGI(TAG, "[SLEEP] BM8563 current clock time before light sleep: %s", now_text);
+        ESP_LOGI(TAG, "[SLEEP] BM8563 current clock time before deep sleep: %s", now_text);
 
         Bm8563::DateTime alarm = Bm8563::AddMinutes(now, kRtcClockWakeMinutes);
         char alarm_text[32] = {};
@@ -1024,6 +1025,16 @@ private:
         return true;
     }
 
+    void ShowFakeSleepCue() {
+        if (backlight_ != nullptr) {
+            backlight_->SetBrightness(0, false);
+        }
+        if (!fake_sleep_cue_shown_ && display_ != nullptr) {
+            display_->ShowNotification("Sleep", 500);
+            fake_sleep_cue_shown_ = true;
+        }
+    }
+
     void WaitForBootReleaseBeforeWakeArm() {
         gpio_set_direction(BOOT_BUTTON_GPIO, GPIO_MODE_INPUT);
         gpio_set_pull_mode(BOOT_BUTTON_GPIO, GPIO_PULLUP_ONLY);
@@ -1035,53 +1046,29 @@ private:
             }
             vTaskDelay(pdMS_TO_TICKS(200));
         } while (gpio_get_level(BOOT_BUTTON_GPIO) == 0);
-        ESP_LOGI(TAG, "[SLEEP] BOOT released and debounced; future BOOT tap can wake light sleep");
+        ESP_LOGI(TAG, "[SLEEP] BOOT released and debounced; future BOOT tap can wake deep sleep");
     }
 
-    void RestoreAfterLightSleep(bool input_was_enabled, bool output_was_enabled) {
-        if (rtc_ != nullptr) {
-            rtc_->ClearInterrupts();
+    void EnterRtcTimedDeepSleepAfterRelease() {
+        if (!deep_sleep_entry_started_) {
+            deep_sleep_entry_started_ = true;
         }
-        if (backlight_ != nullptr) {
-            backlight_->RestoreBrightness();
-        }
+
+        ESP_LOGI(TAG, "[SLEEP] BOOT held for 3 seconds, waiting for release before real deep sleep");
 
         auto codec = GetAudioCodec();
-        if (codec != nullptr) {
-            codec->EnableInput(input_was_enabled);
-            codec->EnableOutput(output_was_enabled);
-        }
-    }
-
-    void EnterRtcTimedLightSleep() {
-        if (light_sleep_entry_started_) {
-            ESP_LOGI(TAG, "[SLEEP] RTC timed light sleep already in progress");
-            return;
-        }
-        light_sleep_entry_started_ = true;
-
-        ESP_LOGI(TAG, "[SLEEP] BOOT held for 3 seconds, entering RTC timed light sleep flow");
-
-        auto codec = GetAudioCodec();
-        const bool input_was_enabled = codec != nullptr && codec->input_enabled();
-        const bool output_was_enabled = codec != nullptr && codec->output_enabled();
         if (codec != nullptr) {
             codec->EnableInput(false);
             codec->EnableOutput(false);
         }
 
-        if (backlight_ != nullptr) {
-            backlight_->SetBrightness(0, false);
-        }
-        if (display_ != nullptr) {
-            display_->ShowNotification("Light sleep", 500);
-        }
+        ShowFakeSleepCue();
 
         WaitForBootReleaseBeforeWakeArm();
 
         if (!PrepareRtcClockAlarm()) {
-            RestoreAfterLightSleep(input_was_enabled, output_was_enabled);
-            light_sleep_entry_started_ = false;
+            deep_sleep_entry_started_ = false;
+            fake_sleep_cue_shown_ = false;
             return;
         }
 
@@ -1100,31 +1087,16 @@ private:
         ESP_ERROR_CHECK(esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL));
         ESP_ERROR_CHECK(esp_sleep_enable_ext1_wakeup(wake_mask, ESP_EXT1_WAKEUP_ANY_LOW));
 
-        ESP_LOGI(TAG, "[SLEEP] Entering light sleep now, RTC clock alarm in %u minute or future BOOT tap",
+        ESP_LOGI(TAG, "[SLEEP] Entering deep sleep now, RTC clock alarm in %u minute or future BOOT tap",
                  static_cast<unsigned>(kRtcClockWakeMinutes));
         vTaskDelay(pdMS_TO_TICKS(200));
-        esp_err_t sleep_ret = esp_light_sleep_start();
-        if (sleep_ret != ESP_OK) {
-            ESP_LOGE(TAG, "[SLEEP] Light sleep failed: %s", esp_err_to_name(sleep_ret));
-        }
-
-        const uint64_t wake_status = esp_sleep_get_ext1_wakeup_status();
-        const bool rtc_wake = (wake_status & (1ULL << BM8563_INT_GPIO)) != 0;
-        const bool boot_wake = (wake_status & (1ULL << BOOT_BUTTON_GPIO)) != 0;
-        ESP_LOGI(TAG, "[SLEEP] Light sleep exited, status=0x%llx, rtc=%d, boot=%d",
-                 static_cast<unsigned long long>(wake_status),
-                 rtc_wake ? 1 : 0,
-                 boot_wake ? 1 : 0);
-
-        RestoreAfterLightSleep(input_was_enabled, output_was_enabled);
-        ESP_ERROR_CHECK(esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL));
-        light_sleep_entry_started_ = false;
+        esp_deep_sleep_start();
     }
 
-    static void LightSleepTask(void* arg) {
+    static void DeepSleepTask(void* arg) {
         auto* board = static_cast<EchoEar*>(arg);
         if (board != nullptr) {
-            board->EnterRtcTimedLightSleep();
+            board->EnterRtcTimedDeepSleepAfterRelease();
         }
         vTaskDelete(nullptr);
     }
@@ -1428,6 +1400,9 @@ private:
             if (xQueueReceive(board->touch_event_queue_, &dummy, portMAX_DELAY) != pdTRUE) {
                 continue;
             }
+            if (board->deep_sleep_entry_started_) {
+                continue;
+            }
             if (board->cst816s_ == nullptr) {
                 continue;
             }
@@ -1610,6 +1585,11 @@ private:
         // ESP_LOGI(TAG, "[TOUCH] touch_button_event_task handle=%p", (void*)board->touch_button_handle_);
         // ESP_LOGI(TAG, "[TOUCH] touch_button_event_task entering main loop");
         while (true) {
+            if (board->deep_sleep_entry_started_) {
+                vTaskDelay(pdMS_TO_TICKS(100));
+                continue;
+            }
+
             // Check if device is in speaking/listening mode - skip event processing if so
             auto& app = Application::GetInstance();
             DeviceState current_state = app.GetDeviceState();
@@ -1645,6 +1625,10 @@ private:
         TouchButtonAppEvent_t event;
         while (true) {
             if (xQueueReceive(board->touch_button_app_queue_, &event, portMAX_DELAY) == pdTRUE) {
+                if (board->deep_sleep_entry_started_) {
+                    continue;
+                }
+
                 // CRITICAL: Skip all touch processing when device is speaking or listening
                 auto& app = Application::GetInstance();
                 DeviceState current_state = app.GetDeviceState();
@@ -2041,7 +2025,7 @@ private:
 
     void InitializeRtc() {
         if (!ProbeI2cDevice(BM8563_I2C_ADDR, "BM8563 RTC")) {
-            ESP_LOGW(TAG, "[SLEEP] BM8563 RTC not detected, RTC timed light sleep disabled");
+            ESP_LOGW(TAG, "[SLEEP] BM8563 RTC not detected, RTC timed deep sleep disabled");
             rtc_ = nullptr;
             return;
         }
@@ -2158,6 +2142,12 @@ private:
         // Create power save timer: -1 (no CPU freq limit), 30 seconds to sleep, -1 (no shutdown)
         power_save_timer_ = new PowerSaveTimer(-1, 30, -1);
         power_save_timer_->OnEnterSleepMode([this]() {
+            if (deep_sleep_entry_started_) {
+                ESP_LOGI(TAG, "[SLEEP] Ignoring timer power-save entry while fake sleep is waiting for BOOT release");
+                ShowFakeSleepCue();
+                return;
+            }
+
             // Check battery level to determine sleep behavior
             int battery_level = 0;
             bool charging = false;
@@ -2213,6 +2203,12 @@ private:
             }
         });
         power_save_timer_->OnExitSleepMode([this]() {
+            if (deep_sleep_entry_started_) {
+                ESP_LOGI(TAG, "[SLEEP] Ignoring power-save exit while fake sleep is waiting for BOOT release");
+                ShowFakeSleepCue();
+                return;
+            }
+
             // Check if we're in "always powersaving" mode - if so, immediately put back to sleep
             int battery_level = 0;
             bool charging = false;
@@ -2280,6 +2276,12 @@ private:
                 bool discharging = false;
 
                 if (board->GetBatteryLevel(battery_level, charging, discharging)) {
+                    if (board->deep_sleep_entry_started_) {
+                        board->ShowFakeSleepCue();
+                        vTaskDelay(pdMS_TO_TICKS(5000));
+                        continue;
+                    }
+
                     bool always_powersaving = false;
                     if (battery_level < 25 && charging) {
                         // < 25%, charging: always powersaving
@@ -2367,6 +2369,12 @@ private:
 
     void InitializeButtons() {
         boot_button_.OnClick([this]() {
+            if (deep_sleep_entry_started_) {
+                ESP_LOGI(TAG, "[SLEEP] Ignoring BOOT click while fake sleep is waiting for release");
+                ShowFakeSleepCue();
+                return;
+            }
+
             auto& app = Application::GetInstance();
             if (app.GetDeviceState() == kDeviceStateStarting) {
                 ESP_LOGI(TAG, "Ignoring BOOT click during startup");
@@ -2388,20 +2396,24 @@ private:
         });
 
         boot_button_.OnLongPress([this]() {
-            if (light_sleep_entry_started_) {
-                ESP_LOGI(TAG, "[SLEEP] Ignoring BOOT long press because light sleep is already in progress");
+            if (deep_sleep_entry_started_) {
+                ESP_LOGI(TAG, "[SLEEP] Ignoring BOOT long press because deep sleep is already in progress");
                 return;
             }
+            deep_sleep_entry_started_ = true;
+            ShowFakeSleepCue();
             BaseType_t task_ok = xTaskCreatePinnedToCore(
-                LightSleepTask,
-                "rtc_light_sleep",
+                DeepSleepTask,
+                "rtc_deep_sleep",
                 4096,
                 this,
-                1,
+                5,
                 nullptr,
                 1);
             if (task_ok != pdPASS) {
-                ESP_LOGE(TAG, "[SLEEP] Failed to create RTC light sleep task");
+                deep_sleep_entry_started_ = false;
+                fake_sleep_cue_shown_ = false;
+                ESP_LOGE(TAG, "[SLEEP] Failed to create RTC deep sleep task");
             }
         });
 
@@ -2416,7 +2428,7 @@ private:
     }
 
 public:
-    EchoEar() : boot_button_(BOOT_BUTTON_GPIO, false, 3000, 0) {  // 3-second long press enters light sleep
+    EchoEar() : boot_button_(BOOT_BUTTON_GPIO, false, 3000, 0) {  // 3-second long press starts fake sleep, release enters deep sleep
         InitializeI2c();
         InitializeBmi270();  // Initialize BMI270 after I2C bus is ready
         InitializeCharge();
@@ -2543,6 +2555,10 @@ public:
         rtc_->SyncFromSystemTime(now);
     }
 
+    virtual bool IsSleepTransitionActive() override {
+        return deep_sleep_entry_started_;
+    }
+
     virtual void StartNetwork() override {
         // Call parent's StartNetwork to proceed with normal WiFi initialization
         WifiBoard::StartNetwork();
@@ -2553,4 +2569,3 @@ public:
 volatile uint32_t EchoEar::touch_event_count_ = 0;
 
 DECLARE_BOARD(EchoEar);
-
