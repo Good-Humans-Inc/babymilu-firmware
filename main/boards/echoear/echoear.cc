@@ -990,25 +990,24 @@ private:
     esp_timer_handle_t volume_message_timer_ = nullptr;  // Timer to clear volume message
     std::string previous_emotion_ = "normal";  // Store previous emotion string to restore
     int previous_volume_ = -1;  // Store volume before muting (for restore on unmute)
-    bool deep_sleep_pending_on_boot_release_ = false;
-    bool deep_sleep_entry_started_ = false;
+    bool light_sleep_entry_started_ = false;
     static constexpr uint16_t kRtcClockWakeMinutes = 1;
 
     bool PrepareRtcClockAlarm() {
         if (rtc_ == nullptr) {
-            ESP_LOGW(TAG, "[SLEEP] BM8563 RTC unavailable, cannot enter RTC timed deep sleep");
+            ESP_LOGW(TAG, "[SLEEP] BM8563 RTC unavailable, cannot enter RTC timed light sleep");
             return false;
         }
 
         Bm8563::DateTime now;
         if (!rtc_->ReadDateTime(now)) {
-            ESP_LOGE(TAG, "[SLEEP] Failed to read valid BM8563 clock time; skipping deep sleep");
+            ESP_LOGE(TAG, "[SLEEP] Failed to read valid BM8563 clock time; skipping light sleep");
             return false;
         }
 
         char now_text[32] = {};
         Bm8563::FormatDateTime(now, now_text, sizeof(now_text));
-        ESP_LOGI(TAG, "[SLEEP] BM8563 current clock time before deep sleep: %s", now_text);
+        ESP_LOGI(TAG, "[SLEEP] BM8563 current clock time before light sleep: %s", now_text);
 
         Bm8563::DateTime alarm = Bm8563::AddMinutes(now, kRtcClockWakeMinutes);
         char alarm_text[32] = {};
@@ -1025,27 +1024,65 @@ private:
         return true;
     }
 
-    void EnterRtcTimedDeepSleep() {
-        if (deep_sleep_entry_started_) {
-            ESP_LOGI(TAG, "[SLEEP] RTC timed deep sleep already in progress");
+    void WaitForBootReleaseBeforeWakeArm() {
+        gpio_set_direction(BOOT_BUTTON_GPIO, GPIO_MODE_INPUT);
+        gpio_set_pull_mode(BOOT_BUTTON_GPIO, GPIO_PULLUP_ONLY);
+
+        ESP_LOGI(TAG, "[SLEEP] Waiting for BOOT release before arming BOOT wake");
+        do {
+            while (gpio_get_level(BOOT_BUTTON_GPIO) == 0) {
+                vTaskDelay(pdMS_TO_TICKS(50));
+            }
+            vTaskDelay(pdMS_TO_TICKS(200));
+        } while (gpio_get_level(BOOT_BUTTON_GPIO) == 0);
+        ESP_LOGI(TAG, "[SLEEP] BOOT released and debounced; future BOOT tap can wake light sleep");
+    }
+
+    void RestoreAfterLightSleep(bool input_was_enabled, bool output_was_enabled) {
+        if (rtc_ != nullptr) {
+            rtc_->ClearInterrupts();
+        }
+        if (backlight_ != nullptr) {
+            backlight_->RestoreBrightness();
+        }
+
+        auto codec = GetAudioCodec();
+        if (codec != nullptr) {
+            codec->EnableInput(input_was_enabled);
+            codec->EnableOutput(output_was_enabled);
+        }
+    }
+
+    void EnterRtcTimedLightSleep() {
+        if (light_sleep_entry_started_) {
+            ESP_LOGI(TAG, "[SLEEP] RTC timed light sleep already in progress");
             return;
         }
-        deep_sleep_entry_started_ = true;
+        light_sleep_entry_started_ = true;
 
-        ESP_LOGI(TAG, "[SLEEP] BOOT released after long press, entering RTC timed deep sleep");
-        vTaskDelay(pdMS_TO_TICKS(200));
+        ESP_LOGI(TAG, "[SLEEP] BOOT held for 3 seconds, entering RTC timed light sleep flow");
 
-        if (!PrepareRtcClockAlarm()) {
-            deep_sleep_entry_started_ = false;
-            deep_sleep_pending_on_boot_release_ = false;
-            return;
+        auto codec = GetAudioCodec();
+        const bool input_was_enabled = codec != nullptr && codec->input_enabled();
+        const bool output_was_enabled = codec != nullptr && codec->output_enabled();
+        if (codec != nullptr) {
+            codec->EnableInput(false);
+            codec->EnableOutput(false);
         }
 
         if (backlight_ != nullptr) {
             backlight_->SetBrightness(0, false);
         }
         if (display_ != nullptr) {
-            display_->ShowNotification("Sleep", 500);
+            display_->ShowNotification("Light sleep", 500);
+        }
+
+        WaitForBootReleaseBeforeWakeArm();
+
+        if (!PrepareRtcClockAlarm()) {
+            RestoreAfterLightSleep(input_was_enabled, output_was_enabled);
+            light_sleep_entry_started_ = false;
+            return;
         }
 
         gpio_reset_pin(BM8563_INT_GPIO);
@@ -1054,7 +1091,6 @@ private:
         rtc_gpio_pullup_en(BM8563_INT_GPIO);
         rtc_gpio_pulldown_dis(BM8563_INT_GPIO);
 
-        gpio_reset_pin(BOOT_BUTTON_GPIO);
         gpio_set_direction(BOOT_BUTTON_GPIO, GPIO_MODE_INPUT);
         gpio_set_pull_mode(BOOT_BUTTON_GPIO, GPIO_PULLUP_ONLY);
         rtc_gpio_pullup_en(BOOT_BUTTON_GPIO);
@@ -1064,10 +1100,33 @@ private:
         ESP_ERROR_CHECK(esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL));
         ESP_ERROR_CHECK(esp_sleep_enable_ext1_wakeup(wake_mask, ESP_EXT1_WAKEUP_ANY_LOW));
 
-        ESP_LOGI(TAG, "[SLEEP] Entering deep sleep now, RTC clock alarm in %u minute or BOOT tap",
+        ESP_LOGI(TAG, "[SLEEP] Entering light sleep now, RTC clock alarm in %u minute or future BOOT tap",
                  static_cast<unsigned>(kRtcClockWakeMinutes));
         vTaskDelay(pdMS_TO_TICKS(200));
-        esp_deep_sleep_start();
+        esp_err_t sleep_ret = esp_light_sleep_start();
+        if (sleep_ret != ESP_OK) {
+            ESP_LOGE(TAG, "[SLEEP] Light sleep failed: %s", esp_err_to_name(sleep_ret));
+        }
+
+        const uint64_t wake_status = esp_sleep_get_ext1_wakeup_status();
+        const bool rtc_wake = (wake_status & (1ULL << BM8563_INT_GPIO)) != 0;
+        const bool boot_wake = (wake_status & (1ULL << BOOT_BUTTON_GPIO)) != 0;
+        ESP_LOGI(TAG, "[SLEEP] Light sleep exited, status=0x%llx, rtc=%d, boot=%d",
+                 static_cast<unsigned long long>(wake_status),
+                 rtc_wake ? 1 : 0,
+                 boot_wake ? 1 : 0);
+
+        RestoreAfterLightSleep(input_was_enabled, output_was_enabled);
+        ESP_ERROR_CHECK(esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL));
+        light_sleep_entry_started_ = false;
+    }
+
+    static void LightSleepTask(void* arg) {
+        auto* board = static_cast<EchoEar*>(arg);
+        if (board != nullptr) {
+            board->EnterRtcTimedLightSleep();
+        }
+        vTaskDelete(nullptr);
     }
 
     void InitializeVolumeMessageTimer() {
@@ -1982,7 +2041,7 @@ private:
 
     void InitializeRtc() {
         if (!ProbeI2cDevice(BM8563_I2C_ADDR, "BM8563 RTC")) {
-            ESP_LOGW(TAG, "[SLEEP] BM8563 RTC not detected, RTC timed deep sleep disabled");
+            ESP_LOGW(TAG, "[SLEEP] BM8563 RTC not detected, RTC timed light sleep disabled");
             rtc_ = nullptr;
             return;
         }
@@ -2329,16 +2388,21 @@ private:
         });
 
         boot_button_.OnLongPress([this]() {
-            ESP_LOGI(TAG, "[SLEEP] BOOT held for 3 seconds - waiting for release before deep sleep");
-            deep_sleep_pending_on_boot_release_ = true;
-        });
-
-        boot_button_.OnPressUp([this]() {
-            if (!deep_sleep_pending_on_boot_release_) {
+            if (light_sleep_entry_started_) {
+                ESP_LOGI(TAG, "[SLEEP] Ignoring BOOT long press because light sleep is already in progress");
                 return;
             }
-            deep_sleep_pending_on_boot_release_ = false;
-            EnterRtcTimedDeepSleep();
+            BaseType_t task_ok = xTaskCreatePinnedToCore(
+                LightSleepTask,
+                "rtc_light_sleep",
+                4096,
+                this,
+                1,
+                nullptr,
+                1);
+            if (task_ok != pdPASS) {
+                ESP_LOGE(TAG, "[SLEEP] Failed to create RTC light sleep task");
+            }
         });
 
          gpio_config_t power_gpio_config = {
@@ -2352,7 +2416,7 @@ private:
     }
 
 public:
-    EchoEar() : boot_button_(BOOT_BUTTON_GPIO, false, 3000, 0) {  // 3-second long press enters deep sleep
+    EchoEar() : boot_button_(BOOT_BUTTON_GPIO, false, 3000, 0) {  // 3-second long press enters light sleep
         InitializeI2c();
         InitializeBmi270();  // Initialize BMI270 after I2C bus is ready
         InitializeCharge();
