@@ -716,6 +716,14 @@ public:
         return TryWriteReg(0x01, 0x00) == ESP_OK && TryWriteReg(0x0E, 0x00) == ESP_OK;
     }
 
+    bool AlarmFired() {
+        uint8_t control2 = 0;
+        if (TryReadReg(0x01, &control2) != ESP_OK) {
+            return false;
+        }
+        return (control2 & 0x08) != 0;
+    }
+
     /*
     bool ScheduleWakeInSeconds(uint8_t seconds) {
         ...
@@ -988,6 +996,7 @@ private:
     Cst816s* cst816s_;
     Charge* charge_;
     Bm8563* rtc_ = nullptr;
+    TaskHandle_t rtc_alarm_task_handle_ = nullptr;
     Button boot_button_;
     LcdDisplay* display_;
     PwmBacklight* backlight_ = nullptr;
@@ -2176,6 +2185,79 @@ private:
         xTaskCreatePinnedToCore(Charge::TaskFunction, "batterydecTask", 3 * 1024, charge_, 6, NULL, 0);
     }
 
+    static void RtcAlarmIsr(void* arg) {
+        EchoEar* board = static_cast<EchoEar*>(arg);
+        if (board == nullptr || board->rtc_alarm_task_handle_ == nullptr) {
+            return;
+        }
+
+        BaseType_t higher_priority_task_woken = pdFALSE;
+        vTaskNotifyGiveFromISR(board->rtc_alarm_task_handle_, &higher_priority_task_woken);
+        if (higher_priority_task_woken == pdTRUE) {
+            portYIELD_FROM_ISR();
+        }
+    }
+
+    static void RtcAlarmTask(void* arg) {
+        EchoEar* board = static_cast<EchoEar*>(arg);
+        while (true) {
+            ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+            if (board != nullptr) {
+                board->HandleRtcAlarmInterrupt();
+            }
+        }
+    }
+
+    void HandleRtcAlarmInterrupt() {
+        ESP_LOGI(TAG, "[RTC_ALARM] BM8563 interrupt asserted");
+        if (rtc_ != nullptr && !rtc_->ClearInterrupts()) {
+            ESP_LOGW(TAG, "[RTC_ALARM] Failed to clear BM8563 interrupt flags");
+        }
+
+        Settings settings("offline_alarm", false);
+        const bool custom_mode = settings.GetInt("custom", 0) != 0 ||
+                                 custom_power_save_active_.load(std::memory_order_acquire);
+        Application::GetInstance().HandleRtcAlarmSignal(custom_mode);
+    }
+
+    void InitializeRtcInterrupt() {
+        const gpio_config_t int_gpio_config = {
+            .pin_bit_mask = (1ULL << BM8563_INT_GPIO),
+            .mode = GPIO_MODE_INPUT,
+            .pull_up_en = GPIO_PULLUP_ENABLE,
+            .pull_down_en = GPIO_PULLDOWN_DISABLE,
+            .intr_type = GPIO_INTR_NEGEDGE,
+        };
+        ESP_ERROR_CHECK(gpio_config(&int_gpio_config));
+
+        BaseType_t task_ret = xTaskCreatePinnedToCore(
+            RtcAlarmTask,
+            "rtc_alarm_task",
+            3 * 1024,
+            this,
+            4,
+            &rtc_alarm_task_handle_,
+            0);
+        if (task_ret != pdPASS) {
+            rtc_alarm_task_handle_ = nullptr;
+            ESP_LOGE(TAG, "[RTC_ALARM] Failed to create RTC alarm task");
+            return;
+        }
+
+        esp_err_t isr_err = gpio_install_isr_service(0);
+        if (isr_err != ESP_OK && isr_err != ESP_ERR_INVALID_STATE) {
+            ESP_LOGW(TAG, "[RTC_ALARM] gpio_install_isr_service failed: %s", esp_err_to_name(isr_err));
+        }
+
+        esp_err_t add_err = gpio_isr_handler_add(BM8563_INT_GPIO, RtcAlarmIsr, this);
+        if (add_err != ESP_OK) {
+            ESP_LOGW(TAG, "[RTC_ALARM] Failed to add BM8563 ISR: %s", esp_err_to_name(add_err));
+            return;
+        }
+        gpio_intr_enable(BM8563_INT_GPIO);
+        ESP_LOGI(TAG, "[RTC_ALARM] BM8563 interrupt armed on GPIO %d", static_cast<int>(BM8563_INT_GPIO));
+    }
+
     void InitializeRtc() {
         if (!ProbeI2cDevice(BM8563_I2C_ADDR, "BM8563 RTC")) {
             ESP_LOGW(TAG, "[PWR_SAVE] BM8563 RTC not detected; RTC clock sync unavailable");
@@ -2184,11 +2266,18 @@ private:
         }
 
         rtc_ = new Bm8563(i2c_bus_, BM8563_I2C_ADDR);
+        if (rtc_->AlarmFired()) {
+            ESP_LOGI(TAG, "[RTC_ALARM] BM8563 alarm flag was set at boot");
+            Settings settings("offline_alarm", true);
+            settings.SetInt("fired", 1);
+            settings.SetInt("armed", 0);
+        }
         if (!rtc_->ClearInterrupts()) {
             ESP_LOGW(TAG, "[SLEEP] BM8563 detected but interrupt clear failed");
         }
 
         rtc_->EnsureValidClock();
+        InitializeRtcInterrupt();
 
         ESP_LOGI(TAG, "[SLEEP] BM8563 RTC initialized on GPIO %d", static_cast<int>(BM8563_INT_GPIO));
     }
@@ -2293,7 +2382,7 @@ private:
     }
 
     void InitializePowerSaveTimer() {
-        ESP_LOGI(TAG, "[PWR_SAVE] Legacy 30-second soft sleep disabled; BOOT long press controls custom mode");
+        ESP_LOGI(TAG, "[PWR_SAVE] Legacy 30-second soft sleep disabled; BOOT long press reboots the device");
         power_save_timer_ = nullptr;
         InitializeBatteryMonitor();
     }
@@ -2415,13 +2504,8 @@ private:
             }
             boot_long_press_pending_release_ = false;
 
-            if (custom_power_save_active_.load(std::memory_order_acquire)) {
-                ExitCustomPowerSaveMode("boot_long_press_release");
-            } else if (IsCustomPowerSaveExitGuardActive()) {
-                ESP_LOGI(TAG, "[PWR_SAVE] Ignoring BOOT long-press release while custom wake restore is in progress");
-            } else {
-                EnterCustomPowerSaveMode();
-            }
+            ESP_LOGI(TAG, "[PWR_SAVE] BOOT long-press release; rebooting instead of entering custom power-save mode");
+            Application::GetInstance().Reboot();
         });
 
         boot_button_.OnClick([this]() {
@@ -2471,7 +2555,7 @@ private:
     }
 
 public:
-    EchoEar() : boot_button_(BOOT_BUTTON_GPIO, false, 3000, 0) {  // 3-second BOOT long press toggles custom power-save mode
+    EchoEar() : boot_button_(BOOT_BUTTON_GPIO, false, 3000, 0) {  // 3-second BOOT long press reboots the device
         InitializeI2c();
         InitializeBmi270();  // Initialize BMI270 after I2C bus is ready
         InitializeCharge();
@@ -2575,6 +2659,53 @@ public:
             return;
         }
         rtc_->SyncFromSystemTime(now);
+    }
+
+    virtual bool ScheduleRtcAlarmAt(time_t trigger_at, bool custom_mode) override {
+        if (rtc_ == nullptr) {
+            ESP_LOGW(TAG, "[RTC_ALARM] Cannot schedule BM8563 alarm: RTC unavailable");
+            return false;
+        }
+
+        time_t alarm_epoch = trigger_at;
+        const time_t now = time(nullptr);
+        if (alarm_epoch <= now) {
+            alarm_epoch = now + 60;
+        }
+
+        struct tm timeinfo = {};
+        if (gmtime_r(&alarm_epoch, &timeinfo) == nullptr) {
+            ESP_LOGW(TAG, "[RTC_ALARM] Cannot convert trigger epoch %ld", static_cast<long>(trigger_at));
+            return false;
+        }
+        if (timeinfo.tm_sec > 0) {
+            alarm_epoch += 60 - timeinfo.tm_sec;
+            if (gmtime_r(&alarm_epoch, &timeinfo) == nullptr) {
+                ESP_LOGW(TAG, "[RTC_ALARM] Cannot round trigger epoch %ld", static_cast<long>(trigger_at));
+                return false;
+            }
+        }
+
+        Bm8563::DateTime alarm;
+        alarm.year = static_cast<uint16_t>(timeinfo.tm_year + 1900);
+        alarm.month = static_cast<uint8_t>(timeinfo.tm_mon + 1);
+        alarm.day = static_cast<uint8_t>(timeinfo.tm_mday);
+        alarm.weekday = static_cast<uint8_t>(timeinfo.tm_wday);
+        alarm.hour = static_cast<uint8_t>(timeinfo.tm_hour);
+        alarm.minute = static_cast<uint8_t>(timeinfo.tm_min);
+        alarm.second = 0;
+
+        char alarm_text[32] = {};
+        Bm8563::FormatDateTime(alarm, alarm_text, sizeof(alarm_text));
+        if (!rtc_->ScheduleAlarmAt(alarm)) {
+            ESP_LOGW(TAG, "[RTC_ALARM] Failed to schedule BM8563 alarm for %s", alarm_text);
+            return false;
+        }
+
+        ESP_LOGI(TAG, "[RTC_ALARM] BM8563 alarm scheduled for %s UTC custom=%d",
+                 alarm_text,
+                 custom_mode ? 1 : 0);
+        return true;
     }
 
     virtual bool IsSleepTransitionActive() override {

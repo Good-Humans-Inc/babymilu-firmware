@@ -95,6 +95,10 @@ public:
     Protocol* GetActiveProtocol();  // Returns the protocol to use for audio (WebSocket if available, else primary)
     void OpenWebSocketConnection();  // Opens WebSocket connection for conversations
     bool IsWebSocketConnected() const;  // Check if WebSocket is already connected
+    bool ArmRtcReminder(time_t trigger_at, bool custom_mode, const std::string& wav_url,
+                        int priority, const std::string& reminder_id, bool replay_if_no_mic);
+    void HandleRtcAlarmSignal(bool from_custom_mode);
+    void HandlePendingRtcReminderOnBoot();
 
 private:
     Application();
@@ -155,6 +159,7 @@ private:
     void OnAudioInput();
     void OnAudioOutput();
     bool ReadAudio(std::vector<int16_t>& data, int sample_rate, int samples);
+    void PlayOfflineReminderFromSettings(bool from_custom_reboot);
     void ResetDecoder();
     void SetDecodeSampleRate(int sample_rate, int frame_duration);
     void CheckNewVersion();

@@ -35,6 +35,7 @@
 
 #include <cstring>
 #include <cstdlib>
+#include <algorithm>
 #include <esp_log.h>
 #include <esp_heap_caps.h>
 #include <cJSON.h>
@@ -58,6 +59,11 @@ constexpr size_t kCustomRestoreMinFreeSram = 16 * 1024;
 constexpr size_t kCustomRestoreMinLargestBlock = 8 * 1024;
 constexpr int kCustomRestoreMemoryWaitMs = 5000;
 constexpr int kCustomRestoreMemoryPollMs = 500;
+constexpr const char* kOfflineReminderNamespace = "offline_alarm";
+constexpr const char* kOfflineReminderDefaultPath = "/sdcard/offline_reminder.wav";
+constexpr int kOfflineReminderMicWindowMs = 5000;
+constexpr int kOfflineReminderMicThreshold = 1200;
+constexpr size_t kOfflineReminderMaxBytes = 2 * 1024 * 1024;
 
 void ShowStartupProgressOverlay(const char* title, int progress, const char* detail = nullptr) {
     auto* display = Board::GetInstance().GetDisplay();
@@ -103,6 +109,134 @@ bool CustomRestoreMemoryReady(bool log_status) {
 }
 
 }  // namespace
+
+static bool DownloadFileFromUrl(const std::string& url, const std::string& path, size_t max_bytes)
+{
+    auto& board = Board::GetInstance();
+    std::unique_ptr<Http> http(board.CreateHttp());
+    if (!http) {
+        ESP_LOGE(TAG, "[RTC_ALARM] Failed to create HTTP client for %s", url.c_str());
+        return false;
+    }
+
+    http->SetHeader("Accept", "audio/wav,application/octet-stream");
+    http->SetHeader("Accept-Encoding", "identity");
+    http->SetTimeout(15000);
+
+    ESP_LOGI(TAG, "[RTC_ALARM] Downloading offline reminder WAV: %s", url.c_str());
+    if (!http->Open("GET", url)) {
+        ESP_LOGE(TAG, "[RTC_ALARM] HTTP open failed for offline reminder WAV");
+        return false;
+    }
+
+    int status = http->GetStatusCode();
+    if (status != 200) {
+        ESP_LOGE(TAG, "[RTC_ALARM] Offline reminder WAV HTTP status %d", status);
+        http->Close();
+        return false;
+    }
+
+    std::string tmp_path = path + ".tmp";
+    FILE* file = fopen(tmp_path.c_str(), "wb");
+    if (!file) {
+        ESP_LOGE(TAG, "[RTC_ALARM] Failed to open %s for offline reminder download", tmp_path.c_str());
+        http->Close();
+        return false;
+    }
+
+    constexpr size_t kBufferSize = 1024;
+    std::unique_ptr<char[]> buffer(new char[kBufferSize]);
+    size_t total = 0;
+    bool ok = true;
+    while (true) {
+        int n = http->Read(buffer.get(), kBufferSize);
+        if (n < 0) {
+            ok = false;
+            ESP_LOGE(TAG, "[RTC_ALARM] HTTP read failed while downloading offline reminder");
+            break;
+        }
+        if (n == 0) {
+            break;
+        }
+        total += static_cast<size_t>(n);
+        if (total > max_bytes) {
+            ok = false;
+            ESP_LOGE(TAG, "[RTC_ALARM] Offline reminder WAV exceeds limit: %u > %u",
+                     static_cast<unsigned>(total),
+                     static_cast<unsigned>(max_bytes));
+            break;
+        }
+        if (fwrite(buffer.get(), 1, static_cast<size_t>(n), file) != static_cast<size_t>(n)) {
+            ok = false;
+            ESP_LOGE(TAG, "[RTC_ALARM] Failed writing offline reminder WAV");
+            break;
+        }
+    }
+
+    fclose(file);
+    http->Close();
+
+    if (!ok || total == 0) {
+        remove(tmp_path.c_str());
+        ESP_LOGE(TAG, "[RTC_ALARM] Offline reminder download failed, bytes=%u", static_cast<unsigned>(total));
+        return false;
+    }
+
+    remove(path.c_str());
+    if (rename(tmp_path.c_str(), path.c_str()) != 0) {
+        remove(tmp_path.c_str());
+        ESP_LOGE(TAG, "[RTC_ALARM] Failed to move offline reminder WAV into place");
+        return false;
+    }
+
+    ESP_LOGI(TAG, "[RTC_ALARM] Offline reminder WAV saved to %s (%u bytes)",
+             path.c_str(),
+             static_cast<unsigned>(total));
+    return true;
+}
+
+static bool DetectRawMicActivity(int window_ms, int threshold)
+{
+    auto codec = Board::GetInstance().GetAudioCodec();
+    if (codec == nullptr) {
+        return false;
+    }
+
+    codec->EnableInput(true);
+    const int input_sample_rate = codec->input_sample_rate();
+    const int channels = std::max(1, codec->input_channels());
+    const int chunk_ms = 60;
+    const int samples_per_channel = std::max(1, input_sample_rate * chunk_ms / 1000);
+    const int iterations = std::max(1, window_ms / chunk_ms);
+    std::vector<int16_t> data(samples_per_channel * channels);
+
+    for (int i = 0; i < iterations; ++i) {
+        if (!codec->InputData(data)) {
+            vTaskDelay(pdMS_TO_TICKS(chunk_ms));
+            continue;
+        }
+
+        int64_t sum_abs = 0;
+        int peak = 0;
+        int count = 0;
+        for (size_t j = 0; j < data.size(); j += channels) {
+            int sample = data[j];
+            int abs_sample = sample < 0 ? -sample : sample;
+            sum_abs += abs_sample;
+            peak = std::max(peak, abs_sample);
+            ++count;
+        }
+
+        int avg = count > 0 ? static_cast<int>(sum_abs / count) : 0;
+        if (peak >= threshold * 3 || avg >= threshold) {
+            ESP_LOGI(TAG, "[RTC_ALARM] Mic activity detected after local reminder: avg=%d peak=%d", avg, peak);
+            return true;
+        }
+    }
+
+    ESP_LOGI(TAG, "[RTC_ALARM] No mic activity detected after %d ms", window_ms);
+    return false;
+}
 
 // Minimal WAV-from-HTTP player for POC: expects mono 16-bit PCM at codec sample rate
 static bool PlayWavFromUrl(const std::string &url, float gain)
@@ -1022,6 +1156,7 @@ void Application::Start()
     } else {
         ESP_LOGI(TAG, "startup.wav playback finished");
     }
+    HandlePendingRtcReminderOnBoot();
 #endif
 
 #if CONFIG_USE_AUDIO_PROCESSOR
@@ -1674,6 +1809,7 @@ void Application::Start()
 
     // Print heap stats
     SystemInfo::PrintHeapStats();
+    HandlePendingRtcReminderOnBoot();
 
     // Enter the main event loop
     MainEventLoop();
@@ -1690,6 +1826,19 @@ void Application::OnClockTimer()
 
     auto display = Board::GetInstance().GetDisplay();
     display->UpdateStatusBar();
+
+    {
+        Settings reminder_settings(kOfflineReminderNamespace, false);
+        if (reminder_settings.GetInt("armed", 0) != 0) {
+            const time_t trigger_at = static_cast<time_t>(reminder_settings.GetInt("epoch", 0));
+            if (trigger_at > 0 && time(nullptr) >= trigger_at) {
+                ESP_LOGI(TAG, "[RTC_ALARM] Software reminder trigger reached");
+                Schedule([this]() {
+                    HandleRtcAlarmSignal(false);
+                });
+            }
+        }
+    }
 
     // Print the debug info every 10 seconds
     if (clock_ticks_ % 10 == 0)
@@ -2308,6 +2457,170 @@ void Application::Reboot()
 {
     ESP_LOGI(TAG, "Rebooting...");
     esp_restart();
+}
+
+bool Application::ArmRtcReminder(time_t trigger_at, bool custom_mode, const std::string& wav_url,
+                                 int priority, const std::string& reminder_id, bool replay_if_no_mic)
+{
+    if (trigger_at <= 0) {
+        ESP_LOGW(TAG, "[RTC_ALARM] Ignoring RTC reminder with invalid epoch: %ld", static_cast<long>(trigger_at));
+        return false;
+    }
+
+    const std::string path = kOfflineReminderDefaultPath;
+    remove(path.c_str());
+    remove((path + ".tmp").c_str());
+    {
+        Settings settings(kOfflineReminderNamespace, true);
+        settings.SetInt("armed", 1);
+        settings.SetInt("fired", 0);
+        settings.SetInt("cached", 0);
+        settings.SetInt("epoch", static_cast<int32_t>(trigger_at));
+        settings.SetInt("custom", custom_mode ? 1 : 0);
+        settings.SetInt("prio", priority);
+        settings.SetInt("replay", replay_if_no_mic ? 1 : 0);
+        settings.SetString("path", path);
+        settings.SetString("id", reminder_id);
+        if (!wav_url.empty()) {
+            settings.SetString("url", wav_url);
+        }
+    }
+
+    bool rtc_ok = Board::GetInstance().ScheduleRtcAlarmAt(trigger_at, custom_mode);
+    if (!rtc_ok) {
+        ESP_LOGW(TAG, "[RTC_ALARM] Board RTC alarm schedule failed; software fallback remains armed");
+    }
+
+    if (!wav_url.empty()) {
+        background_task_->Schedule([wav_url, path]() {
+            bool ok = DownloadFileFromUrl(wav_url, path, kOfflineReminderMaxBytes);
+            Settings settings(kOfflineReminderNamespace, true);
+            settings.SetInt("cached", ok ? 1 : 0);
+            ESP_LOGI(TAG, "[RTC_ALARM] Offline WAV cache %s", ok ? "ready" : "failed");
+        });
+    } else {
+        ESP_LOGI(TAG, "[RTC_ALARM] RTC reminder armed without offline WAV URL");
+    }
+
+    ESP_LOGI(TAG, "[RTC_ALARM] Armed reminder id=%s epoch=%ld custom=%d priority=%d replay=%d",
+             reminder_id.empty() ? "<none>" : reminder_id.c_str(),
+             static_cast<long>(trigger_at),
+             custom_mode ? 1 : 0,
+             priority,
+             replay_if_no_mic ? 1 : 0);
+    return rtc_ok;
+}
+
+void Application::HandleRtcAlarmSignal(bool from_custom_mode)
+{
+    Settings settings(kOfflineReminderNamespace, true);
+    const bool custom_mode = settings.GetInt("custom", 0) != 0;
+    settings.SetInt("armed", 0);
+    settings.SetInt("fired", 1);
+
+    ESP_LOGI(TAG, "[RTC_ALARM] RTC alarm signal received: custom=%d from_custom=%d",
+             custom_mode ? 1 : 0,
+             from_custom_mode ? 1 : 0);
+
+    if (custom_mode || from_custom_mode || custom_power_save_mode_.load(std::memory_order_acquire)) {
+        ESP_LOGI(TAG, "[RTC_ALARM] Custom-mode RTC alarm will reboot before reminder playback");
+        Reboot();
+        return;
+    }
+
+    Schedule([this]() {
+        PlayOfflineReminderFromSettings(false);
+    });
+}
+
+void Application::HandlePendingRtcReminderOnBoot()
+{
+    Settings settings(kOfflineReminderNamespace, false);
+    if (settings.GetInt("fired", 0) == 0) {
+        return;
+    }
+
+    ESP_LOGI(TAG, "[RTC_ALARM] Pending fired RTC reminder found on boot");
+    PlayOfflineReminderFromSettings(true);
+}
+
+void Application::PlayOfflineReminderFromSettings(bool from_custom_reboot)
+{
+    Settings settings(kOfflineReminderNamespace, true);
+    const std::string path = settings.GetString("path", kOfflineReminderDefaultPath);
+    const bool replay_if_no_mic = settings.GetInt("replay", 1) != 0;
+    const bool cached = settings.GetInt("cached", 0) != 0 || access(path.c_str(), F_OK) == 0;
+    const bool was_fired = settings.GetInt("fired", 0) != 0;
+    const time_t trigger_at = static_cast<time_t>(settings.GetInt("epoch", 0));
+
+    if (!was_fired && trigger_at > 0 && time(nullptr) < trigger_at) {
+        return;
+    }
+
+    auto& board = Board::GetInstance();
+    auto display = board.GetDisplay();
+    if (!WifiStation::GetInstance().IsConnected() && display != nullptr) {
+        display->SetEmotion("wifi");
+    }
+
+    if (!cached) {
+        ESP_LOGW(TAG, "[RTC_ALARM] Offline reminder fired but no cached WAV is available");
+        if (WifiStation::GetInstance().IsConnected()) {
+            settings.SetInt("armed", 0);
+            settings.SetInt("fired", 0);
+            ESP_LOGI(TAG, "[RTC_ALARM] Online regular mode fallback: opening WebSocket alarm session");
+            SetAlarmMode(true);
+            OpenWebSocketConnection();
+        } else {
+            settings.SetInt("armed", 0);
+            settings.SetInt("fired", 1);
+            ESP_LOGW(TAG, "[RTC_ALARM] Keeping fired reminder pending until network or cached WAV is available");
+        }
+        return;
+    }
+
+    settings.SetInt("armed", 0);
+    settings.SetInt("fired", 0);
+
+    ESP_LOGI(TAG, "[RTC_ALARM] Playing cached reminder WAV%s: %s",
+             from_custom_reboot ? " after custom reboot" : "",
+             path.c_str());
+
+    const bool runtime_audio_ready = audio_loop_task_handle_ != nullptr;
+    if (runtime_audio_ready && audio_processor_) {
+        audio_processor_->Stop();
+    }
+    if (runtime_audio_ready && wake_word_) {
+        wake_word_->StopDetection();
+    }
+
+    ResetDecoder();
+    DeviceState previous_state = device_state_;
+    if (runtime_audio_ready && (device_state_ == kDeviceStateIdle || device_state_ == kDeviceStateListening)) {
+        SetDeviceState(kDeviceStateSpeaking);
+    }
+
+    bool played = PlayWavFromSdCard(path, 1.0f);
+    bool heard_user = false;
+    if (played && replay_if_no_mic) {
+        heard_user = DetectRawMicActivity(kOfflineReminderMicWindowMs, kOfflineReminderMicThreshold);
+        if (!heard_user) {
+            ESP_LOGI(TAG, "[RTC_ALARM] Replaying cached reminder because no mic activity was detected");
+            played = PlayWavFromSdCard(path, 1.0f);
+        }
+    }
+
+    if (runtime_audio_ready) {
+        if (previous_state == kDeviceStateListening && WifiStation::GetInstance().IsConnected()) {
+            SetListeningMode(kListeningModeAutoStop);
+        } else {
+            SetDeviceState(kDeviceStateIdle);
+        }
+    }
+
+    ESP_LOGI(TAG, "[RTC_ALARM] Cached reminder playback %s, user_activity=%d",
+             played ? "complete" : "failed",
+             heard_user ? 1 : 0);
 }
 
 void Application::EnterCustomPowerSaveMode()

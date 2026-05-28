@@ -13,6 +13,7 @@
 #include <ml307_udp.h>
 #include <cstring>
 #include <algorithm>
+#include <ctime>
 #include <arpa/inet.h>
 #include "assets/lang_config.h"
 
@@ -203,6 +204,61 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
         if (strcmp(type->valuestring, "hello") == 0) {
             ESP_LOGI(TAG, "Received server hello message");
             ParseServerHello(root);
+        } else if (strcmp(type->valuestring, "rtc_alarm") == 0) {
+            auto epoch = cJSON_GetObjectItem(root, "epoch");
+            if (!cJSON_IsNumber(epoch)) {
+                epoch = cJSON_GetObjectItem(root, "triggerAtEpoch");
+            }
+            if (!cJSON_IsNumber(epoch)) {
+                ESP_LOGW(TAG, "rtc_alarm ignored: missing numeric epoch/triggerAtEpoch");
+            } else {
+                auto custom_mode_item = cJSON_GetObjectItem(root, "custom_mode");
+                if (custom_mode_item == nullptr) {
+                    custom_mode_item = cJSON_GetObjectItem(root, "customMode");
+                }
+                bool custom_mode = cJSON_IsTrue(custom_mode_item);
+
+                auto replay_item = cJSON_GetObjectItem(root, "replay_if_no_mic");
+                if (replay_item == nullptr) {
+                    replay_item = cJSON_GetObjectItem(root, "replayIfNoMic");
+                }
+                bool replay_if_no_mic = replay_item == nullptr || !cJSON_IsFalse(replay_item);
+
+                auto priority_item = cJSON_GetObjectItem(root, "priority");
+                int priority = cJSON_IsNumber(priority_item) ? priority_item->valueint : 0;
+
+                const char* wav_url = "";
+                const char* url_keys[] = {"offline_wav_url", "offlineWavUrl", "wav_url", "wavUrl", "audioUrl", "url"};
+                for (const char* key : url_keys) {
+                    auto item = cJSON_GetObjectItem(root, key);
+                    if (cJSON_IsString(item) && item->valuestring != nullptr && strlen(item->valuestring) > 0) {
+                        wav_url = item->valuestring;
+                        break;
+                    }
+                }
+
+                const char* reminder_id = "";
+                auto reminder_item = cJSON_GetObjectItem(root, "reminder_id");
+                if (reminder_item == nullptr) {
+                    reminder_item = cJSON_GetObjectItem(root, "reminderId");
+                }
+                if (cJSON_IsString(reminder_item) && reminder_item->valuestring != nullptr) {
+                    reminder_id = reminder_item->valuestring;
+                }
+
+                bool ok = Application::GetInstance().ArmRtcReminder(
+                    static_cast<time_t>(epoch->valuedouble),
+                    custom_mode,
+                    wav_url,
+                    priority,
+                    reminder_id,
+                    replay_if_no_mic);
+                ESP_LOGI(TAG, "rtc_alarm processed: ok=%d epoch=%ld custom=%d url=%s",
+                         ok ? 1 : 0,
+                         static_cast<long>(epoch->valuedouble),
+                         custom_mode ? 1 : 0,
+                         wav_url && wav_url[0] ? wav_url : "<none>");
+            }
         } else if (strcmp(type->valuestring, "ws_start") == 0) {
             // Server is redirecting to WebSocket
             // ws_start indicates alarm mode (server-initiated conversation)
