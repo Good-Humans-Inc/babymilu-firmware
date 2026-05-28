@@ -58,6 +58,8 @@ constexpr size_t kCustomRestoreMinFreeSram = 16 * 1024;
 constexpr size_t kCustomRestoreMinLargestBlock = 8 * 1024;
 constexpr int kCustomRestoreMemoryWaitMs = 5000;
 constexpr int kCustomRestoreMemoryPollMs = 500;
+constexpr uint32_t kBackgroundTaskStackSize = 4096 * 4;
+constexpr uint32_t kAudioEncodeTaskStackSize = 4096 * 3;
 
 void ShowStartupProgressOverlay(const char* title, int progress, const char* detail = nullptr) {
     auto* display = Board::GetInstance().GetDisplay();
@@ -437,7 +439,8 @@ static const char *const STATE_STRINGS[] = {
 Application::Application()
 {
     event_group_ = xEventGroupCreate();
-    background_task_ = new BackgroundTask(4096 * 7);
+    CreateBackgroundTask();
+    CreateAudioEncodeTask();
 
 #if CONFIG_USE_DEVICE_AEC
     aec_mode_ = kAecOnDeviceSide;
@@ -447,19 +450,8 @@ Application::Application()
     aec_mode_ = kAecOff;
 #endif
 
-#if CONFIG_USE_AUDIO_PROCESSOR
-    audio_processor_ = std::make_unique<AfeAudioProcessor>();
-#else
-    audio_processor_ = std::make_unique<NoAudioProcessor>();
-#endif
-
-#if CONFIG_USE_AFE_WAKE_WORD
-    wake_word_ = std::make_unique<AfeWakeWord>();
-#elif CONFIG_USE_ESP_WAKE_WORD
-    wake_word_ = std::make_unique<EspWakeWord>();
-#else
-    wake_word_ = std::make_unique<NoWakeWord>();
-#endif
+    CreateAudioProcessor();
+    CreateWakeWord();
 
     esp_timer_create_args_t clock_timer_args = {
         .callback = [](void *arg)
@@ -485,7 +477,341 @@ Application::~Application()
     {
         delete background_task_;
     }
+    if (audio_encode_task_ != nullptr)
+    {
+        delete audio_encode_task_;
+    }
     vEventGroupDelete(event_group_);
+}
+
+void Application::CreateBackgroundTask()
+{
+    if (background_task_ == nullptr)
+    {
+        background_task_ = new BackgroundTask(kBackgroundTaskStackSize, "background_task");
+    }
+}
+
+void Application::CreateAudioEncodeTask()
+{
+    if (audio_encode_task_ == nullptr)
+    {
+        audio_encode_task_ = new BackgroundTask(kAudioEncodeTaskStackSize, "audio_encode");
+    }
+}
+
+void Application::CreateAudioProcessor()
+{
+    if (audio_processor_ != nullptr)
+    {
+        return;
+    }
+
+#if CONFIG_USE_AUDIO_PROCESSOR
+    audio_processor_ = std::make_unique<AfeAudioProcessor>();
+#else
+    audio_processor_ = std::make_unique<NoAudioProcessor>();
+#endif
+}
+
+void Application::CreateWakeWord()
+{
+    if (wake_word_ != nullptr)
+    {
+        return;
+    }
+
+#if CONFIG_USE_AFE_WAKE_WORD
+    wake_word_ = std::make_unique<AfeWakeWord>();
+#elif CONFIG_USE_ESP_WAKE_WORD
+    wake_word_ = std::make_unique<EspWakeWord>();
+#else
+    wake_word_ = std::make_unique<NoWakeWord>();
+#endif
+}
+
+void Application::InitializeAudioRuntime(AudioCodec* codec, bool restore_wake_word)
+{
+    if (codec == nullptr)
+    {
+        ESP_LOGW(TAG, "[PWR_SAVE] Cannot initialize audio runtime: codec is null");
+        return;
+    }
+
+    CreateAudioEncodeTask();
+    CreateAudioProcessor();
+    if (restore_wake_word)
+    {
+        CreateWakeWord();
+    }
+    else
+    {
+        ESP_LOGI(TAG, "[PWR_SAVE] Wake word runtime stays released; BOOT click will use manual audio path");
+    }
+
+    auto& board = Board::GetInstance();
+    if (opus_decoder_ == nullptr)
+    {
+        opus_decoder_ = std::make_unique<OpusDecoderWrapper>(codec->output_sample_rate(), 1, OPUS_FRAME_DURATION_MS);
+    }
+    if (opus_encoder_ == nullptr)
+    {
+        opus_encoder_ = std::make_unique<OpusEncoderWrapper>(16000, 1, OPUS_FRAME_DURATION_MS);
+        if (aec_mode_ != kAecOff)
+        {
+            ESP_LOGI(TAG, "AEC mode: %d, setting opus encoder complexity to 0", aec_mode_);
+            opus_encoder_->SetComplexity(0);
+        }
+        else if (board.GetBoardType() == "ml307")
+        {
+            ESP_LOGI(TAG, "ML307 board detected, setting opus encoder complexity to 5");
+            opus_encoder_->SetComplexity(5);
+        }
+        else
+        {
+            ESP_LOGI(TAG, "WiFi board detected, setting opus encoder complexity to 0");
+            opus_encoder_->SetComplexity(0);
+        }
+    }
+
+    if (codec->input_sample_rate() != 16000)
+    {
+        input_resampler_.Configure(codec->input_sample_rate(), 16000);
+        reference_resampler_.Configure(codec->input_sample_rate(), 16000);
+    }
+
+    if (!audio_debugger_)
+    {
+        audio_debugger_ = std::make_unique<AudioDebugger>();
+    }
+
+    if (!audio_runtime_initialized_)
+    {
+        audio_processor_->Initialize(codec);
+        audio_processor_->OnOutput([this](std::vector<int16_t> &&data)
+                                   {
+            if (custom_power_save_mode_.load(std::memory_order_acquire) ||
+                Board::GetInstance().IsSleepTransitionActive() ||
+                audio_encode_task_ == nullptr ||
+                opus_encoder_ == nullptr) {
+                return;
+            }
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (audio_send_queue_.size() >= MAX_AUDIO_PACKETS_IN_QUEUE) {
+                    ESP_LOGW(TAG, "Too many audio packets in queue, drop the newest packet");
+                    return;
+                }
+            }
+            audio_encode_task_->Schedule([this, data = std::move(data)]() mutable {
+                if (custom_power_save_mode_.load(std::memory_order_acquire) ||
+                    Board::GetInstance().IsSleepTransitionActive() ||
+                    opus_encoder_ == nullptr) {
+                    return;
+                }
+                opus_encoder_->Encode(std::move(data), [this](std::vector<uint8_t>&& opus) {
+                if (custom_power_save_mode_.load(std::memory_order_acquire) ||
+                    Board::GetInstance().IsSleepTransitionActive()) {
+                    return;
+                }
+                AudioStreamPacket packet;
+                packet.payload = std::move(opus);
+#ifdef CONFIG_USE_SERVER_AEC
+                {
+                    std::lock_guard<std::mutex> lock(timestamp_mutex_);
+                    if (!timestamp_queue_.empty()) {
+                        packet.timestamp = timestamp_queue_.front();
+                        timestamp_queue_.pop_front();
+                    } else {
+                        packet.timestamp = 0;
+                    }
+
+                    if (timestamp_queue_.size() > 3) {
+                        timestamp_queue_.pop_front();
+                        return;
+                    }
+                }
+#endif
+                static int encoded_mic_logs = 0;
+                encoded_mic_logs++;
+                if (encoded_mic_logs <= 5 || encoded_mic_logs % 50 == 0) {
+                    ESP_LOGI(TAG, "Encoded mic Opus packet %d, bytes=%u", encoded_mic_logs, (unsigned)packet.payload.size());
+                }
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (audio_send_queue_.size() >= MAX_AUDIO_PACKETS_IN_QUEUE) {
+                    ESP_LOGW(TAG, "Too many audio packets in queue, drop the oldest packet");
+                    audio_send_queue_.pop_front();
+                }
+                audio_send_queue_.emplace_back(std::move(packet));
+                xEventGroupSetBits(event_group_, SEND_AUDIO_EVENT);
+                });
+            }); });
+        audio_processor_->OnVadStateChange([this](bool speaking)
+                                           {
+            if (custom_power_save_mode_.load(std::memory_order_acquire) ||
+                Board::GetInstance().IsSleepTransitionActive()) {
+                return;
+            }
+            ESP_LOGD(TAG, "VAD state changed: %s", speaking ? "SPEECH" : "SILENCE");
+            voice_detected_ = speaking;
+            if (device_state_ == kDeviceStateListening) {
+                Schedule([this, speaking]() {
+                    if (custom_power_save_mode_.load(std::memory_order_acquire) ||
+                        Board::GetInstance().IsSleepTransitionActive()) {
+                        return;
+                    }
+                    voice_detected_ = speaking;
+                    auto led = Board::GetInstance().GetLed();
+                    led->OnStateChanged();
+                });
+            } else if (device_state_ == kDeviceStateSpeaking) {
+                if (!speaking && vad_debounce_active_) {
+                    vad_debounce_active_ = false;
+                    ESP_LOGD(TAG, "VAD silence detected during speaking, resetting debounce state");
+                }
+                xEventGroupSetBits(event_group_, MAIN_EVENT_VAD_CHANGE);
+            } });
+
+        if (restore_wake_word && wake_word_ != nullptr)
+        {
+            wake_word_->Initialize(codec);
+            wake_word_->OnWakeWordDetected([this](const std::string &detected_wake_word)
+                                           {
+            Schedule([this, wake_word_copy = std::string(detected_wake_word)]()
+                     {
+                if (custom_power_save_mode_.load(std::memory_order_acquire) ||
+                    Board::GetInstance().IsSleepTransitionActive() ||
+                    wake_word_ == nullptr ||
+                    protocol_ == nullptr) {
+                    return;
+                }
+
+                if (device_state_ == kDeviceStateIdle) {
+                    wake_word_->EncodeWakeWordData();
+
+                    auto* active_protocol = GetActiveProtocol();
+                    if (!active_protocol->IsAudioChannelOpened()) {
+                        SetDeviceState(kDeviceStateConnecting);
+
+                        if (!websocket_protocol_ || !websocket_protocol_->IsAudioChannelOpened()) {
+                            ESP_LOGI(TAG, "Opening WebSocket connection for wake word (will use default URL if needed)");
+                            OpenWebSocketConnection();
+                            active_protocol = GetActiveProtocol();
+                        }
+
+                        if (!active_protocol->IsAudioChannelOpened()) {
+                            ESP_LOGW(TAG, "WebSocket connection failed, falling back to primary protocol");
+                            if (!active_protocol->OpenAudioChannel()) {
+                                if (wake_word_) {
+                                    wake_word_->StartDetection();
+                                }
+                                return;
+                            }
+                        }
+                    }
+
+                    ESP_LOGI(TAG, "Wake word detected: %s", wake_word_copy.c_str());
+#if CONFIG_USE_AFE_WAKE_WORD
+                    AudioStreamPacket packet;
+                    while (wake_word_ && wake_word_->GetWakeWordOpus(packet.payload)) {
+                        auto* active_protocol = GetActiveProtocol();
+                        if (active_protocol) {
+                            active_protocol->SendAudio(packet);
+                        }
+                    }
+                    if (protocol_) {
+                        protocol_->SendWakeWordDetected(wake_word_copy);
+                    }
+#else
+                    ResetDecoder();
+                    PlaySound(Lang::Sounds::P3_POPUP);
+                    vTaskDelay(pdMS_TO_TICKS(60));
+#endif
+                    SetListeningMode(aec_mode_ == kAecOff ? kListeningModeAutoStop : kListeningModeRealtime);
+                } else if (device_state_ == kDeviceStateSpeaking) {
+                    AbortSpeaking(kAbortReasonWakeWordDetected);
+                } else if (device_state_ == kDeviceStateActivating) {
+                    SetDeviceState(kDeviceStateIdle);
+                } }); });
+        }
+
+        audio_runtime_initialized_ = true;
+    }
+
+    if (restore_wake_word && wake_word_ != nullptr)
+    {
+        wake_word_->StartDetection();
+    }
+}
+
+void Application::ReleaseAudioRuntimeForCustomPowerSave()
+{
+    ESP_LOGI(TAG, "[PWR_SAVE] Releasing audio runtime SRAM before custom sleep");
+
+    if (audio_processor_)
+    {
+        audio_processor_->Stop();
+    }
+    if (wake_word_)
+    {
+        wake_word_->StopDetection();
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        audio_send_queue_.clear();
+        audio_decode_queue_.clear();
+        audio_testing_queue_.clear();
+    }
+    {
+        std::lock_guard<std::mutex> lock(timestamp_mutex_);
+        timestamp_queue_.clear();
+    }
+    audio_decode_cv_.notify_all();
+
+    if (background_task_ != nullptr)
+    {
+        if (!background_task_->WaitForCompletion(1000))
+        {
+            ESP_LOGW(TAG, "[PWR_SAVE] Timed out waiting for background task before custom sleep");
+        }
+    }
+    if (audio_encode_task_ != nullptr)
+    {
+        if (!audio_encode_task_->WaitForCompletion(1000))
+        {
+            ESP_LOGW(TAG, "[PWR_SAVE] Timed out waiting for audio encode task before custom sleep");
+        }
+    }
+
+    if (audio_processor_)
+    {
+        audio_processor_->Shutdown();
+        audio_processor_.reset();
+    }
+    if (wake_word_)
+    {
+        wake_word_->Shutdown();
+        wake_word_.reset();
+    }
+
+    audio_debugger_.reset();
+    opus_encoder_.reset();
+    opus_decoder_.reset();
+    audio_runtime_initialized_ = false;
+
+    if (background_task_ != nullptr)
+    {
+        delete background_task_;
+        background_task_ = nullptr;
+    }
+    if (audio_encode_task_ != nullptr)
+    {
+        delete audio_encode_task_;
+        audio_encode_task_ = nullptr;
+    }
+
+    SystemInfo::PrintMemorySnapshot("custom_sleep_after_release");
 }
 
 void Application::CheckNewVersion()
@@ -550,7 +876,9 @@ void Application::CheckNewVersion()
 
             auto &board = Board::GetInstance();
             board.SetPowerSaveMode(false);
-            wake_word_->StopDetection();
+            if (wake_word_) {
+                wake_word_->StopDetection();
+            }
             // 预先关闭音频输出，避免升级过程有音频操作
             auto codec = board.GetAudioCodec();
             codec->EnableInput(false);
@@ -711,6 +1039,7 @@ void Application::PlaySound(const std::string_view &sound)
         audio_decode_cv_.wait(lock, [this]()
                               { return audio_decode_queue_.empty(); });
     }
+    CreateBackgroundTask();
     background_task_->WaitForCompletion();
 
     const char *data = sound.data();
@@ -1317,8 +1646,6 @@ void Application::Start()
                             if (active_protocol && active_protocol->IsAudioChannelOpened()) {
                                 ESP_LOGI(TAG, "TTS starting while listening - stopping listening before TTS");
                                 active_protocol->SendStopListening();
-                                // Small delay to ensure server receives listen:stop before TTS starts
-                                vTaskDelay(pdMS_TO_TICKS(50));
                             }
                         }
                         
@@ -1328,7 +1655,9 @@ void Application::Start()
             } else if (strcmp(state->valuestring, "stop") == 0) {
                 Schedule([this]() {
                     ESP_LOGI(TAG, "TTS stop (primary): state=%d, listening_mode=%d", device_state_, (int)listening_mode_);
-                    background_task_->WaitForCompletion();
+                    if (!WaitForAudioOutputIdle(3000)) {
+                        ESP_LOGW(TAG, "Timed out waiting for audio playback on primary TTS stop");
+                    }
                     if (device_state_ == kDeviceStateSpeaking) {
                         // Check if user aborted speaking - don't auto-resume listening
                         if (aborted_) {
@@ -1479,6 +1808,7 @@ void Application::Start()
                     if (device_state_ == kDeviceStateIdle || device_state_ == kDeviceStateListening) {
                         SetDeviceState(kDeviceStateSpeaking);
                     }
+                    CreateBackgroundTask();
                     background_task_->Schedule([this, url_str, g]() {
                         bool ok = PlayWavFromUrl(url_str, g);
                         Schedule([this, ok]() {
@@ -1530,9 +1860,13 @@ void Application::Start()
     bool protocol_started = protocol_->Start();
 
     audio_debugger_ = std::make_unique<AudioDebugger>();
+    CreateAudioEncodeTask();
     audio_processor_->Initialize(codec);
     audio_processor_->OnOutput([this](std::vector<int16_t> &&data)
                                {
+        if (audio_encode_task_ == nullptr || opus_encoder_ == nullptr) {
+            return;
+        }
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (audio_send_queue_.size() >= MAX_AUDIO_PACKETS_IN_QUEUE) {
@@ -1540,7 +1874,10 @@ void Application::Start()
                 return;
             }
         }
-        background_task_->Schedule([this, data = std::move(data)]() mutable {
+        audio_encode_task_->Schedule([this, data = std::move(data)]() mutable {
+            if (opus_encoder_ == nullptr) {
+                return;
+            }
             opus_encoder_->Encode(std::move(data), [this](std::vector<uint8_t>&& opus) {
                 AudioStreamPacket packet;
                 packet.payload = std::move(opus);
@@ -1560,6 +1897,11 @@ void Application::Start()
                     }
                 }
 #endif
+                static int encoded_mic_logs = 0;
+                encoded_mic_logs++;
+                if (encoded_mic_logs <= 5 || encoded_mic_logs % 50 == 0) {
+                    ESP_LOGI(TAG, "Encoded mic Opus packet %d, bytes=%u", encoded_mic_logs, (unsigned)packet.payload.size());
+                }
                 std::lock_guard<std::mutex> lock(mutex_);
                 if (audio_send_queue_.size() >= MAX_AUDIO_PACKETS_IN_QUEUE) {
                     ESP_LOGW(TAG, "Too many audio packets in queue, drop the oldest packet");
@@ -1568,7 +1910,8 @@ void Application::Start()
                 audio_send_queue_.emplace_back(std::move(packet));
                 xEventGroupSetBits(event_group_, SEND_AUDIO_EVENT);
             });
-        }); });
+        });
+    });
     audio_processor_->OnVadStateChange([this](bool speaking)
                                        {
         ESP_LOGD(TAG, "VAD state changed: %s", speaking ? "SPEECH" : "SILENCE");
@@ -1595,7 +1938,7 @@ void Application::Start()
 
     wake_word_->Initialize(codec);
     wake_word_->OnWakeWordDetected([this](const std::string &wake_word)
-                                   { Schedule([this, &wake_word]()
+                                   { Schedule([this, wake_word]()
                                               {
             if (!protocol_) {
                 return;
@@ -1654,6 +1997,7 @@ void Application::Start()
             } else if (device_state_ == kDeviceStateActivating) {
                 SetDeviceState(kDeviceStateIdle);
             } }); });
+    audio_runtime_initialized_ = true;
     wake_word_->StartDetection();
 
     // Wait for the new version check to finish
@@ -1837,20 +2181,18 @@ void Application::MainEventLoop()
 // The Audio Loop is used to input and output audio data
 void Application::AudioLoop()
 {
-    auto codec = Board::GetInstance().GetAudioCodec();
     while (true)
     {
         OnAudioInput();
-        if (codec->output_enabled())
-        {
-            OnAudioOutput();
-        }
+        OnAudioOutput();
     }
 }
 
 void Application::OnAudioOutput()
 {
-    if (custom_power_save_mode_.load(std::memory_order_acquire) || Board::GetInstance().IsSleepTransitionActive())
+    if (custom_power_save_mode_.load(std::memory_order_acquire) ||
+        Board::GetInstance().IsSleepTransitionActive() ||
+        opus_decoder_ == nullptr)
     {
         vTaskDelay(pdMS_TO_TICKS(OPUS_FRAME_DURATION_MS));
         return;
@@ -1863,6 +2205,11 @@ void Application::OnAudioOutput()
 
     auto now = std::chrono::steady_clock::now();
     auto codec = Board::GetInstance().GetAudioCodec();
+    if (codec == nullptr)
+    {
+        vTaskDelay(pdMS_TO_TICKS(OPUS_FRAME_DURATION_MS));
+        return;
+    }
     const int max_silence_seconds = 10;
 
     std::unique_lock<std::mutex> lock(mutex_);
@@ -1885,39 +2232,61 @@ void Application::OnAudioOutput()
     lock.unlock();
     audio_decode_cv_.notify_all();
 
+    if (!codec->output_enabled())
+    {
+        codec->EnableOutput(true);
+    }
+
     // Synchronize the sample rate and frame duration
     SetDecodeSampleRate(packet.sample_rate, packet.frame_duration);
 
     busy_decoding_audio_ = true;
-    background_task_->Schedule([this, codec, packet = std::move(packet)]() mutable
-                               {
+    if (aborted_) {
         busy_decoding_audio_ = false;
-        if (aborted_) {
-            return;
-        }
+        audio_decode_cv_.notify_all();
+        return;
+    }
 
-        std::vector<int16_t> pcm;
-        if (!opus_decoder_->Decode(std::move(packet.payload), pcm)) {
-            return;
-        }
-        // Resample if the sample rate is different
-        if (opus_decoder_->sample_rate() != codec->output_sample_rate()) {
-            int target_size = output_resampler_.GetOutputSamples(pcm.size());
-            std::vector<int16_t> resampled(target_size);
-            output_resampler_.Process(pcm.data(), pcm.size(), resampled.data());
-            pcm = std::move(resampled);
-        }
-        codec->OutputData(pcm);
+    std::vector<int16_t> pcm;
+    if (!opus_decoder_->Decode(std::move(packet.payload), pcm)) {
+        ESP_LOGW(TAG, "Failed to decode Opus audio packet");
+        busy_decoding_audio_ = false;
+        audio_decode_cv_.notify_all();
+        return;
+    }
+    // Resample if the sample rate is different
+    if (opus_decoder_->sample_rate() != codec->output_sample_rate()) {
+        int target_size = output_resampler_.GetOutputSamples(pcm.size());
+        std::vector<int16_t> resampled(target_size);
+        output_resampler_.Process(pcm.data(), pcm.size(), resampled.data());
+        pcm = std::move(resampled);
+    }
+    static int output_audio_logs = 0;
+    output_audio_logs++;
+    bool log_output_frame = output_audio_logs <= 5 || output_audio_logs % 50 == 0;
+    if (log_output_frame) {
+        ESP_LOGI(TAG, "Writing decoded PCM frame %d, samples=%u", output_audio_logs, (unsigned)pcm.size());
+    }
+    codec->OutputData(pcm);
+    if (log_output_frame) {
+        ESP_LOGI(TAG, "Finished decoded PCM frame %d", output_audio_logs);
+    }
 #ifdef CONFIG_USE_SERVER_AEC
-        std::lock_guard<std::mutex> lock(timestamp_mutex_);
-        timestamp_queue_.push_back(packet.timestamp);
+    std::lock_guard<std::mutex> lock(timestamp_mutex_);
+    timestamp_queue_.push_back(packet.timestamp);
 #endif
-        last_output_time_ = std::chrono::steady_clock::now(); });
+    last_output_time_ = std::chrono::steady_clock::now();
+    busy_decoding_audio_ = false;
+    audio_decode_cv_.notify_all();
 }
 
 void Application::OnAudioInput()
 {
-    if (Board::GetInstance().IsSleepTransitionActive())
+    if (custom_power_save_mode_.load(std::memory_order_acquire) ||
+        Board::GetInstance().IsSleepTransitionActive() ||
+        !audio_runtime_initialized_ ||
+        opus_encoder_ == nullptr ||
+        audio_processor_ == nullptr)
     {
         vTaskDelay(pdMS_TO_TICKS(OPUS_FRAME_DURATION_MS));
         return;
@@ -1948,6 +2317,7 @@ void Application::OnAudioInput()
                 data = std::move(mono_data);
             }
             
+            CreateBackgroundTask();
             background_task_->Schedule([this, data = std::move(data)]() mutable
                                        { opus_encoder_->Encode(std::move(data), [this](std::vector<uint8_t> &&opus)
                                                                {
@@ -1961,7 +2331,7 @@ void Application::OnAudioInput()
         }
     }
 
-    if (wake_word_->IsDetectionRunning())
+    if (wake_word_ != nullptr && wake_word_->IsDetectionRunning())
     {
         std::vector<int16_t> data;
         int samples = wake_word_->GetFeedSize();
@@ -2083,6 +2453,13 @@ void Application::SetDeviceState(DeviceState state)
 
     clock_ticks_ = 0;
     auto previous_state = device_state_;
+    if (state == kDeviceStateSpeaking &&
+        !custom_power_save_mode_.load(std::memory_order_acquire) &&
+        !Board::GetInstance().IsSleepTransitionActive())
+    {
+        ResetDecoder();
+    }
+
     device_state_ = state;
     ESP_LOGI(TAG, "STATE: %s", STATE_STRINGS[device_state_]);
 
@@ -2092,8 +2469,22 @@ void Application::SetDeviceState(DeviceState state)
         return;
     }
 
+    if (state != kDeviceStateListening && audio_processor_ != nullptr && audio_processor_->IsRunning())
+    {
+        ESP_LOGI(TAG, "Stopping audio capture before waiting for background tasks");
+        audio_processor_->Stop();
+        if (wake_word_ != nullptr)
+        {
+            wake_word_->StopDetection();
+        }
+    }
+
     // The state is changed, wait for all background tasks to finish
-    background_task_->WaitForCompletion();
+    if (background_task_ != nullptr) {
+        if (!background_task_->WaitForCompletion(500)) {
+            ESP_LOGW(TAG, "Timed out waiting for background tasks during state change");
+        }
+    }
 
     auto &board = Board::GetInstance();
     auto display = board.GetDisplay();
@@ -2105,8 +2496,12 @@ void Application::SetDeviceState(DeviceState state)
     case kDeviceStateIdle:
         display->SetStatus(Lang::Strings::STANDBY);
         display->SetEmotion("normal");
-        audio_processor_->Stop();
-        wake_word_->StartDetection();
+        if (audio_processor_ != nullptr) {
+            audio_processor_->Stop();
+        }
+        if (wake_word_ != nullptr) {
+            wake_word_->StartDetection();
+        }
         break;
     case kDeviceStateConnecting:
         display->SetStatus(Lang::Strings::CONNECTING);
@@ -2124,6 +2519,12 @@ void Application::SetDeviceState(DeviceState state)
 #if CONFIG_IOT_PROTOCOL_XIAOZHI
         UpdateIotStates();
 #endif
+
+        if (audio_processor_ == nullptr || opus_encoder_ == nullptr)
+        {
+            ESP_LOGW(TAG, "Audio runtime is not ready, cannot enter listening state");
+            break;
+        }
 
         // Make sure the audio processor is running
         if (!audio_processor_->IsRunning())
@@ -2185,26 +2586,30 @@ void Application::SetDeviceState(DeviceState state)
             
             ESP_LOGI(TAG, "Starting audio capture and streaming...");
             audio_processor_->Start();
-            wake_word_->StopDetection();
+            if (wake_word_ != nullptr) {
+                wake_word_->StopDetection();
+            }
         }
         break;
     case kDeviceStateSpeaking: {
         display->SetStatus(Lang::Strings::SPEAKING);
+        if (audio_processor_ == nullptr)
+        {
+            ESP_LOGW(TAG, "Audio runtime is not ready, cannot enter speaking state");
+            break;
+        }
         
         // Record when speaking started for grace period
         speaking_start_time_us_ = esp_timer_get_time();
         vad_debounce_active_ = false; // Reset debounce state when entering speaking state
 
-        // Keep audio processor running when device-side AEC is enabled to allow VAD interrupt detection
-        // This enables users to interrupt the AI assistant during speech playback
-        if (aec_mode_ == kAecOnDeviceSide)
+        // Keep audio processor running when realtime listening is active to allow interruption during playback.
+        if (aec_mode_ == kAecOnDeviceSide || listening_mode_ == kListeningModeRealtime)
         {
-            // Keep audio processor running for VAD interrupt capability
-            // VAD will detect user speech and trigger interrupt via MAIN_EVENT_VAD_CHANGE
             if (!audio_processor_->IsRunning())
             {
                 audio_processor_->Start();
-                ESP_LOGI(TAG, "Audio processor kept running for VAD interrupt (device-side AEC enabled)");
+                ESP_LOGI(TAG, "Audio processor kept running for VAD interrupt");
             }
             // Ensure listening mode is set to realtime for continuous listening
             if (listening_mode_ != kListeningModeRealtime)
@@ -2212,20 +2617,19 @@ void Application::SetDeviceState(DeviceState state)
                 listening_mode_ = kListeningModeRealtime;
                 ESP_LOGI(TAG, "Listening mode set to realtime for VAD interrupt capability");
             }
-            wake_word_->StopDetection();
+            if (wake_word_ != nullptr) {
+                wake_word_->StopDetection();
+            }
         }
         else if (listening_mode_ != kListeningModeRealtime)
         {
-            // Without device-side AEC, stop audio processor during speaking
+            // Without device-side AEC, stop capture during playback so speaker writes
+            // are not competing with wake-word mic reads on the shared I2S path.
             audio_processor_->Stop();
-            // Only AFE wake word can be detected in speaking mode
-#if CONFIG_USE_AFE_WAKE_WORD
-            wake_word_->StartDetection();
-#else
-            wake_word_->StopDetection();
-#endif
+            if (wake_word_ != nullptr) {
+                wake_word_->StopDetection();
+            }
         }
-        ResetDecoder();
         break;
     }
     case kDeviceStateStarting:
@@ -2254,16 +2658,48 @@ void Application::SetDeviceState(DeviceState state)
 void Application::ResetDecoder()
 {
     std::lock_guard<std::mutex> lock(mutex_);
-    opus_decoder_->ResetState();
     audio_decode_queue_.clear();
     audio_decode_cv_.notify_all();
     last_output_time_ = std::chrono::steady_clock::now();
     auto codec = Board::GetInstance().GetAudioCodec();
-    codec->EnableOutput(true);
+    if (codec != nullptr) {
+        codec->EnableOutput(true);
+    }
+    if (opus_decoder_ == nullptr)
+    {
+        return;
+    }
+    opus_decoder_->ResetState();
+}
+
+bool Application::WaitForAudioOutputIdle(uint32_t timeout_ms)
+{
+    int64_t deadline_us = esp_timer_get_time() + static_cast<int64_t>(timeout_ms) * 1000;
+    while (esp_timer_get_time() < deadline_us)
+    {
+        bool queue_empty = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            queue_empty = audio_decode_queue_.empty();
+        }
+
+        if (queue_empty && !busy_decoding_audio_)
+        {
+            return true;
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+
+    return false;
 }
 
 void Application::SetDecodeSampleRate(int sample_rate, int frame_duration)
 {
+    if (opus_decoder_ == nullptr)
+    {
+        opus_decoder_ = std::make_unique<OpusDecoderWrapper>(sample_rate, 1, frame_duration);
+    }
     if (opus_decoder_->sample_rate() == sample_rate && opus_decoder_->duration_ms() == frame_duration)
     {
         return;
@@ -2317,6 +2753,7 @@ void Application::EnterCustomPowerSaveMode()
     custom_power_save_restore_memory_ready_.store(false, std::memory_order_release);
     Schedule([this]() {
         ESP_LOGI(TAG, "Entering custom power-save mode: stopping audio and wake detection");
+        SystemInfo::PrintMemorySnapshot("custom_sleep_before_release");
         aborted_ = true;
         voice_detected_ = false;
         vad_debounce_active_ = false;
@@ -2342,6 +2779,8 @@ void Application::EnterCustomPowerSaveMode()
             codec->EnableInput(false);
             codec->EnableOutput(false);
         }
+
+        ReleaseAudioRuntimeForCustomPowerSave();
 
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -2392,6 +2831,10 @@ void Application::ExitCustomPowerSaveMode(std::function<void()> on_restored)
         }
         audio_decode_cv_.notify_all();
 
+        SystemInfo::PrintMemorySnapshot("custom_wake_before_runtime_restore");
+        InitializeAudioRuntime(codec, false);
+        SystemInfo::PrintMemorySnapshot("custom_wake_after_runtime_restore");
+
         device_state_ = kDeviceStateIdle;
         ESP_LOGI(TAG, "STATE: %s", STATE_STRINGS[device_state_]);
 
@@ -2405,10 +2848,6 @@ void Application::ExitCustomPowerSaveMode(std::function<void()> on_restored)
         if (led != nullptr) {
             led->OnStateChanged();
         }
-        if (wake_word_ && audio_loop_task_handle_ != nullptr) {
-            wake_word_->StartDetection();
-        }
-
         bool memory_ready = false;
         for (int elapsed_ms = 0; elapsed_ms <= kCustomRestoreMemoryWaitMs; elapsed_ms += kCustomRestoreMemoryPollMs) {
             memory_ready = CustomRestoreMemoryReady(true);
@@ -2422,6 +2861,7 @@ void Application::ExitCustomPowerSaveMode(std::function<void()> on_restored)
             ESP_LOGW(TAG, "[PWR_SAVE] Custom wake restore memory gate timed out; talk stays blocked until SRAM recovers");
         }
         custom_power_save_restore_memory_ready_.store(memory_ready, std::memory_order_release);
+        SystemInfo::PrintMemorySnapshot("custom_wake_after_gate_check");
 
         custom_power_save_restore_in_progress_.store(false, std::memory_order_release);
         if (on_restored) {
@@ -2514,6 +2954,10 @@ void Application::SetAecMode(AecMode mode)
              {
         auto& board = Board::GetInstance();
         auto display = board.GetDisplay();
+        if (audio_processor_ == nullptr) {
+            ESP_LOGW(TAG, "Audio runtime is not ready, cannot change AEC mode");
+            return;
+        }
         switch (aec_mode_) {
         case kAecOff:
             audio_processor_->EnableDeviceAec(false);
@@ -2551,6 +2995,12 @@ Protocol* Application::GetActiveProtocol() {
 }
 
 void Application::OpenWebSocketConnection() {
+    if (custom_power_save_mode_.load(std::memory_order_acquire) ||
+        Board::GetInstance().IsSleepTransitionActive()) {
+        ESP_LOGI(TAG, "Ignoring WebSocket open while custom power-save mode is active");
+        return;
+    }
+
     // If WebSocket protocol already exists and is opened, do nothing
     if (websocket_protocol_ && websocket_protocol_->IsAudioChannelOpened()) {
         ESP_LOGI(TAG, "WebSocket connection already open");
@@ -2572,7 +3022,23 @@ void Application::OpenWebSocketConnection() {
         websocket_protocol_->OnIncomingAudio([this](AudioStreamPacket &&packet) {
             std::lock_guard<std::mutex> lock(mutex_);
             if (device_state_ == kDeviceStateSpeaking && audio_decode_queue_.size() < MAX_AUDIO_PACKETS_IN_QUEUE) {
+                static int queued_audio_logs = 0;
+                queued_audio_logs++;
+                if (queued_audio_logs <= 5 || queued_audio_logs % 50 == 0) {
+                    ESP_LOGI(TAG, "Queued WebSocket audio packet %d, bytes=%u, decode_queue=%u",
+                             queued_audio_logs,
+                             (unsigned)packet.payload.size(),
+                             (unsigned)audio_decode_queue_.size());
+                }
                 audio_decode_queue_.emplace_back(std::move(packet));
+            } else {
+                static int dropped_audio_logs = 0;
+                dropped_audio_logs++;
+                if (dropped_audio_logs <= 5) {
+                    ESP_LOGW(TAG, "Dropping WebSocket audio packet while state=%s, decode_queue=%u",
+                             STATE_STRINGS[device_state_],
+                             (unsigned)audio_decode_queue_.size());
+                }
             }
         });
         
@@ -2617,8 +3083,6 @@ void Application::OpenWebSocketConnection() {
                                 if (active_protocol && active_protocol->IsAudioChannelOpened()) {
                                     ESP_LOGI(TAG, "TTS starting while listening (WebSocket) - stopping listening before TTS");
                                     active_protocol->SendStopListening();
-                                    // Small delay to ensure server receives listen:stop before TTS starts
-                                    vTaskDelay(pdMS_TO_TICKS(50));
                                 }
                             }
                             
@@ -2628,7 +3092,9 @@ void Application::OpenWebSocketConnection() {
                 } else if (strcmp(state->valuestring, "stop") == 0) {
                     Schedule([this]() {
                         ESP_LOGI(TAG, "TTS stop (WebSocket): state=%d, listening_mode=%d", device_state_, (int)listening_mode_);
-                        background_task_->WaitForCompletion();
+                        if (!WaitForAudioOutputIdle(3000)) {
+                            ESP_LOGW(TAG, "Timed out waiting for audio playback on WebSocket TTS stop");
+                        }
                         if (device_state_ == kDeviceStateSpeaking) {
                             // Check if user aborted speaking - don't auto-resume listening
                             if (aborted_) {
@@ -2716,11 +3182,6 @@ void Application::OpenWebSocketConnection() {
                 ESP_LOGI(TAG, "OnIncomingJson (WebSocket): Received MCP message");
                 auto payload = cJSON_GetObjectItem(root, "payload");
                 if (cJSON_IsObject(payload)) {
-                    char* payload_str = cJSON_PrintUnformatted(payload);
-                    if (payload_str) {
-                        ESP_LOGI(TAG, "OnIncomingJson (WebSocket): MCP payload: %s", payload_str);
-                        cJSON_free(payload_str);
-                    }
                     ESP_LOGI(TAG, "OnIncomingJson (WebSocket): Forwarding MCP payload to McpServer::ParseMessage");
                     McpServer::GetInstance().ParseMessage(payload);
                 } else {
@@ -2792,19 +3253,21 @@ void Application::OpenWebSocketConnection() {
     }
     // If we're already in listening state (e.g., user pressed button before ws_start),
     // send the listen start message now that the connection is ready
-    else if (device_state_ == kDeviceStateListening && !audio_processor_->IsRunning()) {
+    else if (device_state_ == kDeviceStateListening && audio_processor_ != nullptr && !audio_processor_->IsRunning()) {
         ESP_LOGI(TAG, "Already in listening state, sending listen start to new WebSocket connection");
         websocket_protocol_->SendStartListening(listening_mode_);
         // Small delay to ensure server processes the message
         vTaskDelay(pdMS_TO_TICKS(50));
         // Start audio capture if not already running
-        if (!audio_processor_->IsRunning()) {
+        if (audio_processor_ != nullptr && opus_encoder_ != nullptr && !audio_processor_->IsRunning()) {
             opus_encoder_->ResetState();
             auto codec = Board::GetInstance().GetAudioCodec();
             ESP_LOGI(TAG, "Starting audio capture: input_sample_rate=%d, Opus encoder=16000Hz mono, frame_duration=%dms", 
                      codec ? codec->input_sample_rate() : 0, OPUS_FRAME_DURATION_MS);
             audio_processor_->Start();
-            wake_word_->StopDetection();
+            if (wake_word_ != nullptr) {
+                wake_word_->StopDetection();
+            }
         }
     }
     else if (device_state_ == kDeviceStateConnecting) {

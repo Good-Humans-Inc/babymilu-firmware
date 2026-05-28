@@ -7,6 +7,7 @@
 #include <sstream>
 
 #define DETECTION_RUNNING_EVENT 1
+#define DETECTION_SHUTDOWN_EVENT 2
 
 #define TAG "AfeWakeWord"
 
@@ -19,15 +20,21 @@ AfeWakeWord::AfeWakeWord()
 }
 
 AfeWakeWord::~AfeWakeWord() {
+    Shutdown();
     if (afe_data_ != nullptr) {
         afe_iface_->destroy(afe_data_);
+        afe_data_ = nullptr;
     }
 
     if (wake_word_encode_task_stack_ != nullptr) {
         heap_caps_free(wake_word_encode_task_stack_);
+        wake_word_encode_task_stack_ = nullptr;
     }
 
-    vEventGroupDelete(event_group_);
+    if (event_group_ != nullptr) {
+        vEventGroupDelete(event_group_);
+        event_group_ = nullptr;
+    }
 }
 
 void AfeWakeWord::Initialize(AudioCodec* codec) {
@@ -73,8 +80,7 @@ void AfeWakeWord::Initialize(AudioCodec* codec) {
     xTaskCreate([](void* arg) {
         auto this_ = (AfeWakeWord*)arg;
         this_->AudioDetectionTask();
-        vTaskDelete(NULL);
-    }, "audio_detection", 4096, this, 3, nullptr);
+    }, "audio_detection", 4096, this, 3, &audio_detection_task_handle_);
 }
 
 void AfeWakeWord::OnWakeWordDetected(std::function<void(const std::string& wake_word)> callback) {
@@ -82,6 +88,9 @@ void AfeWakeWord::OnWakeWordDetected(std::function<void(const std::string& wake_
 }
 
 void AfeWakeWord::StartDetection() {
+    if ((xEventGroupGetBits(event_group_) & DETECTION_SHUTDOWN_EVENT) != 0) {
+        return;
+    }
     xEventGroupSetBits(event_group_, DETECTION_RUNNING_EVENT);
     ESP_LOGI(TAG, "Wake word detection STARTED - waiting for audio input");
 }
@@ -94,11 +103,15 @@ void AfeWakeWord::StopDetection() {
 }
 
 bool AfeWakeWord::IsDetectionRunning() {
-    return xEventGroupGetBits(event_group_) & DETECTION_RUNNING_EVENT;
+    EventBits_t bits = xEventGroupGetBits(event_group_);
+    return (bits & DETECTION_RUNNING_EVENT) && !(bits & DETECTION_SHUTDOWN_EVENT);
 }
 
 void AfeWakeWord::Feed(const std::vector<int16_t>& data) {
     if (afe_data_ == nullptr) {
+        return;
+    }
+    if ((xEventGroupGetBits(event_group_) & DETECTION_SHUTDOWN_EVENT) != 0) {
         return;
     }
     // Log periodically (every ~1 second) to confirm audio is being fed
@@ -124,9 +137,24 @@ void AfeWakeWord::AudioDetectionTask() {
         feed_size, fetch_size);
 
     while (true) {
-        xEventGroupWaitBits(event_group_, DETECTION_RUNNING_EVENT, pdFALSE, pdTRUE, portMAX_DELAY);
+        EventBits_t bits = xEventGroupWaitBits(
+            event_group_,
+            DETECTION_RUNNING_EVENT | DETECTION_SHUTDOWN_EVENT,
+            pdFALSE,
+            pdFALSE,
+            portMAX_DELAY);
+        if ((bits & DETECTION_SHUTDOWN_EVENT) != 0) {
+            break;
+        }
 
-        auto res = afe_iface_->fetch_with_delay(afe_data_, portMAX_DELAY);
+        auto res = afe_iface_->fetch_with_delay(afe_data_, pdMS_TO_TICKS(100));
+        bits = xEventGroupGetBits(event_group_);
+        if ((bits & DETECTION_SHUTDOWN_EVENT) != 0) {
+            break;
+        }
+        if ((bits & DETECTION_RUNNING_EVENT) == 0) {
+            continue;
+        }
         if (res == nullptr || res->ret_value == ESP_FAIL) {
             continue;;
         }
@@ -143,6 +171,9 @@ void AfeWakeWord::AudioDetectionTask() {
             }
         }
     }
+
+    audio_detection_task_handle_ = nullptr;
+    vTaskDelete(nullptr);
 }
 
 void AfeWakeWord::StoreWakeWordData(const int16_t* data, size_t samples) {
@@ -184,6 +215,7 @@ void AfeWakeWord::EncodeWakeWordData() {
             this_->wake_word_opus_.push_back(std::vector<uint8_t>());
             this_->wake_word_cv_.notify_all();
         }
+        this_->wake_word_encode_task_ = nullptr;
         vTaskDelete(NULL);
     }, "encode_detect_packets", 4096 * 8, this, 2, wake_word_encode_task_stack_, &wake_word_encode_task_buffer_);
 }
@@ -196,4 +228,34 @@ bool AfeWakeWord::GetWakeWordOpus(std::vector<uint8_t>& opus) {
     opus.swap(wake_word_opus_.front());
     wake_word_opus_.pop_front();
     return !opus.empty();
+}
+
+void AfeWakeWord::Shutdown() {
+    if (event_group_ == nullptr) {
+        return;
+    }
+
+    xEventGroupClearBits(event_group_, DETECTION_RUNNING_EVENT);
+    xEventGroupSetBits(event_group_, DETECTION_SHUTDOWN_EVENT);
+    if (afe_data_ != nullptr) {
+        afe_iface_->reset_buffer(afe_data_);
+    }
+
+    for (int waited_ms = 0; audio_detection_task_handle_ != nullptr && waited_ms < 1000; waited_ms += 10) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    if (audio_detection_task_handle_ != nullptr) {
+        ESP_LOGW(TAG, "Wake word detection task did not exit before shutdown timeout; deleting it");
+        vTaskDelete(audio_detection_task_handle_);
+        audio_detection_task_handle_ = nullptr;
+    }
+
+    for (int waited_ms = 0; wake_word_encode_task_ != nullptr && waited_ms < 3000; waited_ms += 10) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    if (wake_word_encode_task_ != nullptr) {
+        ESP_LOGW(TAG, "Wake word encode task did not exit before shutdown timeout; deleting it");
+        vTaskDelete(wake_word_encode_task_);
+        wake_word_encode_task_ = nullptr;
+    }
 }

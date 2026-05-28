@@ -133,7 +133,9 @@ private:
 
     // Audio encode / decode
     TaskHandle_t audio_loop_task_handle_ = nullptr;
+    bool audio_runtime_initialized_ = false;
     BackgroundTask* background_task_ = nullptr;
+    BackgroundTask* audio_encode_task_ = nullptr;
     std::chrono::steady_clock::time_point last_output_time_;
     std::list<AudioStreamPacket> audio_send_queue_;
     std::list<AudioStreamPacket> audio_decode_queue_;
@@ -156,6 +158,7 @@ private:
     void OnAudioOutput();
     bool ReadAudio(std::vector<int16_t>& data, int sample_rate, int samples);
     void ResetDecoder();
+    bool WaitForAudioOutputIdle(uint32_t timeout_ms);
     void SetDecodeSampleRate(int sample_rate, int frame_duration);
     void CheckNewVersion();
     void ShowActivationCode();
@@ -164,6 +167,12 @@ private:
     void AudioLoop();
     void EnterAudioTestingMode();
     void ExitAudioTestingMode();
+    void CreateAudioProcessor();
+    void CreateWakeWord();
+    void CreateBackgroundTask();
+    void CreateAudioEncodeTask();
+    void InitializeAudioRuntime(AudioCodec* codec, bool restore_wake_word);
+    void ReleaseAudioRuntimeForCustomPowerSave();
 };
 
 #endif // _APPLICATION_H_

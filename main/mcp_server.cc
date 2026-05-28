@@ -328,11 +328,6 @@ void McpServer::ReplyResult(int id, const std::string& result) {
     payload += result;
     payload += "}";
     ESP_LOGI(TAG, "ReplyResult: Sending MCP response, id=%d, payload_size=%u bytes", id, (unsigned)payload.length());
-    if (payload.length() < 500) {
-        ESP_LOGI(TAG, "ReplyResult: Payload preview: %s", payload.c_str());
-    } else {
-        ESP_LOGI(TAG, "ReplyResult: Payload preview (first 200 chars): %.200s...", payload.c_str());
-    }
     Application::GetInstance().SendMcpMessage(payload);
 }
 
@@ -400,11 +395,6 @@ void McpServer::GetToolsList(int id, const std::string& cursor) {
     }
     
     ESP_LOGI(TAG, "tools/list: Final response size=%u bytes, has_next_cursor=%s", (unsigned)json.length(), next_cursor.empty() ? "false" : "true");
-    if (json.length() < 500) {
-        ESP_LOGI(TAG, "tools/list: Response preview: %s", json.c_str());
-    } else {
-        ESP_LOGI(TAG, "tools/list: Response preview (first 200 chars): %.200s...", json.c_str());
-    }
     
     ReplyResult(id, json);
 }

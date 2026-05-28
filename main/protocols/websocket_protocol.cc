@@ -7,6 +7,7 @@
 #include "ota.h"
 
 #include <cstring>
+#include <algorithm>
 #include <cJSON.h>
 #include <esp_log.h>
 #include <arpa/inet.h>
@@ -36,6 +37,12 @@ bool WebsocketProtocol::SendAudio(const AudioStreamPacket& packet) {
         return false;
     }
 
+    frame_count_++;
+    if (frame_count_ <= 5 || frame_count_ % 50 == 0) {
+        ESP_LOGI(TAG, "Sending Opus frame %d, bytes=%u, version=%d",
+                 frame_count_, (unsigned)packet.payload.size(), version_);
+    }
+
     if (version_ == 2) {
         std::string serialized;
         serialized.resize(sizeof(BinaryProtocol2) + packet.payload.size());
@@ -51,13 +58,6 @@ bool WebsocketProtocol::SendAudio(const AudioStreamPacket& packet) {
     } else if (version_ == 3) {
         // Version 3: Send raw Opus frames as binary messages (no wrapper)
         // This matches the server's expectation for version 3
-        frame_count_++;
-        if (frame_count_ % 50 == 0 || frame_count_ <= 5) {
-            // Log every 50th frame or first 5 frames for debugging
-            ESP_LOGI(TAG, "Sending Opus frame %d, bytes=%zu", frame_count_, (size_t)packet.payload.size());
-        } else {
-            ESP_LOGD(TAG, "Sending Opus frame %d, bytes=%zu", frame_count_, (size_t)packet.payload.size());
-        }
         return websocket_->Send(packet.payload.data(), packet.payload.size(), true);
     } else {
         return websocket_->Send(packet.payload.data(), packet.payload.size(), true);
@@ -72,12 +72,7 @@ bool WebsocketProtocol::SendText(const std::string& text) {
 
     // Check if this is an MCP message for more detailed logging
     if (text.find("\"type\":\"mcp\"") != std::string::npos) {
-        ESP_LOGI(TAG, "SendText: Sending MCP message, size=%zu bytes", text.length());
-        if (text.length() < 500) {
-            ESP_LOGI(TAG, "SendText: MCP message content: %s", text.c_str());
-        } else {
-            ESP_LOGI(TAG, "SendText: MCP message preview (first 200 chars): %.200s...", text.c_str());
-        }
+        ESP_LOGI(TAG, "SendText: Sending MCP message, size=%u bytes", (unsigned)text.length());
     }
 
     if (!websocket_->Send(text)) {
@@ -206,6 +201,7 @@ bool WebsocketProtocol::OpenAudioChannel() {
 
     error_occurred_ = false;
     frame_count_ = 0;  // Reset frame counter for new session
+    incoming_frame_count_ = 0;
     last_incoming_time_ = std::chrono::steady_clock::now();  // Initialize timestamp for inactivity checking
     websocket_ = Board::GetInstance().CreateWebSocket();
     websocket_->SetReceiveBufferSize(kWebSocketReceiveBufferSize);
@@ -227,6 +223,10 @@ bool WebsocketProtocol::OpenAudioChannel() {
 
     websocket_->OnData([this](const char* data, size_t len, bool binary) {
         if (binary) {
+            incoming_frame_count_++;
+            if (incoming_frame_count_ <= 5 || incoming_frame_count_ % 50 == 0) {
+                ESP_LOGI(TAG, "WS RX binary audio frame %d, bytes=%u", incoming_frame_count_, (unsigned)len);
+            }
             if (on_incoming_audio_ != nullptr) {
                 if (version_ == 2) {
                     BinaryProtocol2* bp2 = (BinaryProtocol2*)data;
@@ -261,34 +261,42 @@ bool WebsocketProtocol::OpenAudioChannel() {
                 }
             }
         } else {
-            // Parse JSON data
-            ESP_LOGI(TAG, "WS RX text message len=%u data=%.*s", (unsigned)len, (int)std::min((int)len, 200), data);
-            auto root = cJSON_Parse(data);
-            if (root == nullptr) {
-                ESP_LOGE(TAG, "Failed to parse WebSocket JSON message: %.*s", (int)std::min((int)len, 200), data);
-                return;
-            }
-            auto type = cJSON_GetObjectItem(root, "type");
-            if (cJSON_IsString(type)) {
-                ESP_LOGI(TAG, "WS RX message type: %s", type->valuestring);
-                // Check if this is a listen message for immediate visibility
-                if (strcmp(type->valuestring, "listen") == 0) {
-                    ESP_LOGI(TAG, "*** LISTEN MESSAGE DETECTED IN WEBSOCKET ***");
-                }
-                if (strcmp(type->valuestring, "hello") == 0) {
-                    ParseServerHello(root);
-                } else {
-                    ESP_LOGI(TAG, "Forwarding WebSocket message type '%s' to Application::OnIncomingJson", type->valuestring);
-                    if (on_incoming_json_ != nullptr) {
-                        on_incoming_json_(root);
-                    } else {
-                        ESP_LOGW(TAG, "on_incoming_json_ callback is null, cannot forward WebSocket message type '%s'", type->valuestring);
-                    }
-                }
+            std::string message(data, len);
+            ESP_LOGI(TAG, "WS RX text message len=%u data=%.*s",
+                     (unsigned)len,
+                     (int)std::min<size_t>(len, 160),
+                     data);
+
+            if (message.find("\"type\":\"hello\"") != std::string::npos ||
+                message.find("\"type\": \"hello\"") != std::string::npos) {
+                HandleTextMessage(std::move(message));
             } else {
-                ESP_LOGE(TAG, "Missing message type in WebSocket message, data: %.*s", (int)std::min((int)len, 200), data);
+                auto json_callback = on_incoming_json_;
+                Application::GetInstance().Schedule([json_callback, message = std::move(message)]() mutable {
+                    auto root = cJSON_Parse(message.c_str());
+                    if (root == nullptr) {
+                        ESP_LOGE(TAG, "Failed to parse WebSocket JSON message: %.160s", message.c_str());
+                        return;
+                    }
+
+                    auto type = cJSON_GetObjectItem(root, "type");
+                    if (cJSON_IsString(type)) {
+                        ESP_LOGI(TAG, "WS RX message type: %s", type->valuestring);
+                        if (strcmp(type->valuestring, "listen") == 0) {
+                            ESP_LOGI(TAG, "*** LISTEN MESSAGE DETECTED IN WEBSOCKET ***");
+                        }
+                        ESP_LOGI(TAG, "Forwarding WebSocket message type '%s' to Application::OnIncomingJson", type->valuestring);
+                        if (json_callback) {
+                            json_callback(root);
+                        } else {
+                            ESP_LOGW(TAG, "on_incoming_json_ callback is null, cannot forward WebSocket message type '%s'", type->valuestring);
+                        }
+                    } else {
+                        ESP_LOGE(TAG, "Missing message type in WebSocket message, data: %.160s", message.c_str());
+                    }
+                    cJSON_Delete(root);
+                });
             }
-            cJSON_Delete(root);
         }
         last_incoming_time_ = std::chrono::steady_clock::now();
     });
@@ -329,6 +337,28 @@ bool WebsocketProtocol::OpenAudioChannel() {
     }
 
     return true;
+}
+
+void WebsocketProtocol::HandleTextMessage(std::string message) {
+    auto root = cJSON_Parse(message.c_str());
+    if (root == nullptr) {
+        ESP_LOGE(TAG, "Failed to parse WebSocket JSON message: %.160s", message.c_str());
+        return;
+    }
+
+    auto type = cJSON_GetObjectItem(root, "type");
+    if (cJSON_IsString(type)) {
+        ESP_LOGI(TAG, "WS RX message type: %s", type->valuestring);
+        if (strcmp(type->valuestring, "hello") == 0) {
+            ParseServerHello(root);
+        } else {
+            ESP_LOGW(TAG, "Unexpected immediate WebSocket message type: %s", type->valuestring);
+        }
+    } else {
+        ESP_LOGE(TAG, "Missing message type in WebSocket message, data: %.160s", message.c_str());
+    }
+
+    cJSON_Delete(root);
 }
 
 std::string WebsocketProtocol::GetHelloMessage() {

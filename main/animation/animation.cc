@@ -32,6 +32,7 @@
 namespace {
 static std::atomic<bool> g_startup_load_blocked{false};
 static std::atomic<bool> g_power_save_paused{false};
+constexpr uint32_t kPlatAnimationTaskStackSize = 8192;
 }
 
 // Minimum plausible size for a valid animation bundle. Anything smaller is
@@ -541,10 +542,11 @@ void animation_set_now_animation(int animation)
     
     if (animation_task_handle == nullptr)
     {
-        // Increased stack size to 4096 bytes to handle GIF operations
+        // This task can touch LVGL and board status helpers that read I2C devices.
+        // Keep enough headroom for post-wake animation changes while audio is active.
         // Reduced priority from 4 to 2 to ensure wake word detection (priority 3) has higher priority
         // This prevents animation task from interfering with critical audio processing
-        xTaskCreatePinnedToCore(plat_animation_task, "plat_animation_task", 4096, nullptr, 2, &animation_task_handle, 0);
+        xTaskCreatePinnedToCore(plat_animation_task, "plat_animation_task", kPlatAnimationTaskStackSize, nullptr, 2, &animation_task_handle, 0);
     }
     if (animation < 0 || animation >= ANIMATION_NUM)
     {

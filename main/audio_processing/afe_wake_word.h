@@ -33,6 +33,7 @@ public:
     void EncodeWakeWordData();
     bool GetWakeWordOpus(std::vector<uint8_t>& opus);
     const std::string& GetLastDetectedWakeWord() const { return last_detected_wake_word_; }
+    void Shutdown() override;
 
 private:
     esp_afe_sr_iface_t* afe_iface_ = nullptr;
@@ -43,6 +44,7 @@ private:
     std::function<void(const std::string& wake_word)> wake_word_detected_callback_;
     AudioCodec* codec_ = nullptr;
     std::string last_detected_wake_word_;
+    TaskHandle_t audio_detection_task_handle_ = nullptr;
 
     TaskHandle_t wake_word_encode_task_ = nullptr;
     StaticTask_t wake_word_encode_task_buffer_;

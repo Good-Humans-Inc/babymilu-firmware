@@ -9,6 +9,12 @@ managed_components/78__esp-wifi-connect/*
 !managed_components/78__esp-wifi-connect/include/
 managed_components/78__esp-wifi-connect/include/*
 !managed_components/78__esp-wifi-connect/include/wifi_station.h
+!managed_components/78__esp-ml307/
+managed_components/78__esp-ml307/*
+!managed_components/78__esp-ml307/web_socket.cc
+!managed_components/78__esp-ml307/include/
+managed_components/78__esp-ml307/include/*
+!managed_components/78__esp-ml307/include/web_socket.h
 build/
 .vscode/
 .devcontainer/

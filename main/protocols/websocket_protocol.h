@@ -26,8 +26,10 @@ private:
     WebSocket* websocket_ = nullptr;
     int version_ = 1;
     int frame_count_ = 0;  // Counter for Opus frames sent
+    int incoming_frame_count_ = 0;
 
     void ParseServerHello(const cJSON* root);
+    void HandleTextMessage(std::string message);
     bool SendText(const std::string& text) override;
     std::string GetHelloMessage();
 };

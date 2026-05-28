@@ -5,11 +5,11 @@
 
 #define TAG "BackgroundTask"
 
-BackgroundTask::BackgroundTask(uint32_t stack_size) {
+BackgroundTask::BackgroundTask(uint32_t stack_size, const char* task_name) : task_name_(task_name) {
     xTaskCreate([](void* arg) {
         BackgroundTask* task = (BackgroundTask*)arg;
         task->BackgroundTaskLoop();
-    }, "background_task", stack_size, this, 2, &background_task_handle_);
+    }, task_name, stack_size, this, 2, &background_task_handle_);
 }
 
 BackgroundTask::~BackgroundTask() {
@@ -47,8 +47,15 @@ void BackgroundTask::WaitForCompletion() {
     });
 }
 
+bool BackgroundTask::WaitForCompletion(uint32_t timeout_ms) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return condition_variable_.wait_for(lock, std::chrono::milliseconds(timeout_ms), [this]() {
+        return background_tasks_.empty() && active_tasks_ == 0;
+    });
+}
+
 void BackgroundTask::BackgroundTaskLoop() {
-    ESP_LOGI(TAG, "background_task started");
+    ESP_LOGI(TAG, "%s started", task_name_);
     while (true) {
         std::unique_lock<std::mutex> lock(mutex_);
         condition_variable_.wait(lock, [this]() { return !background_tasks_.empty(); });

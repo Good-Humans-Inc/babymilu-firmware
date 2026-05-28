@@ -53,6 +53,97 @@ Primary files:
 - `wifi_clear_credential` clears saved WiFi and WebSocket settings, then enters
   BLE config mode.
 
+## Custom Power-Save Audio Handoff
+
+Current shape after the custom sleep/wake SRAM debugging pass:
+
+- Custom sleep is not ESP-IDF light sleep. It is an application-managed mode
+  with reduced CPU frequency, LCD/backlight off, WiFi modem PS enabled, and
+  selected runtime objects released.
+- Entering custom sleep releases audio runtime SRAM from:
+  `AfeAudioProcessor`, `AfeWakeWord`, Opus encoder/decoder, audio debugger,
+  `background_task`, and `audio_encode`.
+- Waking from custom sleep restores only the manual BOOT-talk audio path:
+  codec input, Opus encoder/decoder, `AfeAudioProcessor`, and `audio_encode`.
+- Wake word runtime intentionally stays released after custom wake. BOOT click
+  opens WebSocket and talks through the manual path. Do not blindly recreate
+  `AfeWakeWord` during custom wake unless SRAM budget is revisited.
+- `background_task` intentionally stays released after custom wake. It is
+  lazily recreated for sound effects, URL playback, and audio testing. Manual
+  WebSocket talk must not depend on it.
+- WiFi PS is restored on custom wake with `WifiBoard::SetPowerSaveMode(false)`;
+  logs should show `[PWR_SAVE] WiFi PS after custom wake exit: 0 (none)`.
+- The restore memory gate checks both total internal free SRAM and largest
+  contiguous internal block. A failure like `free_sram=17623` with
+  `largest_block=7424` means fragmentation, not total SRAM exhaustion.
+
+Important files for this path:
+
+- `main/application.cc`: runtime lifecycle, custom sleep/wake release/restore,
+  manual audio input/output, MCP send scheduling.
+- `main/application.h`: runtime helper declarations and task members.
+- `main/audio_processing/afe_audio_processor.*`: shutdown support and
+  `audio_communication` task stack.
+- `main/audio_processing/afe_wake_word.*`: shutdown support for WakeNet/AFE.
+- `main/background_task.*`: named task worker, timeout-aware completion wait.
+- `main/system_info.*`: memory snapshots, heap maps, and task stack high-water
+  diagnostics.
+- `main/boards/echoear/echoear.cc`: custom sleep board gate, WiFi PS logging,
+  CPU frequency changes.
+- `main/animation/animation.cc`: `plat_animation_task` stack increased because
+  it can touch LVGL and I2C-backed status helpers after wake.
+- `main/protocols/websocket_protocol.*`: WebSocket receive JSON routing and
+  audio frame logging.
+- `managed_components/78__esp-ml307/web_socket.cc` and
+  `managed_components/78__esp-ml307/include/web_socket.h`: WebSocket send
+  serialization and RX thread stack. These are intentionally tracked despite
+  most managed components being ignored.
+
+Debugging history from the 2026-05-28 session:
+
+- Initial problem: after custom wake, SRAM was low and restoring full audio
+  runtime left too little room for BOOT-talk tasks. TTS/server hello sometimes
+  arrived, but speaker output or mic uplink was unreliable.
+- First fix: release AFE, WakeNet, Opus, debugger, background worker, and encode
+  worker before entering custom sleep. This raised sleep-mode internal free SRAM
+  from roughly single-digit KB to roughly 60-70 KB.
+- Speaker output fix: decoded WebSocket audio is now handled in `AudioLoop`;
+  output is enabled before PCM writes, and TTS stop waits for audio-output idle
+  instead of the unrelated generic background worker.
+- Mic uplink fix: Opus mic encoding moved out of `audio_communication` into a
+  dedicated `audio_encode` task. Doing encode inline caused
+  `audio_communica` stack overflow.
+- Stack fixes exposed by wake tests:
+  - `audio_communication` stack increased from 4096 to 8192.
+  - `plat_animation_task` stack increased from 4096 to 8192 after a panic in
+    `i2c_master_transmit_receive`.
+  - generic `background_task` reduced from the original large always-on worker
+    to a 16 KB lazy worker.
+- Memory gate failure after those stack fixes was due to fragmentation. The
+  largest contiguous block fell below 8 KB because `background_task` was being
+  recreated even though manual BOOT-talk did not need it. The current shape keeps
+  that worker released after wake.
+- WebSocket crash fix: a double exception occurred while the RX thread handled
+  MCP `initialize/tools/list` and the main loop sent the first MCP response.
+  WebSocket sends are serialized, verbose MCP payload previews were removed, the
+  WebSocket RX pthread stack was raised to 8192, and non-hello JSON handling is
+  copied onto the application main loop. The RX thread still parses `hello`
+  immediately because `OpenAudioChannel()` waits for server hello.
+
+Known noisy or unresolved items:
+
+- `i2s_channel_disable(1218): the channel has not been enabled yet` appears
+  during codec input/output disable and restore. It has been treated as noisy
+  unless paired with failed audio I/O.
+- Heap fragmentation is still tight. Use
+  `SystemInfo::PrintMemorySnapshot("<label>")` around changes to confirm both
+  `free_sram` and `largest_block`.
+- If another task overflows after wake, check its high-water mark in the memory
+  snapshot before increasing stack. The recent task failures were sequentially
+  exposed as earlier blockers were removed.
+- Avoid reintroducing full wake-word restore, always-on background worker, or
+  large MCP payload logging into the custom wake path without rechecking SRAM.
+
 ## Assets
 
 Current SD-card asset contract:

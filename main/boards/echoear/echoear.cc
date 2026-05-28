@@ -17,10 +17,12 @@
 #include <wifi_station.h>
 #include <ssid_manager.h>
 #include "settings.h"
+#include <esp_err.h>
 #include <esp_log.h>
 #include <esp_pm.h>
 #include <esp_random.h>
 #include <esp_sleep.h>
+#include <esp_wifi.h>
 #include <cJSON.h>
 #include <cstdio>
 #include <cstdlib>
@@ -64,6 +66,34 @@ static std::atomic<bool> s_echoear_custom_power_save_restoring{false};
 static bool IsEchoEarCustomPowerSaveActive() {
     return s_echoear_custom_power_save_active.load(std::memory_order_acquire) ||
            s_echoear_custom_power_save_restoring.load(std::memory_order_acquire);
+}
+
+static const char* WifiPowerSaveModeName(wifi_ps_type_t mode) {
+    switch (mode) {
+    case WIFI_PS_NONE:
+        return "none";
+    case WIFI_PS_MIN_MODEM:
+        return "min_modem";
+    case WIFI_PS_MAX_MODEM:
+        return "max_modem";
+    default:
+        return "unknown";
+    }
+}
+
+static void LogWifiPowerSaveMode(const char* label) {
+    wifi_ps_type_t mode = WIFI_PS_NONE;
+    esp_err_t err = esp_wifi_get_ps(&mode);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "[PWR_SAVE] WiFi PS %s: %d (%s)",
+                 label ? label : "state",
+                 static_cast<int>(mode),
+                 WifiPowerSaveModeName(mode));
+    } else {
+        ESP_LOGW(TAG, "[PWR_SAVE] WiFi PS %s: esp_wifi_get_ps failed: %s",
+                 label ? label : "state",
+                 esp_err_to_name(err));
+    }
 }
 
 static bool WaitForAnimationUpdaterCheckToFinish() {
@@ -1205,6 +1235,9 @@ private:
         SetLcdPanelPower(false);
         if (WifiStation::GetInstance().IsConnected()) {
             WifiBoard::SetPowerSaveMode(true);
+            LogWifiPowerSaveMode("after custom sleep enter");
+        } else {
+            ESP_LOGI(TAG, "[PWR_SAVE] WiFi not connected on custom sleep enter; PS change skipped");
         }
 
         ESP_LOGI(TAG, "[PWR_SAVE] RTC auto-exit disabled; BOOT long press is the only custom-mode exit");
@@ -1232,6 +1265,9 @@ private:
         animation_set_power_save_paused(false);
         if (WifiStation::GetInstance().IsConnected()) {
             WifiBoard::SetPowerSaveMode(false);
+            LogWifiPowerSaveMode("after custom wake exit");
+        } else {
+            ESP_LOGI(TAG, "[PWR_SAVE] WiFi not connected on custom wake exit; PS restore will happen after reconnect/audio open");
         }
         Application::GetInstance().ExitCustomPowerSaveMode([this]() {
             s_echoear_custom_power_save_restoring.store(false, std::memory_order_release);

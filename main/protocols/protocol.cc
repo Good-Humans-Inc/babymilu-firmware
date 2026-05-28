@@ -125,12 +125,7 @@ void Protocol::SendIotStates(const std::string& states) {
 
 void Protocol::SendMcpMessage(const std::string& payload) {
     std::string message = "{\"session_id\":\"" + session_id_ + "\",\"type\":\"mcp\",\"payload\":" + payload + "}";
-    ESP_LOGI(TAG, "SendMcpMessage: Wrapping MCP payload, session_id='%s', message_size=%zu bytes", session_id_.c_str(), message.length());
-    if (message.length() < 500) {
-        ESP_LOGI(TAG, "SendMcpMessage: Full message: %s", message.c_str());
-    } else {
-        ESP_LOGI(TAG, "SendMcpMessage: Message preview (first 200 chars): %.200s...", message.c_str());
-    }
+    ESP_LOGI(TAG, "SendMcpMessage: Wrapping MCP payload, session_id='%s', message_size=%u bytes", session_id_.c_str(), (unsigned)message.length());
     SendText(message);
 }
 

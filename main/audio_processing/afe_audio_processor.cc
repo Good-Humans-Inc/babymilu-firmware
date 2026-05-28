@@ -2,8 +2,13 @@
 #include <esp_log.h>
 
 #define PROCESSOR_RUNNING 0x01
+#define PROCESSOR_SHUTDOWN 0x02
 
 #define TAG "AfeAudioProcessor"
+
+namespace {
+constexpr uint32_t kAudioCommunicationTaskStackSize = 4096 * 2;
+}
 
 AfeAudioProcessor::AfeAudioProcessor()
     : afe_data_(nullptr) {
@@ -61,15 +66,19 @@ void AfeAudioProcessor::Initialize(AudioCodec* codec) {
     xTaskCreate([](void* arg) {
         auto this_ = (AfeAudioProcessor*)arg;
         this_->AudioProcessorTask();
-        vTaskDelete(NULL);
-    }, "audio_communication", 4096, this, 3, NULL);
+    }, "audio_communication", kAudioCommunicationTaskStackSize, this, 3, &audio_processor_task_handle_);
 }
 
 AfeAudioProcessor::~AfeAudioProcessor() {
+    Shutdown();
     if (afe_data_ != nullptr) {
         afe_iface_->destroy(afe_data_);
+        afe_data_ = nullptr;
     }
-    vEventGroupDelete(event_group_);
+    if (event_group_ != nullptr) {
+        vEventGroupDelete(event_group_);
+        event_group_ = nullptr;
+    }
 }
 
 size_t AfeAudioProcessor::GetFeedSize() {
@@ -83,10 +92,16 @@ void AfeAudioProcessor::Feed(const std::vector<int16_t>& data) {
     if (afe_data_ == nullptr) {
         return;
     }
+    if ((xEventGroupGetBits(event_group_) & PROCESSOR_SHUTDOWN) != 0) {
+        return;
+    }
     afe_iface_->feed(afe_data_, data.data());
 }
 
 void AfeAudioProcessor::Start() {
+    if ((xEventGroupGetBits(event_group_) & PROCESSOR_SHUTDOWN) != 0) {
+        return;
+    }
     xEventGroupSetBits(event_group_, PROCESSOR_RUNNING);
 }
 
@@ -98,7 +113,8 @@ void AfeAudioProcessor::Stop() {
 }
 
 bool AfeAudioProcessor::IsRunning() {
-    return xEventGroupGetBits(event_group_) & PROCESSOR_RUNNING;
+    EventBits_t bits = xEventGroupGetBits(event_group_);
+    return (bits & PROCESSOR_RUNNING) && !(bits & PROCESSOR_SHUTDOWN);
 }
 
 void AfeAudioProcessor::OnOutput(std::function<void(std::vector<int16_t>&& data)> callback) {
@@ -116,10 +132,22 @@ void AfeAudioProcessor::AudioProcessorTask() {
         feed_size, fetch_size);
 
     while (true) {
-        xEventGroupWaitBits(event_group_, PROCESSOR_RUNNING, pdFALSE, pdTRUE, portMAX_DELAY);
+        EventBits_t bits = xEventGroupWaitBits(
+            event_group_,
+            PROCESSOR_RUNNING | PROCESSOR_SHUTDOWN,
+            pdFALSE,
+            pdFALSE,
+            portMAX_DELAY);
+        if ((bits & PROCESSOR_SHUTDOWN) != 0) {
+            break;
+        }
 
-        auto res = afe_iface_->fetch_with_delay(afe_data_, portMAX_DELAY);
-        if ((xEventGroupGetBits(event_group_) & PROCESSOR_RUNNING) == 0) {
+        auto res = afe_iface_->fetch_with_delay(afe_data_, pdMS_TO_TICKS(100));
+        bits = xEventGroupGetBits(event_group_);
+        if ((bits & PROCESSOR_SHUTDOWN) != 0) {
+            break;
+        }
+        if ((bits & PROCESSOR_RUNNING) == 0) {
             continue;
         }
         if (res == nullptr || res->ret_value == ESP_FAIL) {
@@ -144,6 +172,9 @@ void AfeAudioProcessor::AudioProcessorTask() {
             output_callback_(std::vector<int16_t>(res->data, res->data + res->data_size / sizeof(int16_t)));
         }
     }
+
+    audio_processor_task_handle_ = nullptr;
+    vTaskDelete(nullptr);
 }
 
 void AfeAudioProcessor::EnableDeviceAec(bool enable) {
@@ -157,5 +188,26 @@ void AfeAudioProcessor::EnableDeviceAec(bool enable) {
     } else {
         afe_iface_->disable_aec(afe_data_);
         afe_iface_->enable_vad(afe_data_);
+    }
+}
+
+void AfeAudioProcessor::Shutdown() {
+    if (event_group_ == nullptr) {
+        return;
+    }
+
+    xEventGroupClearBits(event_group_, PROCESSOR_RUNNING);
+    xEventGroupSetBits(event_group_, PROCESSOR_SHUTDOWN);
+    if (afe_data_ != nullptr) {
+        afe_iface_->reset_buffer(afe_data_);
+    }
+
+    for (int waited_ms = 0; audio_processor_task_handle_ != nullptr && waited_ms < 1000; waited_ms += 10) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    if (audio_processor_task_handle_ != nullptr) {
+        ESP_LOGW(TAG, "Audio processor task did not exit before shutdown timeout; deleting it");
+        vTaskDelete(audio_processor_task_handle_);
+        audio_processor_task_handle_ = nullptr;
     }
 }
