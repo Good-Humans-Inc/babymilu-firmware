@@ -2559,23 +2559,25 @@ void Application::PlayOfflineReminderFromSettings(bool from_custom_reboot)
 
     auto& board = Board::GetInstance();
     auto display = board.GetDisplay();
-    if (!WifiStation::GetInstance().IsConnected() && display != nullptr) {
+    const bool online = WifiStation::GetInstance().IsConnected();
+    if (online) {
+        settings.SetInt("armed", 0);
+        settings.SetInt("fired", 0);
+        ESP_LOGI(TAG, "[RTC_ALARM] RTC reminder fired online; opening regular WebSocket alarm session");
+        SetAlarmMode(true);
+        OpenWebSocketConnection();
+        return;
+    }
+
+    if (display != nullptr) {
         display->SetEmotion("wifi");
     }
 
     if (!cached) {
         ESP_LOGW(TAG, "[RTC_ALARM] Offline reminder fired but no cached WAV is available");
-        if (WifiStation::GetInstance().IsConnected()) {
-            settings.SetInt("armed", 0);
-            settings.SetInt("fired", 0);
-            ESP_LOGI(TAG, "[RTC_ALARM] Online regular mode fallback: opening WebSocket alarm session");
-            SetAlarmMode(true);
-            OpenWebSocketConnection();
-        } else {
-            settings.SetInt("armed", 0);
-            settings.SetInt("fired", 1);
-            ESP_LOGW(TAG, "[RTC_ALARM] Keeping fired reminder pending until network or cached WAV is available");
-        }
+        settings.SetInt("armed", 0);
+        settings.SetInt("fired", 1);
+        ESP_LOGW(TAG, "[RTC_ALARM] Keeping fired reminder pending until network or cached WAV is available");
         return;
     }
 
