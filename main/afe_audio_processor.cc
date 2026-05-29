@@ -1,12 +1,15 @@
 #include "afe_audio_processor.h"
 
+#include <esp_heap_caps.h>
 #include <esp_log.h>
+#include <freertos/idf_additions.h>
 
 #include <string>
 
 #define TAG "AfeAudioProcessor"
 #define PROCESSOR_RUNNING 0x01
-static constexpr uint32_t kAfeFetchTaskStackSize = 4096 * 4;
+static constexpr uint32_t kAfeFetchTaskStackSize = 4096 * 6;
+static constexpr UBaseType_t kInternalMemoryCaps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
 
 AfeAudioProcessor::AfeAudioProcessor() {
     event_group_ = xEventGroupCreate();
@@ -68,12 +71,11 @@ void AfeAudioProcessor::Initialize(AudioCodec* codec) {
     ESP_LOGI(TAG, "AFE initialized input_format=%s aec=%d vad=%d", input_format.c_str(),
              afe_config->aec_init, afe_config->vad_init);
 
-    BaseType_t ok = xTaskCreatePinnedToCore(
+    BaseType_t ok = xTaskCreatePinnedToCoreWithCaps(
         [](void* arg) {
             static_cast<AfeAudioProcessor*>(arg)->AudioProcessorTask();
-            vTaskDelete(nullptr);
         },
-        "afe_fetch", kAfeFetchTaskStackSize, this, 3, nullptr, 1);
+        "afe_fetch", kAfeFetchTaskStackSize, this, 3, nullptr, 1, kInternalMemoryCaps);
     ESP_ERROR_CHECK(ok == pdPASS ? ESP_OK : ESP_FAIL);
 }
 

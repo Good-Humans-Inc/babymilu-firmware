@@ -6,6 +6,7 @@
 #include <driver/gpio.h>
 #include <driver/i2c_master.h>
 #include <esp_event.h>
+#include <esp_heap_caps.h>
 #include <esp_log.h>
 #include <esp_mac.h>
 #include <esp_netif.h>
@@ -14,17 +15,19 @@
 #include <esp_websocket_client.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/event_groups.h>
+#include <freertos/idf_additions.h>
 #include <freertos/queue.h>
 #include <freertos/task.h>
 #include <nvs_flash.h>
 #include <opus_decoder.h>
-#include <opus_encoder.h>
 #include <opus_resampler.h>
+#include <opus.h>
 
 #include <atomic>
 #include <cstdint>
 #include <cstring>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -34,14 +37,23 @@ static constexpr int kAfeSampleRate = 16000;
 static constexpr gpio_num_t kBootButtonGpio = GPIO_NUM_0;
 static constexpr uint32_t kAudioFeedTaskStackSize = 4096 * 3;
 static constexpr uint32_t kAudioEncodeTaskStackSize = 4096 * 4;
+static constexpr uint32_t kNetworkTaskStackSize = 4096 * 4;
 static constexpr uint32_t kControlTaskStackSize = 4096 * 2;
 static constexpr uint32_t kVadSilenceStopMs = 2000;
 static constexpr UBaseType_t kPcmQueueDepth = 4;
+static constexpr UBaseType_t kOpusQueueDepth = 8;
 static constexpr size_t kMaxPcmFrameSamples = 2048;
+static constexpr size_t kMaxOpusFrameBytes = 1000;
+static constexpr UBaseType_t kInternalMemoryCaps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
 
 struct PcmFrame {
     uint16_t samples = 0;
     int16_t data[kMaxPcmFrameSamples] = {};
+};
+
+struct OpusFrame {
+    uint16_t bytes = 0;
+    uint8_t data[kMaxOpusFrameBytes] = {};
 };
 
 class EchoEarGroundApp {
@@ -58,9 +70,10 @@ public:
         InitPowerHold();
         InitBootButton();
         InitAudio();
+        StartAudioTasks();
+        processor_->Start();
         InitWifi();
         StartWebSocket();
-        StartAudioTasks();
     }
 
 private:
@@ -68,12 +81,18 @@ private:
     i2c_master_bus_handle_t i2c_bus_ = nullptr;
     std::unique_ptr<BoxAudioCodec> codec_;
     std::unique_ptr<AfeAudioProcessor> processor_;
-    std::unique_ptr<OpusEncoderWrapper> opus_encoder_;
+    OpusEncoder* opus_encoder_ = nullptr;
     std::unique_ptr<OpusDecoderWrapper> opus_decoder_;
     OpusResampler input_resampler_;
     OpusResampler reference_resampler_;
     esp_websocket_client_handle_t websocket_ = nullptr;
-    QueueHandle_t pcm_queue_ = nullptr;
+    QueueHandle_t free_pcm_queue_ = nullptr;
+    QueueHandle_t filled_pcm_queue_ = nullptr;
+    QueueHandle_t free_opus_queue_ = nullptr;
+    QueueHandle_t filled_opus_queue_ = nullptr;
+    PcmFrame pcm_pool_[kPcmQueueDepth];
+    OpusFrame opus_pool_[kOpusQueueDepth];
+    std::mutex websocket_send_mutex_;
     std::string session_id_;
     std::atomic<bool> ws_connected_{false};
     std::atomic<bool> server_ready_{false};
@@ -88,6 +107,8 @@ private:
     std::vector<int16_t> resampled_input_buffer_;
     std::vector<int16_t> resampled_mic_buffer_;
     std::vector<int16_t> resampled_reference_buffer_;
+    std::vector<int16_t> opus_input_buffer_;
+    int opus_frame_samples_ = 0;
 
     static void InitPowerHold() {
         gpio_config_t config = {
@@ -143,8 +164,13 @@ private:
         codec_->SetOutputVolume(70);
         codec_->Start();
 
-        opus_encoder_ = std::make_unique<OpusEncoderWrapper>(16000, 1, OPUS_FRAME_DURATION_MS);
-        opus_encoder_->SetComplexity(0);
+        int opus_error = OPUS_OK;
+        opus_encoder_ = opus_encoder_create(16000, 1, OPUS_APPLICATION_VOIP, &opus_error);
+        ESP_ERROR_CHECK(opus_encoder_ != nullptr && opus_error == OPUS_OK ? ESP_OK : ESP_FAIL);
+        opus_encoder_ctl(opus_encoder_, OPUS_SET_DTX(1));
+        opus_encoder_ctl(opus_encoder_, OPUS_SET_COMPLEXITY(0));
+        opus_frame_samples_ = 16000 / 1000 * OPUS_FRAME_DURATION_MS;
+        opus_input_buffer_.reserve(kMaxPcmFrameSamples * 4);
         opus_decoder_ = std::make_unique<OpusDecoderWrapper>(16000, 1, OPUS_FRAME_DURATION_MS);
         if (codec_->input_sample_rate() != kAfeSampleRate) {
             input_resampler_.Configure(codec_->input_sample_rate(), kAfeSampleRate);
@@ -299,31 +325,47 @@ private:
     }
 
     void StartAudioTasks() {
-        pcm_queue_ = xQueueCreate(kPcmQueueDepth, sizeof(PcmFrame));
-        ESP_ERROR_CHECK(pcm_queue_ != nullptr ? ESP_OK : ESP_FAIL);
+        free_pcm_queue_ = xQueueCreateWithCaps(kPcmQueueDepth, sizeof(uint8_t), kInternalMemoryCaps);
+        filled_pcm_queue_ = xQueueCreateWithCaps(kPcmQueueDepth, sizeof(uint8_t), kInternalMemoryCaps);
+        free_opus_queue_ = xQueueCreateWithCaps(kOpusQueueDepth, sizeof(uint8_t), kInternalMemoryCaps);
+        filled_opus_queue_ = xQueueCreateWithCaps(kOpusQueueDepth, sizeof(uint8_t), kInternalMemoryCaps);
+        ESP_ERROR_CHECK(free_pcm_queue_ != nullptr && filled_pcm_queue_ != nullptr &&
+                            free_opus_queue_ != nullptr && filled_opus_queue_ != nullptr
+                        ? ESP_OK
+                        : ESP_FAIL);
+        for (uint8_t i = 0; i < kPcmQueueDepth; ++i) {
+            ESP_ERROR_CHECK(xQueueSend(free_pcm_queue_, &i, 0) == pdTRUE ? ESP_OK : ESP_FAIL);
+        }
+        for (uint8_t i = 0; i < kOpusQueueDepth; ++i) {
+            ESP_ERROR_CHECK(xQueueSend(free_opus_queue_, &i, 0) == pdTRUE ? ESP_OK : ESP_FAIL);
+        }
 
-        BaseType_t ok = xTaskCreatePinnedToCore(
+        BaseType_t ok = xTaskCreatePinnedToCoreWithCaps(
             [](void* arg) {
                 static_cast<EchoEarGroundApp*>(arg)->AudioFeedTask();
-                vTaskDelete(nullptr);
             },
-            "audio_feed", kAudioFeedTaskStackSize, this, 5, nullptr, 1);
+            "audio_feed", kAudioFeedTaskStackSize, this, 5, nullptr, 1, kInternalMemoryCaps);
         ESP_ERROR_CHECK(ok == pdPASS ? ESP_OK : ESP_FAIL);
 
-        ok = xTaskCreatePinnedToCore(
+        ok = xTaskCreatePinnedToCoreWithCaps(
             [](void* arg) {
                 static_cast<EchoEarGroundApp*>(arg)->AudioEncodeTask();
-                vTaskDelete(nullptr);
             },
-            "audio_encode", kAudioEncodeTaskStackSize, this, 4, nullptr, 1);
+            "audio_encode", kAudioEncodeTaskStackSize, this, 4, nullptr, 1, kInternalMemoryCaps);
         ESP_ERROR_CHECK(ok == pdPASS ? ESP_OK : ESP_FAIL);
 
-        ok = xTaskCreate(
+        ok = xTaskCreatePinnedToCoreWithCaps(
+            [](void* arg) {
+                static_cast<EchoEarGroundApp*>(arg)->NetworkSendTask();
+            },
+            "net_send", kNetworkTaskStackSize, this, 3, nullptr, 0, kInternalMemoryCaps);
+        ESP_ERROR_CHECK(ok == pdPASS ? ESP_OK : ESP_FAIL);
+
+        ok = xTaskCreatePinnedToCoreWithCaps(
             [](void* arg) {
                 static_cast<EchoEarGroundApp*>(arg)->ControlTask();
-                vTaskDelete(nullptr);
             },
-            "control", kControlTaskStackSize, this, 4, nullptr);
+            "control", kControlTaskStackSize, this, 4, nullptr, 0, kInternalMemoryCaps);
         ESP_ERROR_CHECK(ok == pdPASS ? ESP_OK : ESP_FAIL);
     }
 
@@ -393,22 +435,78 @@ private:
         return data.size() == samples;
     }
 
+    void EncodePcmFrame(const int16_t* pcm, size_t samples) {
+        if (opus_encoder_ == nullptr || pcm == nullptr || samples == 0) {
+            return;
+        }
+
+        opus_input_buffer_.insert(opus_input_buffer_.end(), pcm, pcm + samples);
+        while (opus_input_buffer_.size() >= static_cast<size_t>(opus_frame_samples_)) {
+            uint8_t opus[kMaxOpusFrameBytes];
+            int encoded = opus_encode(
+                opus_encoder_,
+                opus_input_buffer_.data(),
+                opus_frame_samples_,
+                opus,
+                static_cast<opus_int32>(kMaxOpusFrameBytes));
+            if (encoded < 0) {
+                ESP_LOGE(TAG, "opus encode failed: %d", encoded);
+                opus_input_buffer_.clear();
+                return;
+            }
+            if (ws_connected_ && streaming_) {
+                QueueOpusFrame(opus, static_cast<size_t>(encoded));
+            }
+            opus_input_buffer_.erase(opus_input_buffer_.begin(), opus_input_buffer_.begin() + opus_frame_samples_);
+        }
+    }
+
+    void ResetOpusEncoder() {
+        if (opus_encoder_ != nullptr) {
+            opus_encoder_ctl(opus_encoder_, OPUS_RESET_STATE);
+        }
+        opus_input_buffer_.clear();
+    }
+
     void AudioEncodeTask() {
         ESP_LOGI(TAG, "audio_encode task running stack=%lu", static_cast<unsigned long>(kAudioEncodeTaskStackSize));
-        PcmFrame frame = {};
         while (true) {
-            if (xQueueReceive(pcm_queue_, &frame, portMAX_DELAY) != pdTRUE || frame.samples == 0) {
+            uint8_t frame_index = 0;
+            if (xQueueReceive(filled_pcm_queue_, &frame_index, portMAX_DELAY) != pdTRUE || frame_index >= kPcmQueueDepth) {
                 continue;
             }
-            if (!server_ready_ || !ws_connected_ || !streaming_) {
+            PcmFrame& frame = pcm_pool_[frame_index];
+            if (!server_ready_ || !ws_connected_ || !streaming_ || frame.samples == 0) {
+                frame.samples = 0;
+                xQueueSend(free_pcm_queue_, &frame_index, 0);
                 continue;
             }
-            std::vector<int16_t> pcm(frame.data, frame.data + frame.samples);
-            opus_encoder_->Encode(std::move(pcm), [this](std::vector<uint8_t>&& opus) {
-                if (!opus.empty() && ws_connected_ && streaming_) {
-                    esp_websocket_client_send_bin(websocket_, reinterpret_cast<const char*>(opus.data()), static_cast<int>(opus.size()), portMAX_DELAY);
-                }
-            });
+            const uint16_t samples = frame.samples;
+            const int16_t* pcm = frame.data;
+            frame.samples = 0;
+            EncodePcmFrame(pcm, samples);
+            xQueueSend(free_pcm_queue_, &frame_index, 0);
+        }
+    }
+
+    void NetworkSendTask() {
+        ESP_LOGI(TAG, "net_send task running stack=%lu", static_cast<unsigned long>(kNetworkTaskStackSize));
+        while (true) {
+            uint8_t frame_index = 0;
+            if (xQueueReceive(filled_opus_queue_, &frame_index, portMAX_DELAY) != pdTRUE || frame_index >= kOpusQueueDepth) {
+                continue;
+            }
+            OpusFrame& frame = opus_pool_[frame_index];
+            if (websocket_ && ws_connected_ && frame.bytes > 0) {
+                std::lock_guard<std::mutex> lock(websocket_send_mutex_);
+                esp_websocket_client_send_bin(
+                    websocket_,
+                    reinterpret_cast<const char*>(frame.data),
+                    static_cast<int>(frame.bytes),
+                    pdMS_TO_TICKS(250));
+            }
+            frame.bytes = 0;
+            xQueueSend(free_opus_queue_, &frame_index, 0);
         }
     }
 
@@ -463,7 +561,7 @@ private:
     }
 
     void OnProcessedAudio(const int16_t* pcm, size_t samples) {
-        if (!pcm_queue_ || !server_ready_ || !ws_connected_ || !streaming_ || pcm == nullptr || samples == 0) {
+        if (!free_pcm_queue_ || !filled_pcm_queue_ || !server_ready_ || !ws_connected_ || !streaming_ || pcm == nullptr || samples == 0) {
             return;
         }
         if (samples > kMaxPcmFrameSamples) {
@@ -471,10 +569,41 @@ private:
             return;
         }
 
-        PcmFrame frame = {};
+        uint8_t frame_index = 0;
+        if (xQueueReceive(free_pcm_queue_, &frame_index, 0) != pdTRUE || frame_index >= kPcmQueueDepth) {
+            return;
+        }
+
+        PcmFrame& frame = pcm_pool_[frame_index];
         frame.samples = static_cast<uint16_t>(samples);
         std::memcpy(frame.data, pcm, samples * sizeof(int16_t));
-        xQueueSend(pcm_queue_, &frame, 0);
+        if (xQueueSend(filled_pcm_queue_, &frame_index, 0) != pdTRUE) {
+            frame.samples = 0;
+            xQueueSend(free_pcm_queue_, &frame_index, 0);
+        }
+    }
+
+    void QueueOpusFrame(const uint8_t* opus, size_t bytes) {
+        if (!free_opus_queue_ || !filled_opus_queue_ || opus == nullptr || bytes == 0) {
+            return;
+        }
+        if (bytes > kMaxOpusFrameBytes) {
+            ESP_LOGW(TAG, "Opus frame too large: %u bytes", static_cast<unsigned int>(bytes));
+            return;
+        }
+
+        uint8_t frame_index = 0;
+        if (xQueueReceive(free_opus_queue_, &frame_index, 0) != pdTRUE || frame_index >= kOpusQueueDepth) {
+            return;
+        }
+
+        OpusFrame& frame = opus_pool_[frame_index];
+        frame.bytes = static_cast<uint16_t>(bytes);
+        std::memcpy(frame.data, opus, bytes);
+        if (xQueueSend(filled_opus_queue_, &frame_index, 0) != pdTRUE) {
+            frame.bytes = 0;
+            xQueueSend(free_opus_queue_, &frame_index, 0);
+        }
     }
 
     void BeginListeningFromBootButton() {
@@ -489,8 +618,12 @@ private:
 
         heard_speech_ = vad_speaking_.load();
         silence_since_ms_ = 0;
-        opus_encoder_->ResetState();
-        SendListen("start");
+        ResetOpusEncoder();
+        if (!SendListen("start")) {
+            ESP_LOGW(TAG, "BOOT listen start send failed");
+            return;
+        }
+        vTaskDelay(pdMS_TO_TICKS(50));
         streaming_ = true;
         ESP_LOGI(TAG, "BOOT listen started; waiting for %lums VAD silence after speech",
                  static_cast<unsigned long>(kVadSilenceStopMs));
@@ -507,7 +640,7 @@ private:
                  static_cast<unsigned long>(kVadSilenceStopMs));
     }
 
-    void SendListen(const char* state) {
+    bool SendListen(const char* state) {
         cJSON* root = cJSON_CreateObject();
         cJSON_AddStringToObject(root, "type", "listen");
         cJSON_AddStringToObject(root, "state", state);
@@ -519,9 +652,10 @@ private:
         }
         char* text = cJSON_PrintUnformatted(root);
         ESP_LOGI(TAG, "TX listen:%s", state);
-        SendText(text);
+        bool ok = SendText(text);
         cJSON_free(text);
         cJSON_Delete(root);
+        return ok;
     }
 
     void SendAbort() {
@@ -537,10 +671,12 @@ private:
         cJSON_Delete(root);
     }
 
-    void SendText(const char* text) {
+    bool SendText(const char* text) {
         if (websocket_ && ws_connected_ && text) {
-            esp_websocket_client_send_text(websocket_, text, strlen(text), portMAX_DELAY);
+            std::lock_guard<std::mutex> lock(websocket_send_mutex_);
+            return esp_websocket_client_send_text(websocket_, text, strlen(text), pdMS_TO_TICKS(1000)) >= 0;
         }
+        return false;
     }
 
 };

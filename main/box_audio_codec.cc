@@ -2,7 +2,10 @@
 
 #include <driver/i2c_master.h>
 #include <driver/i2s_tdm.h>
+#include <esp_err.h>
 #include <esp_log.h>
+
+#include <cstring>
 
 #define TAG "BoxAudioCodec"
 
@@ -250,16 +253,28 @@ void BoxAudioCodec::EnableOutput(bool enable) {
 }
 
 int BoxAudioCodec::Read(int16_t* dest, int samples) {
-    if (input_enabled_) {
-        ESP_ERROR_CHECK_WITHOUT_ABORT(esp_codec_dev_read(input_dev_, dest, samples * sizeof(int16_t)));
+    if (!input_enabled_ || dest == nullptr || samples <= 0) {
+        return 0;
+    }
+
+    esp_err_t err = esp_codec_dev_read(input_dev_, dest, samples * sizeof(int16_t));
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "codec read failed: %s", esp_err_to_name(err));
+        std::memset(dest, 0, samples * sizeof(int16_t));
+        return 0;
     }
     return samples;
 }
 
 int BoxAudioCodec::Write(const int16_t* data, int samples) {
-    if (output_enabled_) {
-        ESP_ERROR_CHECK_WITHOUT_ABORT(esp_codec_dev_write(output_dev_, const_cast<int16_t*>(data), samples * sizeof(int16_t)));
+    if (!output_enabled_ || data == nullptr || samples <= 0) {
+        return 0;
+    }
+
+    esp_err_t err = esp_codec_dev_write(output_dev_, const_cast<int16_t*>(data), samples * sizeof(int16_t));
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "codec write failed: %s", esp_err_to_name(err));
+        return 0;
     }
     return samples;
 }
-
