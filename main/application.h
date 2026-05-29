@@ -96,7 +96,8 @@ public:
     void OpenWebSocketConnection();  // Opens WebSocket connection for conversations
     bool IsWebSocketConnected() const;  // Check if WebSocket is already connected
     bool ArmRtcReminder(time_t trigger_at, bool custom_mode, const std::string& wav_url,
-                        int priority, const std::string& reminder_id, bool replay_if_no_mic);
+                        int priority, const std::string& reminder_id, bool replay_if_no_mic,
+                        int fallback_delay_ms = -1, bool software_fallback_enabled = true);
     void HandleRtcAlarmSignal(bool from_custom_mode);
     void HandlePendingRtcReminderOnBoot();
 
@@ -114,6 +115,7 @@ private:
     std::unique_ptr<Protocol> websocket_protocol_;  // WebSocket protocol for conversations
     EventGroupHandle_t event_group_ = nullptr;
     esp_timer_handle_t clock_timer_handle_ = nullptr;
+    esp_timer_handle_t rtc_reminder_timer_handle_ = nullptr;
     volatile DeviceState device_state_ = kDeviceStateUnknown;
     ListeningMode listening_mode_ = kListeningModeAutoStop;
     AecMode aec_mode_ = kAecOff;
@@ -158,6 +160,9 @@ private:
     void MainEventLoop();
     void OnAudioInput();
     void OnAudioOutput();
+    void ScheduleRtcReminderSoftwareFallback(time_t trigger_at, int fallback_delay_ms = -1,
+                                             bool software_fallback_enabled = true);
+    void OnRtcReminderSoftwareTimer();
     bool ReadAudio(std::vector<int16_t>& data, int sample_rate, int samples);
     void PlayOfflineReminderFromSettings(bool from_custom_reboot);
     void ResetDecoder();

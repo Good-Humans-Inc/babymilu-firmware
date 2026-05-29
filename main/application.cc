@@ -41,6 +41,7 @@
 #include <cJSON.h>
 #include <driver/gpio.h>
 #include <arpa/inet.h>
+#include <cerrno>
 #include <cstdio>
 #include <unistd.h>
 
@@ -60,7 +61,8 @@ constexpr size_t kCustomRestoreMinLargestBlock = 8 * 1024;
 constexpr int kCustomRestoreMemoryWaitMs = 5000;
 constexpr int kCustomRestoreMemoryPollMs = 500;
 constexpr const char* kOfflineReminderNamespace = "offline_alarm";
-constexpr const char* kOfflineReminderDefaultPath = "/sdcard/offline_reminder.wav";
+constexpr const char* kOfflineReminderDefaultPath = "/sdcard/ALARM.WAV";
+constexpr const char* kOfflineReminderTempPath = "/sdcard/ALARM.TMP";
 constexpr int kOfflineReminderMicWindowMs = 5000;
 constexpr int kOfflineReminderMicThreshold = 1200;
 constexpr size_t kOfflineReminderMaxBytes = 2 * 1024 * 1024;
@@ -136,10 +138,13 @@ static bool DownloadFileFromUrl(const std::string& url, const std::string& path,
         return false;
     }
 
-    std::string tmp_path = path + ".tmp";
+    std::string tmp_path = kOfflineReminderTempPath;
     FILE* file = fopen(tmp_path.c_str(), "wb");
     if (!file) {
-        ESP_LOGE(TAG, "[RTC_ALARM] Failed to open %s for offline reminder download", tmp_path.c_str());
+        ESP_LOGE(TAG, "[RTC_ALARM] Failed to open %s for offline reminder download: errno=%d (%s)",
+                 tmp_path.c_str(),
+                 errno,
+                 strerror(errno));
         http->Close();
         return false;
     }
@@ -606,6 +611,18 @@ Application::Application()
         .name = "clock_timer",
         .skip_unhandled_events = true};
     esp_timer_create(&clock_timer_args, &clock_timer_handle_);
+
+    esp_timer_create_args_t rtc_reminder_timer_args = {
+        .callback = [](void *arg)
+        {
+            Application *app = (Application *)arg;
+            app->OnRtcReminderSoftwareTimer();
+        },
+        .arg = this,
+        .dispatch_method = ESP_TIMER_TASK,
+        .name = "rtc_reminder",
+        .skip_unhandled_events = true};
+    esp_timer_create(&rtc_reminder_timer_args, &rtc_reminder_timer_handle_);
 }
 
 Application::~Application()
@@ -614,6 +631,11 @@ Application::~Application()
     {
         esp_timer_stop(clock_timer_handle_);
         esp_timer_delete(clock_timer_handle_);
+    }
+    if (rtc_reminder_timer_handle_ != nullptr)
+    {
+        esp_timer_stop(rtc_reminder_timer_handle_);
+        esp_timer_delete(rtc_reminder_timer_handle_);
     }
     if (background_task_ != nullptr)
     {
@@ -1817,6 +1839,17 @@ void Application::Start()
 
 void Application::OnClockTimer()
 {
+    {
+        Settings reminder_settings(kOfflineReminderNamespace, false);
+        if (reminder_settings.GetInt("armed", 0) != 0 && Board::GetInstance().PollRtcAlarmFlag()) {
+            ESP_LOGI(TAG, "[RTC_ALARM] RTC alarm flag detected from clock poll");
+            Schedule([this]() {
+                HandleRtcAlarmSignal(false);
+            });
+            return;
+        }
+    }
+
     if (custom_power_save_mode_.load(std::memory_order_acquire) || Board::GetInstance().IsSleepTransitionActive())
     {
         return;
@@ -1830,12 +1863,14 @@ void Application::OnClockTimer()
     {
         Settings reminder_settings(kOfflineReminderNamespace, false);
         if (reminder_settings.GetInt("armed", 0) != 0) {
-            const time_t trigger_at = static_cast<time_t>(reminder_settings.GetInt("epoch", 0));
-            if (trigger_at > 0 && time(nullptr) >= trigger_at) {
-                ESP_LOGI(TAG, "[RTC_ALARM] Software reminder trigger reached");
-                Schedule([this]() {
-                    HandleRtcAlarmSignal(false);
-                });
+            if (reminder_settings.GetInt("sw_fb", 1) != 0) {
+                const time_t trigger_at = static_cast<time_t>(reminder_settings.GetInt("epoch", 0));
+                if (trigger_at > 0 && time(nullptr) >= trigger_at) {
+                    ESP_LOGI(TAG, "[RTC_ALARM] Software reminder trigger reached");
+                    Schedule([this]() {
+                        HandleRtcAlarmSignal(false);
+                    });
+                }
             }
         }
     }
@@ -2460,7 +2495,8 @@ void Application::Reboot()
 }
 
 bool Application::ArmRtcReminder(time_t trigger_at, bool custom_mode, const std::string& wav_url,
-                                 int priority, const std::string& reminder_id, bool replay_if_no_mic)
+                                 int priority, const std::string& reminder_id, bool replay_if_no_mic,
+                                 int fallback_delay_ms, bool software_fallback_enabled)
 {
     if (trigger_at <= 0) {
         ESP_LOGW(TAG, "[RTC_ALARM] Ignoring RTC reminder with invalid epoch: %ld", static_cast<long>(trigger_at));
@@ -2469,7 +2505,7 @@ bool Application::ArmRtcReminder(time_t trigger_at, bool custom_mode, const std:
 
     const std::string path = kOfflineReminderDefaultPath;
     remove(path.c_str());
-    remove((path + ".tmp").c_str());
+    remove(kOfflineReminderTempPath);
     {
         Settings settings(kOfflineReminderNamespace, true);
         settings.SetInt("armed", 1);
@@ -2479,6 +2515,8 @@ bool Application::ArmRtcReminder(time_t trigger_at, bool custom_mode, const std:
         settings.SetInt("custom", custom_mode ? 1 : 0);
         settings.SetInt("prio", priority);
         settings.SetInt("replay", replay_if_no_mic ? 1 : 0);
+        settings.SetInt("delay_ms", fallback_delay_ms);
+        settings.SetInt("sw_fb", software_fallback_enabled ? 1 : 0);
         settings.SetString("path", path);
         settings.SetString("id", reminder_id);
         if (!wav_url.empty()) {
@@ -2488,8 +2526,10 @@ bool Application::ArmRtcReminder(time_t trigger_at, bool custom_mode, const std:
 
     bool rtc_ok = Board::GetInstance().ScheduleRtcAlarmAt(trigger_at, custom_mode);
     if (!rtc_ok) {
-        ESP_LOGW(TAG, "[RTC_ALARM] Board RTC alarm schedule failed; software fallback remains armed");
+        ESP_LOGW(TAG, "[RTC_ALARM] Board RTC alarm schedule failed%s",
+                 software_fallback_enabled ? "; software fallback remains armed" : "; RTC-only alarm may not fire");
     }
+    ScheduleRtcReminderSoftwareFallback(trigger_at, fallback_delay_ms, software_fallback_enabled);
 
     if (!wav_url.empty()) {
         background_task_->Schedule([wav_url, path]() {
@@ -2502,17 +2542,79 @@ bool Application::ArmRtcReminder(time_t trigger_at, bool custom_mode, const std:
         ESP_LOGI(TAG, "[RTC_ALARM] RTC reminder armed without offline WAV URL");
     }
 
-    ESP_LOGI(TAG, "[RTC_ALARM] Armed reminder id=%s epoch=%ld custom=%d priority=%d replay=%d",
+    ESP_LOGI(TAG, "[RTC_ALARM] Armed reminder id=%s epoch=%ld custom=%d priority=%d replay=%d sw_fb=%d",
              reminder_id.empty() ? "<none>" : reminder_id.c_str(),
              static_cast<long>(trigger_at),
              custom_mode ? 1 : 0,
              priority,
-             replay_if_no_mic ? 1 : 0);
+             replay_if_no_mic ? 1 : 0,
+             software_fallback_enabled ? 1 : 0);
     return rtc_ok;
+}
+
+void Application::ScheduleRtcReminderSoftwareFallback(time_t trigger_at, int fallback_delay_ms,
+                                                      bool software_fallback_enabled)
+{
+    if (rtc_reminder_timer_handle_ == nullptr || trigger_at <= 0) {
+        return;
+    }
+
+    esp_timer_stop(rtc_reminder_timer_handle_);
+    if (!software_fallback_enabled) {
+        ESP_LOGI(TAG, "[RTC_ALARM] RTC-only reminder armed; software fallback disabled");
+        return;
+    }
+
+    int64_t delay_us = -1;
+    if (fallback_delay_ms > 0) {
+        delay_us = static_cast<int64_t>(fallback_delay_ms) * 1000LL;
+        ESP_LOGI(TAG, "[RTC_ALARM] Using MQTT relative delay for software fallback: %d ms",
+                 fallback_delay_ms);
+    } else {
+        const time_t now = time(nullptr);
+        delay_us = static_cast<int64_t>(trigger_at - now) * 1000000LL;
+        ESP_LOGI(TAG, "[RTC_ALARM] Using device wall clock for software fallback: epoch=%ld now=%ld",
+                 static_cast<long>(trigger_at),
+                 static_cast<long>(now));
+    }
+
+    if (delay_us < 1000000LL) {
+        delay_us = 1000000LL;
+    }
+
+    esp_err_t err = esp_timer_start_once(rtc_reminder_timer_handle_, delay_us);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "[RTC_ALARM] Software fallback armed in %ld ms",
+                 static_cast<long>(delay_us / 1000LL));
+    } else {
+        ESP_LOGW(TAG, "[RTC_ALARM] Failed to arm software fallback: %s", esp_err_to_name(err));
+    }
+}
+
+void Application::OnRtcReminderSoftwareTimer()
+{
+    Schedule([this]() {
+        Settings settings(kOfflineReminderNamespace, false);
+        if (settings.GetInt("armed", 0) == 0) {
+            ESP_LOGI(TAG, "[RTC_ALARM] Software fallback ignored; reminder is no longer armed");
+            return;
+        }
+        if (settings.GetInt("sw_fb", 1) == 0) {
+            ESP_LOGI(TAG, "[RTC_ALARM] Software fallback ignored; reminder is RTC-only");
+            return;
+        }
+
+        ESP_LOGW(TAG, "[RTC_ALARM] BM8563 interrupt not observed; software fallback firing reminder");
+        HandleRtcAlarmSignal(false);
+    });
 }
 
 void Application::HandleRtcAlarmSignal(bool from_custom_mode)
 {
+    if (rtc_reminder_timer_handle_ != nullptr) {
+        esp_timer_stop(rtc_reminder_timer_handle_);
+    }
+
     Settings settings(kOfflineReminderNamespace, true);
     const bool custom_mode = settings.GetInt("custom", 0) != 0;
     settings.SetInt("armed", 0);
@@ -2536,12 +2638,38 @@ void Application::HandleRtcAlarmSignal(bool from_custom_mode)
 void Application::HandlePendingRtcReminderOnBoot()
 {
     Settings settings(kOfflineReminderNamespace, false);
-    if (settings.GetInt("fired", 0) == 0) {
+    if (settings.GetInt("fired", 0) != 0) {
+        ESP_LOGI(TAG, "[RTC_ALARM] Pending fired RTC reminder found on boot");
+        PlayOfflineReminderFromSettings(true);
         return;
     }
 
-    ESP_LOGI(TAG, "[RTC_ALARM] Pending fired RTC reminder found on boot");
-    PlayOfflineReminderFromSettings(true);
+    if (settings.GetInt("armed", 0) == 0) {
+        return;
+    }
+
+    const time_t trigger_at = static_cast<time_t>(settings.GetInt("epoch", 0));
+    if (trigger_at <= 0) {
+        return;
+    }
+
+    if (time(nullptr) >= trigger_at) {
+        if (settings.GetInt("sw_fb", 1) != 0) {
+            ESP_LOGW(TAG, "[RTC_ALARM] Armed RTC reminder is overdue on boot; firing now");
+            HandleRtcAlarmSignal(false);
+        } else {
+            ESP_LOGW(TAG, "[RTC_ALARM] RTC-only reminder is overdue on boot, but BM8563 flag was not set");
+        }
+    } else {
+        const bool software_fallback_enabled = settings.GetInt("sw_fb", 1) != 0;
+        ESP_LOGI(TAG, "[RTC_ALARM] Restoring armed reminder epoch=%ld sw_fb=%d",
+                 static_cast<long>(trigger_at),
+                 software_fallback_enabled ? 1 : 0);
+        ScheduleRtcReminderSoftwareFallback(
+            trigger_at,
+            settings.GetInt("delay_ms", -1),
+            software_fallback_enabled);
+    }
 }
 
 void Application::PlayOfflineReminderFromSettings(bool from_custom_reboot)
@@ -2866,10 +2994,9 @@ Protocol* Application::GetActiveProtocol() {
 }
 
 void Application::OpenWebSocketConnection() {
-    // If WebSocket protocol already exists and is opened, do nothing
-    if (websocket_protocol_ && websocket_protocol_->IsAudioChannelOpened()) {
-        ESP_LOGI(TAG, "WebSocket connection already open");
-        return;
+    const bool websocket_already_open = websocket_protocol_ && websocket_protocol_->IsAudioChannelOpened();
+    if (websocket_already_open) {
+        ESP_LOGI(TAG, "WebSocket connection already open; reusing it for remote wakeup");
     }
     
     // Create WebSocket protocol if it doesn't exist
@@ -3054,14 +3181,14 @@ void Application::OpenWebSocketConnection() {
         }
     }
     
-    // Open the audio channel
-    ESP_LOGI(TAG, "Opening WebSocket audio channel");
-    if (!websocket_protocol_->OpenAudioChannel()) {
-        ESP_LOGE(TAG, "Failed to open WebSocket audio channel");
-        return;
+    if (!websocket_already_open) {
+        ESP_LOGI(TAG, "Opening WebSocket audio channel");
+        if (!websocket_protocol_->OpenAudioChannel()) {
+            ESP_LOGE(TAG, "Failed to open WebSocket audio channel");
+            return;
+        }
+        ESP_LOGI(TAG, "WebSocket connection opened successfully");
     }
-    
-    ESP_LOGI(TAG, "WebSocket connection opened successfully");
     
     // For remote wakeup (ws_start): Behavior depends on alarm mode
     // - Normal mode: Automatically enter listening state (for normal conversations)

@@ -56,6 +56,7 @@ public:
     virtual void WaitForStartupNetworkTasks() {}
     virtual void SyncRtcFromSystemTime(time_t /*now*/) {}
     virtual bool ScheduleRtcAlarmAt(time_t /*trigger_at*/, bool /*custom_mode*/) { return false; }
+    virtual bool PollRtcAlarmFlag() { return false; }
     virtual bool IsSleepTransitionActive() { return false; }
     virtual std::string GetBoardJson() = 0;
     virtual std::string GetDeviceStatusJson() = 0;

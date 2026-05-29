@@ -227,6 +227,44 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
                 auto priority_item = cJSON_GetObjectItem(root, "priority");
                 int priority = cJSON_IsNumber(priority_item) ? priority_item->valueint : 0;
 
+                int fallback_delay_ms = -1;
+                auto delay_ms_item = cJSON_GetObjectItem(root, "delay_ms");
+                if (delay_ms_item == nullptr) {
+                    delay_ms_item = cJSON_GetObjectItem(root, "delayMs");
+                }
+                if (cJSON_IsNumber(delay_ms_item)) {
+                    fallback_delay_ms = std::max(1000, delay_ms_item->valueint);
+                } else {
+                    auto delay_seconds_item = cJSON_GetObjectItem(root, "delay_seconds");
+                    if (delay_seconds_item == nullptr) {
+                        delay_seconds_item = cJSON_GetObjectItem(root, "delaySeconds");
+                    }
+                    if (cJSON_IsNumber(delay_seconds_item)) {
+                        fallback_delay_ms = std::max(1, delay_seconds_item->valueint) * 1000;
+                    }
+                }
+
+                bool software_fallback_enabled = true;
+                auto software_fallback_item = cJSON_GetObjectItem(root, "software_fallback");
+                if (software_fallback_item == nullptr) {
+                    software_fallback_item = cJSON_GetObjectItem(root, "softwareFallback");
+                }
+                if (software_fallback_item == nullptr) {
+                    software_fallback_item = cJSON_GetObjectItem(root, "fallback");
+                }
+                if (cJSON_IsFalse(software_fallback_item)) {
+                    software_fallback_enabled = false;
+                } else if (cJSON_IsTrue(software_fallback_item)) {
+                    software_fallback_enabled = true;
+                }
+                auto rtc_only_item = cJSON_GetObjectItem(root, "rtc_only");
+                if (rtc_only_item == nullptr) {
+                    rtc_only_item = cJSON_GetObjectItem(root, "rtcOnly");
+                }
+                if (cJSON_IsTrue(rtc_only_item)) {
+                    software_fallback_enabled = false;
+                }
+
                 const char* wav_url = "";
                 const char* url_keys[] = {"offline_wav_url", "offlineWavUrl", "wav_url", "wavUrl", "audioUrl", "url"};
                 for (const char* key : url_keys) {
@@ -246,17 +284,45 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
                     reminder_id = reminder_item->valuestring;
                 }
 
+                const char* websocket_url = "";
+                const char* websocket_url_keys[] = {"wss", "wsUrl", "ws_url", "websocketUrl", "websocket_url"};
+                for (const char* key : websocket_url_keys) {
+                    auto item = cJSON_GetObjectItem(root, key);
+                    if (cJSON_IsString(item) && item->valuestring != nullptr && strlen(item->valuestring) > 0) {
+                        websocket_url = item->valuestring;
+                        break;
+                    }
+                }
+                auto websocket_version = cJSON_GetObjectItem(root, "version");
+                if (websocket_url[0] != '\0') {
+                    std::string url(websocket_url);
+                    if (IsValidWebSocketUrl(url)) {
+                        Settings ws_settings("websocket", true);
+                        ws_settings.SetString("url", url);
+                        if (cJSON_IsNumber(websocket_version)) {
+                            ws_settings.SetInt("version", websocket_version->valueint);
+                            ESP_LOGI(TAG, "rtc_alarm saved WebSocket version: %d", websocket_version->valueint);
+                        }
+                        ESP_LOGI(TAG, "rtc_alarm saved WebSocket URL for self-start: %s", url.c_str());
+                    } else {
+                        ESP_LOGW(TAG, "rtc_alarm ignored invalid WebSocket URL: %s", url.c_str());
+                    }
+                }
+
                 bool ok = Application::GetInstance().ArmRtcReminder(
                     static_cast<time_t>(epoch->valuedouble),
                     custom_mode,
                     wav_url,
                     priority,
                     reminder_id,
-                    replay_if_no_mic);
-                ESP_LOGI(TAG, "rtc_alarm processed: ok=%d epoch=%ld custom=%d url=%s",
+                    replay_if_no_mic,
+                    fallback_delay_ms,
+                    software_fallback_enabled);
+                ESP_LOGI(TAG, "rtc_alarm processed: ok=%d epoch=%ld custom=%d sw_fb=%d url=%s",
                          ok ? 1 : 0,
                          static_cast<long>(epoch->valuedouble),
                          custom_mode ? 1 : 0,
+                         software_fallback_enabled ? 1 : 0,
                          wav_url && wav_url[0] ? wav_url : "<none>");
             }
         } else if (strcmp(type->valuestring, "ws_start") == 0) {

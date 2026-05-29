@@ -53,6 +53,67 @@ Primary files:
 - `wifi_clear_credential` clears saved WiFi and WebSocket settings, then enters
   BLE config mode.
 
+## RTC Offline Alarm / Reminder Shape
+
+Current RTC reminder support is split between MQTT parsing, application state,
+and the EchoEar BM8563 board implementation.
+
+Primary files:
+
+- `main/protocols/mqtt_protocol.cc`
+- `main/application.cc`
+- `main/application.h`
+- `main/boards/common/board.h`
+- `main/boards/echoear/echoear.cc`
+- `main/ota.cc`
+
+MQTT accepts `rtc_alarm` payloads with:
+
+- `epoch` or `triggerAtEpoch`: UTC Unix seconds.
+- `custom_mode` / `customMode`: whether RTC fire should reboot before local
+  playback.
+- `offline_wav_url` / `offlineWavUrl` / `wav_url` / `wavUrl` / `audioUrl` /
+  `url`: optional WAV to download for offline playback.
+- `software_fallback` / `softwareFallback` / `fallback`: false disables the
+  ESP timer fallback.
+- `rtc_only` / `rtcOnly`: true disables the ESP timer fallback.
+- `wss` / `wsUrl` / `ws_url` / `websocketUrl` / `websocket_url` plus
+  `version`: saved for online self-start alarm sessions.
+
+Offline WAV cache contract:
+
+- Cached reminder audio path: `/sdcard/ALARM.WAV`.
+- Temp download path: `/sdcard/ALARM.TMP`.
+- FATFS long filenames may be disabled, so keep these 8.3 names.
+
+Runtime behavior:
+
+- Normal mode + offline RTC fire: play `/sdcard/ALARM.WAV` directly without
+  rebooting, show `wifi`, then replay once if no mic activity is detected.
+- Custom mode + RTC fire: mark the reminder fired, reboot, then play
+  `/sdcard/ALARM.WAV` early on boot before normal WiFi startup takes over.
+- Online RTC fire: open/reuse the WebSocket alarm session using the saved
+  WebSocket URL/version.
+- `rtc_only=true` is a real RTC validation path: it does not use the software
+  wall-clock fallback.
+- BM8563 alarm detection uses both GPIO interrupt and a one-second alarm-flag
+  poll via `Board::PollRtcAlarmFlag()`.
+
+Timekeeping:
+
+- `ota.cc` keeps system time and BM8563 time in UTC.
+- OTA `timezone_offset` is applied only to the POSIX `TZ` display/localtime
+  setting, not to `settimeofday()`.
+- This matters because RTC alarm epochs are UTC.
+
+BOOT long-press behavior:
+
+- Awake mode: BOOT long press + release enters custom power-save mode without
+  rebooting.
+- Already in custom power-save mode: BOOT long press + release is the wake
+  action and reboots, so pending custom reminders can play on the clean boot
+  path.
+
 ## Assets
 
 Current SD-card asset contract:

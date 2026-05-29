@@ -16,6 +16,9 @@
 #endif
 
 #include <cstring>
+#include <cstdlib>
+#include <cstdio>
+#include <ctime>
 #include <vector>
 #include <sstream>
 #include <algorithm>
@@ -27,6 +30,20 @@ constexpr const char* kOtaNamespace = "ota";
 constexpr const char* kCustomOtaUrlKey = "cus_ota_url";
 constexpr const char* kOtaRetryKey = "ota_retry";
 constexpr int kMaxCustomOtaRetry = 1;
+
+void ApplyFixedTimezoneOffset(int offset_minutes) {
+    // POSIX TZ signs are reversed: UTC+07 means local time is UTC-7.
+    const int posix_minutes = -offset_minutes;
+    const char sign = posix_minutes >= 0 ? '+' : '-';
+    const int abs_minutes = std::abs(posix_minutes);
+    char tz[24] = {};
+    snprintf(tz, sizeof(tz), "UTC%c%02d:%02d", sign, abs_minutes / 60, abs_minutes % 60);
+    setenv("TZ", tz, 1);
+    tzset();
+    ESP_LOGI(TAG, "Applied display timezone from server offset: offset_minutes=%d tz=%s",
+             offset_minutes,
+             tz);
+}
 }
 
 
@@ -237,7 +254,7 @@ bool Ota::CheckVersion() {
             
             // 如果有时区偏移，计算本地时间
             if (cJSON_IsNumber(timezone_offset)) {
-                ts += (timezone_offset->valueint * 60 * 1000); // 转换分钟为毫秒
+                ApplyFixedTimezoneOffset(timezone_offset->valueint);
             }
             
             tv.tv_sec = (time_t)(ts / 1000);  // 转换毫秒为秒

@@ -2382,7 +2382,7 @@ private:
     }
 
     void InitializePowerSaveTimer() {
-        ESP_LOGI(TAG, "[PWR_SAVE] Legacy 30-second soft sleep disabled; BOOT long press reboots the device");
+        ESP_LOGI(TAG, "[PWR_SAVE] Legacy 30-second soft sleep disabled; BOOT long press enters custom mode, then reboots on custom wake");
         power_save_timer_ = nullptr;
         InitializeBatteryMonitor();
     }
@@ -2504,8 +2504,19 @@ private:
             }
             boot_long_press_pending_release_ = false;
 
-            ESP_LOGI(TAG, "[PWR_SAVE] BOOT long-press release; rebooting instead of entering custom power-save mode");
-            Application::GetInstance().Reboot();
+            if (IsCustomPowerSaveExitGuardActive()) {
+                ESP_LOGI(TAG, "[PWR_SAVE] Ignoring BOOT long-press release while custom wake cleanup settles");
+                return;
+            }
+
+            if (custom_power_save_active_.load(std::memory_order_acquire)) {
+                ESP_LOGI(TAG, "[PWR_SAVE] BOOT long-press release in custom mode; rebooting for custom wake");
+                Application::GetInstance().Reboot();
+                return;
+            }
+
+            ESP_LOGI(TAG, "[PWR_SAVE] BOOT long-press release; entering custom power-save mode");
+            EnterCustomPowerSaveMode();
         });
 
         boot_button_.OnClick([this]() {
@@ -2555,7 +2566,7 @@ private:
     }
 
 public:
-    EchoEar() : boot_button_(BOOT_BUTTON_GPIO, false, 3000, 0) {  // 3-second BOOT long press reboots the device
+    EchoEar() : boot_button_(BOOT_BUTTON_GPIO, false, 3000, 0) {  // 3-second BOOT long press enters/exits custom mode
         InitializeI2c();
         InitializeBmi270();  // Initialize BMI270 after I2C bus is ready
         InitializeCharge();
@@ -2705,6 +2716,21 @@ public:
         ESP_LOGI(TAG, "[RTC_ALARM] BM8563 alarm scheduled for %s UTC custom=%d",
                  alarm_text,
                  custom_mode ? 1 : 0);
+        return true;
+    }
+
+    virtual bool PollRtcAlarmFlag() override {
+        if (rtc_ == nullptr) {
+            return false;
+        }
+        if (!rtc_->AlarmFired()) {
+            return false;
+        }
+
+        ESP_LOGI(TAG, "[RTC_ALARM] BM8563 alarm flag observed by poll");
+        if (!rtc_->ClearInterrupts()) {
+            ESP_LOGW(TAG, "[RTC_ALARM] Failed to clear BM8563 interrupt flags after poll");
+        }
         return true;
     }
 
