@@ -6,6 +6,7 @@
 
 #define TAG "AfeAudioProcessor"
 #define PROCESSOR_RUNNING 0x01
+static constexpr uint32_t kAfeFetchTaskStackSize = 4096 * 4;
 
 AfeAudioProcessor::AfeAudioProcessor() {
     event_group_ = xEventGroupCreate();
@@ -67,12 +68,13 @@ void AfeAudioProcessor::Initialize(AudioCodec* codec) {
     ESP_LOGI(TAG, "AFE initialized input_format=%s aec=%d vad=%d", input_format.c_str(),
              afe_config->aec_init, afe_config->vad_init);
 
-    xTaskCreate(
+    BaseType_t ok = xTaskCreatePinnedToCore(
         [](void* arg) {
             static_cast<AfeAudioProcessor*>(arg)->AudioProcessorTask();
             vTaskDelete(nullptr);
         },
-        "afe_fetch", 4096, this, 3, nullptr);
+        "afe_fetch", kAfeFetchTaskStackSize, this, 3, nullptr, 1);
+    ESP_ERROR_CHECK(ok == pdPASS ? ESP_OK : ESP_FAIL);
 }
 
 size_t AfeAudioProcessor::GetFeedSize() {
@@ -103,7 +105,7 @@ bool AfeAudioProcessor::IsRunning() {
     return (xEventGroupGetBits(event_group_) & PROCESSOR_RUNNING) != 0;
 }
 
-void AfeAudioProcessor::OnOutput(std::function<void(std::vector<int16_t>&& data)> callback) {
+void AfeAudioProcessor::OnOutput(std::function<void(const int16_t* data, size_t samples)> callback) {
     output_callback_ = std::move(callback);
 }
 
@@ -112,7 +114,8 @@ void AfeAudioProcessor::OnVadStateChange(std::function<void(bool speaking)> call
 }
 
 void AfeAudioProcessor::AudioProcessorTask() {
-    ESP_LOGI(TAG, "AFE fetch task running feed=%d fetch=%d",
+    ESP_LOGI(TAG, "AFE fetch task running stack=%lu feed=%d fetch=%d",
+             static_cast<unsigned long>(kAfeFetchTaskStackSize),
              afe_iface_->get_feed_chunksize(afe_data_),
              afe_iface_->get_fetch_chunksize(afe_data_));
 
@@ -137,7 +140,7 @@ void AfeAudioProcessor::AudioProcessorTask() {
         }
 
         if (output_callback_) {
-            output_callback_(std::vector<int16_t>(res->data, res->data + res->data_size / sizeof(int16_t)));
+            output_callback_(res->data, res->data_size / sizeof(int16_t));
         }
     }
 }

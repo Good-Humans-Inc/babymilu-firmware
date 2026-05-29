@@ -14,12 +14,15 @@
 #include <esp_websocket_client.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/event_groups.h>
+#include <freertos/queue.h>
 #include <freertos/task.h>
 #include <nvs_flash.h>
 #include <opus_decoder.h>
 #include <opus_encoder.h>
+#include <opus_resampler.h>
 
 #include <atomic>
+#include <cstdint>
 #include <cstring>
 #include <memory>
 #include <string>
@@ -27,6 +30,19 @@
 
 #define TAG "EchoEarGround"
 #define WIFI_CONNECTED_BIT BIT0
+static constexpr int kAfeSampleRate = 16000;
+static constexpr gpio_num_t kBootButtonGpio = GPIO_NUM_0;
+static constexpr uint32_t kAudioFeedTaskStackSize = 4096 * 3;
+static constexpr uint32_t kAudioEncodeTaskStackSize = 4096 * 4;
+static constexpr uint32_t kControlTaskStackSize = 4096 * 2;
+static constexpr uint32_t kVadSilenceStopMs = 2000;
+static constexpr UBaseType_t kPcmQueueDepth = 4;
+static constexpr size_t kMaxPcmFrameSamples = 2048;
+
+struct PcmFrame {
+    uint16_t samples = 0;
+    int16_t data[kMaxPcmFrameSamples] = {};
+};
 
 class EchoEarGroundApp {
 public:
@@ -40,6 +56,7 @@ public:
         ESP_ERROR_CHECK(esp_netif_init());
         ESP_ERROR_CHECK(esp_event_loop_create_default());
         InitPowerHold();
+        InitBootButton();
         InitAudio();
         InitWifi();
         StartWebSocket();
@@ -53,12 +70,24 @@ private:
     std::unique_ptr<AfeAudioProcessor> processor_;
     std::unique_ptr<OpusEncoderWrapper> opus_encoder_;
     std::unique_ptr<OpusDecoderWrapper> opus_decoder_;
+    OpusResampler input_resampler_;
+    OpusResampler reference_resampler_;
     esp_websocket_client_handle_t websocket_ = nullptr;
+    QueueHandle_t pcm_queue_ = nullptr;
     std::string session_id_;
     std::atomic<bool> ws_connected_{false};
     std::atomic<bool> server_ready_{false};
     std::atomic<bool> streaming_{false};
     std::atomic<bool> playing_tts_{false};
+    std::atomic<bool> vad_speaking_{false};
+    std::atomic<bool> heard_speech_{false};
+    std::atomic<bool> pending_abort_{false};
+    std::atomic<uint32_t> silence_since_ms_{0};
+    std::vector<int16_t> mic_buffer_;
+    std::vector<int16_t> reference_buffer_;
+    std::vector<int16_t> resampled_input_buffer_;
+    std::vector<int16_t> resampled_mic_buffer_;
+    std::vector<int16_t> resampled_reference_buffer_;
 
     static void InitPowerHold() {
         gpio_config_t config = {
@@ -70,6 +99,21 @@ private:
         };
         ESP_ERROR_CHECK(gpio_config(&config));
         gpio_set_level(POWER_CTRL, 0);
+    }
+
+    static uint32_t NowMs() {
+        return static_cast<uint32_t>(esp_timer_get_time() / 1000);
+    }
+
+    static void InitBootButton() {
+        gpio_config_t config = {
+            .pin_bit_mask = BIT64(kBootButtonGpio),
+            .mode = GPIO_MODE_INPUT,
+            .pull_up_en = GPIO_PULLUP_ENABLE,
+            .pull_down_en = GPIO_PULLDOWN_DISABLE,
+            .intr_type = GPIO_INTR_DISABLE,
+        };
+        ESP_ERROR_CHECK(gpio_config(&config));
     }
 
     void InitAudio() {
@@ -102,12 +146,16 @@ private:
         opus_encoder_ = std::make_unique<OpusEncoderWrapper>(16000, 1, OPUS_FRAME_DURATION_MS);
         opus_encoder_->SetComplexity(0);
         opus_decoder_ = std::make_unique<OpusDecoderWrapper>(16000, 1, OPUS_FRAME_DURATION_MS);
+        if (codec_->input_sample_rate() != kAfeSampleRate) {
+            input_resampler_.Configure(codec_->input_sample_rate(), kAfeSampleRate);
+            reference_resampler_.Configure(codec_->input_sample_rate(), kAfeSampleRate);
+        }
 
         processor_ = std::make_unique<AfeAudioProcessor>();
         processor_->Initialize(codec_.get());
         processor_->EnableDeviceAec(true);
         processor_->OnVadStateChange([this](bool speaking) { OnVadChange(speaking); });
-        processor_->OnOutput([this](std::vector<int16_t>&& pcm) { OnProcessedAudio(std::move(pcm)); });
+        processor_->OnOutput([this](const int16_t* pcm, size_t samples) { OnProcessedAudio(pcm, samples); });
     }
 
     static void WifiEventHandler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
@@ -173,6 +221,8 @@ private:
                 self->ws_connected_ = false;
                 self->server_ready_ = false;
                 self->streaming_ = false;
+                self->heard_speech_ = false;
+                self->silence_since_ms_ = 0;
                 ESP_LOGW(TAG, "WebSocket disconnected");
                 break;
             case WEBSOCKET_EVENT_DATA:
@@ -249,15 +299,37 @@ private:
     }
 
     void StartAudioTasks() {
-        xTaskCreate(
+        pcm_queue_ = xQueueCreate(kPcmQueueDepth, sizeof(PcmFrame));
+        ESP_ERROR_CHECK(pcm_queue_ != nullptr ? ESP_OK : ESP_FAIL);
+
+        BaseType_t ok = xTaskCreatePinnedToCore(
             [](void* arg) {
                 static_cast<EchoEarGroundApp*>(arg)->AudioFeedTask();
                 vTaskDelete(nullptr);
             },
-            "audio_feed", 4096, this, 5, nullptr);
+            "audio_feed", kAudioFeedTaskStackSize, this, 5, nullptr, 1);
+        ESP_ERROR_CHECK(ok == pdPASS ? ESP_OK : ESP_FAIL);
+
+        ok = xTaskCreatePinnedToCore(
+            [](void* arg) {
+                static_cast<EchoEarGroundApp*>(arg)->AudioEncodeTask();
+                vTaskDelete(nullptr);
+            },
+            "audio_encode", kAudioEncodeTaskStackSize, this, 4, nullptr, 1);
+        ESP_ERROR_CHECK(ok == pdPASS ? ESP_OK : ESP_FAIL);
+
+        ok = xTaskCreate(
+            [](void* arg) {
+                static_cast<EchoEarGroundApp*>(arg)->ControlTask();
+                vTaskDelete(nullptr);
+            },
+            "control", kControlTaskStackSize, this, 4, nullptr);
+        ESP_ERROR_CHECK(ok == pdPASS ? ESP_OK : ESP_FAIL);
     }
 
     void AudioFeedTask() {
+        ESP_LOGI(TAG, "audio_feed task running stack=%lu", static_cast<unsigned long>(kAudioFeedTaskStackSize));
+        std::vector<int16_t> data;
         while (true) {
             if (!processor_ || !processor_->IsRunning()) {
                 vTaskDelay(pdMS_TO_TICKS(20));
@@ -268,43 +340,171 @@ private:
                 vTaskDelay(pdMS_TO_TICKS(20));
                 continue;
             }
-            std::vector<int16_t> data(samples);
-            if (codec_->InputData(data)) {
+            if (data.size() != samples) {
+                data.resize(samples);
+            }
+            if (ReadAudioForAfe(data, samples)) {
                 processor_->Feed(data);
             }
         }
     }
 
-    void OnVadChange(bool speaking) {
-        ESP_LOGI(TAG, "VAD=%s", speaking ? "speech" : "silence");
-        if (!server_ready_ || !ws_connected_) {
-            return;
+    bool ReadAudioForAfe(std::vector<int16_t>& data, size_t samples) {
+        if (!codec_ || !codec_->input_enabled()) {
+            return false;
         }
-        if (speaking) {
-            if (playing_tts_) {
-                playing_tts_ = false;
-                SendAbort();
+
+        if (codec_->input_sample_rate() == kAfeSampleRate) {
+            data.resize(samples);
+            return codec_->InputData(data);
+        }
+
+        const size_t codec_samples = samples * codec_->input_sample_rate() / kAfeSampleRate;
+        data.resize(codec_samples);
+        if (!codec_->InputData(data)) {
+            return false;
+        }
+
+        if (codec_->input_channels() == 2) {
+            const size_t channel_samples = data.size() / 2;
+            mic_buffer_.resize(channel_samples);
+            reference_buffer_.resize(channel_samples);
+            for (size_t i = 0, j = 0; i < channel_samples; ++i, j += 2) {
+                mic_buffer_[i] = data[j];
+                reference_buffer_[i] = data[j + 1];
             }
-            if (!streaming_) {
-                streaming_ = true;
-                opus_encoder_->ResetState();
-                SendListen("start");
+
+            resampled_mic_buffer_.resize(input_resampler_.GetOutputSamples(static_cast<int>(mic_buffer_.size())));
+            resampled_reference_buffer_.resize(reference_resampler_.GetOutputSamples(static_cast<int>(reference_buffer_.size())));
+            input_resampler_.Process(mic_buffer_.data(), static_cast<int>(mic_buffer_.size()), resampled_mic_buffer_.data());
+            reference_resampler_.Process(reference_buffer_.data(), static_cast<int>(reference_buffer_.size()), resampled_reference_buffer_.data());
+
+            data.resize(resampled_mic_buffer_.size() + resampled_reference_buffer_.size());
+            for (size_t i = 0, j = 0; i < resampled_mic_buffer_.size(); ++i, j += 2) {
+                data[j] = resampled_mic_buffer_[i];
+                data[j + 1] = resampled_reference_buffer_[i];
             }
-        } else if (streaming_) {
-            streaming_ = false;
-            SendListen("stop");
+        } else {
+            resampled_input_buffer_.resize(input_resampler_.GetOutputSamples(static_cast<int>(data.size())));
+            input_resampler_.Process(data.data(), static_cast<int>(data.size()), resampled_input_buffer_.data());
+            data.assign(resampled_input_buffer_.begin(), resampled_input_buffer_.end());
+        }
+
+        return data.size() == samples;
+    }
+
+    void AudioEncodeTask() {
+        ESP_LOGI(TAG, "audio_encode task running stack=%lu", static_cast<unsigned long>(kAudioEncodeTaskStackSize));
+        PcmFrame frame = {};
+        while (true) {
+            if (xQueueReceive(pcm_queue_, &frame, portMAX_DELAY) != pdTRUE || frame.samples == 0) {
+                continue;
+            }
+            if (!server_ready_ || !ws_connected_ || !streaming_) {
+                continue;
+            }
+            std::vector<int16_t> pcm(frame.data, frame.data + frame.samples);
+            opus_encoder_->Encode(std::move(pcm), [this](std::vector<uint8_t>&& opus) {
+                if (!opus.empty() && ws_connected_ && streaming_) {
+                    esp_websocket_client_send_bin(websocket_, reinterpret_cast<const char*>(opus.data()), static_cast<int>(opus.size()), portMAX_DELAY);
+                }
+            });
         }
     }
 
-    void OnProcessedAudio(std::vector<int16_t>&& pcm) {
-        if (!server_ready_ || !ws_connected_ || !streaming_ || pcm.empty()) {
+    void ControlTask() {
+        ESP_LOGI(TAG, "control task running stack=%lu boot_gpio=%d", static_cast<unsigned long>(kControlTaskStackSize), kBootButtonGpio);
+        bool last_raw_pressed = gpio_get_level(kBootButtonGpio) == 0;
+        bool stable_pressed = last_raw_pressed;
+        uint32_t last_change_ms = NowMs();
+
+        while (true) {
+            const uint32_t now_ms = NowMs();
+            const bool raw_pressed = gpio_get_level(kBootButtonGpio) == 0;
+            if (raw_pressed != last_raw_pressed) {
+                last_raw_pressed = raw_pressed;
+                last_change_ms = now_ms;
+            }
+            if (raw_pressed != stable_pressed && now_ms - last_change_ms >= 50) {
+                stable_pressed = raw_pressed;
+                if (stable_pressed) {
+                    BeginListeningFromBootButton();
+                }
+            }
+
+            if (pending_abort_.exchange(false)) {
+                SendAbort();
+            }
+
+            const uint32_t silence_since = silence_since_ms_.load();
+            if (streaming_ && heard_speech_ && !vad_speaking_ && silence_since != 0 &&
+                now_ms - silence_since >= kVadSilenceStopMs) {
+                StopListeningForSilence();
+            }
+
+            vTaskDelay(pdMS_TO_TICKS(20));
+        }
+    }
+
+    void OnVadChange(bool speaking) {
+        ESP_LOGI(TAG, "VAD=%s", speaking ? "speech" : "silence");
+        if (speaking) {
+            vad_speaking_ = true;
+            heard_speech_ = true;
+            silence_since_ms_ = 0;
+            if (playing_tts_) {
+                playing_tts_ = false;
+                pending_abort_ = true;
+            }
+        } else {
+            vad_speaking_ = false;
+            silence_since_ms_ = NowMs();
+        }
+    }
+
+    void OnProcessedAudio(const int16_t* pcm, size_t samples) {
+        if (!pcm_queue_ || !server_ready_ || !ws_connected_ || !streaming_ || pcm == nullptr || samples == 0) {
             return;
         }
-        opus_encoder_->Encode(std::move(pcm), [this](std::vector<uint8_t>&& opus) {
-            if (!opus.empty() && ws_connected_) {
-                esp_websocket_client_send_bin(websocket_, reinterpret_cast<const char*>(opus.data()), static_cast<int>(opus.size()), portMAX_DELAY);
-            }
-        });
+        if (samples > kMaxPcmFrameSamples) {
+            ESP_LOGW(TAG, "PCM frame too large: %u samples", static_cast<unsigned int>(samples));
+            return;
+        }
+
+        PcmFrame frame = {};
+        frame.samples = static_cast<uint16_t>(samples);
+        std::memcpy(frame.data, pcm, samples * sizeof(int16_t));
+        xQueueSend(pcm_queue_, &frame, 0);
+    }
+
+    void BeginListeningFromBootButton() {
+        if (!server_ready_ || !ws_connected_) {
+            ESP_LOGW(TAG, "BOOT listen ignored: server not ready");
+            return;
+        }
+        if (streaming_) {
+            ESP_LOGI(TAG, "BOOT listen ignored: already listening");
+            return;
+        }
+
+        heard_speech_ = vad_speaking_.load();
+        silence_since_ms_ = 0;
+        opus_encoder_->ResetState();
+        SendListen("start");
+        streaming_ = true;
+        ESP_LOGI(TAG, "BOOT listen started; waiting for %lums VAD silence after speech",
+                 static_cast<unsigned long>(kVadSilenceStopMs));
+    }
+
+    void StopListeningForSilence() {
+        if (!streaming_.exchange(false)) {
+            return;
+        }
+        heard_speech_ = false;
+        silence_since_ms_ = 0;
+        SendListen("stop");
+        ESP_LOGI(TAG, "BOOT listen stopped after %lums VAD silence",
+                 static_cast<unsigned long>(kVadSilenceStopMs));
     }
 
     void SendListen(const char* state) {

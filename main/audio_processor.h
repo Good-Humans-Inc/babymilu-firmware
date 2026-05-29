@@ -13,9 +13,8 @@ public:
     virtual void Start() = 0;
     virtual void Stop() = 0;
     virtual bool IsRunning() = 0;
-    virtual void OnOutput(std::function<void(std::vector<int16_t>&& data)> callback) = 0;
+    virtual void OnOutput(std::function<void(const int16_t* data, size_t samples)> callback) = 0;
     virtual void OnVadStateChange(std::function<void(bool speaking)> callback) = 0;
     virtual size_t GetFeedSize() = 0;
     virtual void EnableDeviceAec(bool enable) = 0;
 };
-
