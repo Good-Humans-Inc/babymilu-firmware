@@ -17,6 +17,6 @@ idf_component_register(
         esp_wifi
         esp_websocket_client
         nvs_flash
+        78__esp-opus
         78__esp-opus-encoder
 )
-

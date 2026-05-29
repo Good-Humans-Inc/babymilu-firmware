@@ -2,6 +2,8 @@
 
 #include <esp_log.h>
 
+#include <string>
+
 #define TAG "AfeAudioProcessor"
 #define PROCESSOR_RUNNING 0x01
 
@@ -157,4 +159,3 @@ void AfeAudioProcessor::EnableDeviceAec(bool enable) {
         afe_iface_->enable_vad(afe_data_);
     }
 }
-
