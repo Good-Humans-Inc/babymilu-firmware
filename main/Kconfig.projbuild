@@ -1,0 +1,26 @@
+menu "EchoEar Ground-Up"
+
+config ECHOEAR_WIFI_SSID
+    string "Wi-Fi SSID"
+    default ""
+
+config ECHOEAR_WIFI_PASSWORD
+    string "Wi-Fi Password"
+    default ""
+
+config ECHOEAR_WEBSOCKET_URL
+    string "EchoEar WebSocket URL"
+    default "ws://34.30.157.45:8000/xiaozhi/v1/"
+
+config USE_AUDIO_PROCESSOR
+    bool "Enable ESP-SR AFE Audio Processor"
+    default y
+    depends on IDF_TARGET_ESP32S3 && SPIRAM
+
+config USE_DEVICE_AEC
+    bool "Enable Device-Side AEC"
+    default y
+    depends on USE_AUDIO_PROCESSOR
+
+endmenu
+
