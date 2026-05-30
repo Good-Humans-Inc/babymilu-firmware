@@ -42,16 +42,17 @@ static constexpr uint32_t kAudioEncodeTaskStackSize = 4096 * 10;
 static constexpr uint32_t kNetworkTaskStackSize = 4096 * 3;
 static constexpr uint32_t kAudioPlaybackTaskStackSize = 4096 * 4;
 static constexpr uint32_t kControlTaskStackSize = 4096 * 2;
-static constexpr uint32_t kVadSilenceStopMs = 2000;
+static constexpr uint32_t kVadSilenceStopMs = 1000;
+static constexpr bool kEnableTtsVadInterrupt = false;
 static constexpr uint32_t kTtsVadGraceMs = 1000;
 static constexpr uint32_t kTtsVadDebounceMs = 400;
 static constexpr uint32_t kTtsPlaybackTailMs = 500;
 static constexpr UBaseType_t kPcmQueueDepth = 4;
 static constexpr UBaseType_t kOpusQueueDepth = 8;
-static constexpr UBaseType_t kIncomingOpusQueueDepth = 4;
+static constexpr UBaseType_t kIncomingOpusQueueDepth = 12;
 static constexpr size_t kMaxPcmFrameSamples = 2048;
 static constexpr size_t kMaxOpusFrameBytes = 1000;
-static constexpr size_t kMaxIncomingOpusFrameBytes = 4096;
+static constexpr size_t kMaxIncomingOpusFrameBytes = 1000;
 static constexpr UBaseType_t kInternalMemoryCaps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
 
 struct PcmFrame {
@@ -927,6 +928,9 @@ private:
     }
 
     void CheckTtsVadInterrupt(uint32_t now_ms) {
+        if (!kEnableTtsVadInterrupt) {
+            return;
+        }
         if (!playing_tts_ || !vad_speaking_) {
             return;
         }
