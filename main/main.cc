@@ -43,6 +43,9 @@ static constexpr uint32_t kNetworkTaskStackSize = 4096 * 3;
 static constexpr uint32_t kAudioPlaybackTaskStackSize = 4096 * 4;
 static constexpr uint32_t kControlTaskStackSize = 4096 * 2;
 static constexpr uint32_t kVadSilenceStopMs = 2000;
+static constexpr uint32_t kTtsVadGraceMs = 1000;
+static constexpr uint32_t kTtsVadDebounceMs = 400;
+static constexpr uint32_t kTtsPlaybackTailMs = 500;
 static constexpr UBaseType_t kPcmQueueDepth = 4;
 static constexpr UBaseType_t kOpusQueueDepth = 8;
 static constexpr UBaseType_t kIncomingOpusQueueDepth = 4;
@@ -118,6 +121,9 @@ private:
     std::atomic<bool> pending_abort_{false};
     std::atomic<bool> pending_listen_restart_{false};
     std::atomic<uint32_t> silence_since_ms_{0};
+    std::atomic<uint32_t> tts_started_ms_{0};
+    std::atomic<uint32_t> tts_stop_ms_{0};
+    std::atomic<uint32_t> tts_vad_speech_since_ms_{0};
     std::atomic<int> incoming_tts_frames_{0};
     std::vector<int16_t> mic_buffer_;
     std::vector<int16_t> reference_buffer_;
@@ -397,6 +403,9 @@ private:
                 if (strcmp(state->valuestring, "start") == 0 || strcmp(state->valuestring, "sentence_start") == 0) {
                     streaming_ = false;
                     ResetVadTracking();
+                    tts_started_ms_ = NowMs();
+                    tts_stop_ms_ = 0;
+                    tts_vad_speech_since_ms_ = 0;
                     playing_tts_ = true;
                     pending_listen_restart_ = false;
                     if (processor_) {
@@ -405,6 +414,8 @@ private:
                     codec_->EnableOutput(true);
                 } else if (strcmp(state->valuestring, "stop") == 0) {
                     playing_tts_ = false;
+                    tts_stop_ms_ = NowMs();
+                    tts_vad_speech_since_ms_ = 0;
                     if (conversation_active_) {
                         pending_listen_restart_ = true;
                     }
@@ -702,6 +713,8 @@ private:
                 SendAbort();
             }
 
+            CheckTtsVadInterrupt(now_ms);
+
             if (pending_listen_restart_.exchange(false)) {
                 ContinueConversationAfterTts();
             }
@@ -718,15 +731,22 @@ private:
 
     void OnVadChange(bool speaking) {
         ESP_LOGI(TAG, "VAD=%s", speaking ? "speech" : "silence");
+        if (playing_tts_) {
+            vad_speaking_ = speaking;
+            if (speaking) {
+                if (tts_vad_speech_since_ms_.load() == 0) {
+                    tts_vad_speech_since_ms_ = NowMs();
+                }
+            } else {
+                tts_vad_speech_since_ms_ = 0;
+            }
+            return;
+        }
+
         if (speaking) {
             vad_speaking_ = true;
             heard_speech_ = true;
             silence_since_ms_ = 0;
-            if (playing_tts_) {
-                playing_tts_ = false;
-                pending_abort_ = true;
-                DrainIncomingAudio();
-            }
         } else {
             vad_speaking_ = false;
             silence_since_ms_ = NowMs();
@@ -809,6 +829,7 @@ private:
         vad_speaking_ = false;
         heard_speech_ = false;
         silence_since_ms_ = 0;
+        tts_vad_speech_since_ms_ = 0;
     }
 
     void ToggleConversationFromBootButton() {
@@ -848,6 +869,11 @@ private:
             return;
         }
         if (incoming_tts_frames_.load() > 0) {
+            pending_listen_restart_ = true;
+            return;
+        }
+        const uint32_t tts_stop_ms = tts_stop_ms_.load();
+        if (tts_stop_ms != 0 && NowMs() - tts_stop_ms < kTtsPlaybackTailMs) {
             pending_listen_restart_ = true;
             return;
         }
@@ -900,6 +926,31 @@ private:
                  static_cast<unsigned long>(kVadSilenceStopMs));
     }
 
+    void CheckTtsVadInterrupt(uint32_t now_ms) {
+        if (!playing_tts_ || !vad_speaking_) {
+            return;
+        }
+
+        const uint32_t tts_started_ms = tts_started_ms_.load();
+        const uint32_t vad_since_ms = tts_vad_speech_since_ms_.load();
+        if (tts_started_ms == 0 || vad_since_ms == 0) {
+            return;
+        }
+        if (now_ms - tts_started_ms < kTtsVadGraceMs) {
+            return;
+        }
+        if (now_ms - vad_since_ms < kTtsVadDebounceMs) {
+            return;
+        }
+
+        ESP_LOGI(TAG, "VAD barge-in confirmed during TTS after %lums; aborting playback",
+                 static_cast<unsigned long>(now_ms - vad_since_ms));
+        playing_tts_ = false;
+        tts_vad_speech_since_ms_ = 0;
+        pending_abort_ = true;
+        DrainIncomingAudio();
+    }
+
     void DrainIncomingAudio() {
         if (!filled_incoming_opus_queue_ || !free_incoming_opus_queue_) {
             incoming_tts_frames_ = 0;
@@ -950,6 +1001,7 @@ private:
             cJSON_AddStringToObject(root, "session_id", session_id_.c_str());
         }
         char* text = cJSON_PrintUnformatted(root);
+        ESP_LOGI(TAG, "TX abort:vad_interrupt");
         SendText(text);
         cJSON_free(text);
         cJSON_Delete(root);
