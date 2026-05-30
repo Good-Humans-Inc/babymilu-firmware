@@ -8,7 +8,7 @@
 
 #define TAG "AfeAudioProcessor"
 #define PROCESSOR_RUNNING 0x01
-static constexpr uint32_t kAfeFetchTaskStackSize = 4096 * 6;
+static constexpr uint32_t kAfeFetchTaskStackSize = 4096 * 2;
 static constexpr UBaseType_t kInternalMemoryCaps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
 
 AfeAudioProcessor::AfeAudioProcessor() {

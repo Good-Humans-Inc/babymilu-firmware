@@ -38,9 +38,9 @@
 static constexpr int kAfeSampleRate = 16000;
 static constexpr gpio_num_t kBootButtonGpio = GPIO_NUM_0;
 static constexpr uint32_t kAudioFeedTaskStackSize = 4096 * 3;
-static constexpr uint32_t kAudioEncodeTaskStackSize = 4096 * 8;
-static constexpr uint32_t kNetworkTaskStackSize = 4096 * 4;
-static constexpr uint32_t kAudioPlaybackTaskStackSize = 4096 * 6;
+static constexpr uint32_t kAudioEncodeTaskStackSize = 2048 * 12;
+static constexpr uint32_t kNetworkTaskStackSize = 4096 * 3;
+static constexpr uint32_t kAudioPlaybackTaskStackSize = 4096 * 4;
 static constexpr uint32_t kControlTaskStackSize = 4096 * 2;
 static constexpr uint32_t kVadSilenceStopMs = 2000;
 static constexpr UBaseType_t kPcmQueueDepth = 4;
@@ -136,6 +136,13 @@ private:
 
     static uint32_t NowMs() {
         return static_cast<uint32_t>(esp_timer_get_time() / 1000);
+    }
+
+    static void LogHeap(const char* label) {
+        ESP_LOGI(TAG, "%s heap internal=%u psram=%u",
+                 label,
+                 static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+                 static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)));
     }
 
     static void InitBootButton() {
@@ -390,6 +397,7 @@ private:
     }
 
     void StartAudioTasks() {
+        LogHeap("before audio tasks");
         free_pcm_queue_ = xQueueCreateWithCaps(kPcmQueueDepth, sizeof(uint8_t), kInternalMemoryCaps);
         filled_pcm_queue_ = xQueueCreateWithCaps(kPcmQueueDepth, sizeof(uint8_t), kInternalMemoryCaps);
         free_opus_queue_ = xQueueCreateWithCaps(kOpusQueueDepth, sizeof(uint8_t), kInternalMemoryCaps);
@@ -445,6 +453,7 @@ private:
             },
             "control", kControlTaskStackSize, this, 4, nullptr, 0, kInternalMemoryCaps);
         ESP_ERROR_CHECK(ok == pdPASS ? ESP_OK : ESP_FAIL);
+        LogHeap("after audio tasks");
     }
 
     void AudioFeedTask() {
