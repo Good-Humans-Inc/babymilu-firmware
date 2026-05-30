@@ -79,10 +79,10 @@ public:
         ESP_ERROR_CHECK(esp_event_loop_create_default());
         InitPowerHold();
         InitBootButton();
+        InitWifi();
         InitAudio();
         StartAudioTasks();
-        InitWifi();
-        ESP_LOGI(TAG, "startup ready; WebSocket/session handshake is deferred until BOOT");
+        ESP_LOGI(TAG, "startup ready; Wi-Fi driver owns buffers, WebSocket/session handshake is deferred until BOOT");
     }
 
 private:
