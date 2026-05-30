@@ -5,6 +5,7 @@
 #include <cJSON.h>
 #include <driver/gpio.h>
 #include <driver/i2c_master.h>
+#include <esp_err.h>
 #include <esp_event.h>
 #include <esp_heap_caps.h>
 #include <esp_log.h>
@@ -33,17 +34,21 @@
 
 #define TAG "EchoEarGround"
 #define WIFI_CONNECTED_BIT BIT0
+#define SERVER_READY_BIT BIT1
 static constexpr int kAfeSampleRate = 16000;
 static constexpr gpio_num_t kBootButtonGpio = GPIO_NUM_0;
 static constexpr uint32_t kAudioFeedTaskStackSize = 4096 * 3;
-static constexpr uint32_t kAudioEncodeTaskStackSize = 4096 * 4;
+static constexpr uint32_t kAudioEncodeTaskStackSize = 4096 * 8;
 static constexpr uint32_t kNetworkTaskStackSize = 4096 * 4;
+static constexpr uint32_t kAudioPlaybackTaskStackSize = 4096 * 6;
 static constexpr uint32_t kControlTaskStackSize = 4096 * 2;
 static constexpr uint32_t kVadSilenceStopMs = 2000;
 static constexpr UBaseType_t kPcmQueueDepth = 4;
 static constexpr UBaseType_t kOpusQueueDepth = 8;
+static constexpr UBaseType_t kIncomingOpusQueueDepth = 4;
 static constexpr size_t kMaxPcmFrameSamples = 2048;
 static constexpr size_t kMaxOpusFrameBytes = 1000;
+static constexpr size_t kMaxIncomingOpusFrameBytes = 4096;
 static constexpr UBaseType_t kInternalMemoryCaps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
 
 struct PcmFrame {
@@ -54,6 +59,11 @@ struct PcmFrame {
 struct OpusFrame {
     uint16_t bytes = 0;
     uint8_t data[kMaxOpusFrameBytes] = {};
+};
+
+struct IncomingOpusFrame {
+    uint16_t bytes = 0;
+    uint8_t data[kMaxIncomingOpusFrameBytes] = {};
 };
 
 class EchoEarGroundApp {
@@ -71,9 +81,8 @@ public:
         InitBootButton();
         InitAudio();
         StartAudioTasks();
-        processor_->Start();
         InitWifi();
-        StartWebSocket();
+        ESP_LOGI(TAG, "startup ready; WebSocket/session handshake is deferred until BOOT");
     }
 
 private:
@@ -90,8 +99,11 @@ private:
     QueueHandle_t filled_pcm_queue_ = nullptr;
     QueueHandle_t free_opus_queue_ = nullptr;
     QueueHandle_t filled_opus_queue_ = nullptr;
+    QueueHandle_t free_incoming_opus_queue_ = nullptr;
+    QueueHandle_t filled_incoming_opus_queue_ = nullptr;
     PcmFrame pcm_pool_[kPcmQueueDepth];
     OpusFrame opus_pool_[kOpusQueueDepth];
+    IncomingOpusFrame incoming_opus_pool_[kIncomingOpusQueueDepth];
     std::mutex websocket_send_mutex_;
     std::string session_id_;
     std::atomic<bool> ws_connected_{false};
@@ -189,6 +201,7 @@ private:
         if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
             esp_wifi_connect();
         } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+            xEventGroupClearBits(self->wifi_events_, WIFI_CONNECTED_BIT | SERVER_READY_BIT);
             ESP_LOGW(TAG, "Wi-Fi disconnected, reconnecting");
             esp_wifi_connect();
         } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
@@ -219,18 +232,66 @@ private:
         ESP_ERROR_CHECK(esp_wifi_start());
     }
 
-    void StartWebSocket() {
+    bool EnsureWebSocketReady() {
         if (std::string(CONFIG_ECHOEAR_WIFI_SSID).empty()) {
-            return;
+            ESP_LOGW(TAG, "BOOT listen ignored: Wi-Fi SSID is empty");
+            return false;
         }
-        xEventGroupWaitBits(wifi_events_, WIFI_CONNECTED_BIT, pdFALSE, pdTRUE, portMAX_DELAY);
 
-        esp_websocket_client_config_t ws_cfg = {};
-        ws_cfg.uri = CONFIG_ECHOEAR_WEBSOCKET_URL;
-        ws_cfg.disable_auto_reconnect = false;
-        websocket_ = esp_websocket_client_init(&ws_cfg);
-        ESP_ERROR_CHECK(esp_websocket_register_events(websocket_, WEBSOCKET_EVENT_ANY, &WebSocketEventHandler, this));
-        ESP_ERROR_CHECK(esp_websocket_client_start(websocket_));
+        if (server_ready_ && ws_connected_) {
+            return true;
+        }
+
+        ESP_LOGI(TAG, "BOOT waiting for Wi-Fi before WebSocket open");
+        EventBits_t bits = xEventGroupWaitBits(
+            wifi_events_, WIFI_CONNECTED_BIT, pdFALSE, pdTRUE, pdMS_TO_TICKS(15000));
+        if ((bits & WIFI_CONNECTED_BIT) == 0) {
+            ESP_LOGW(TAG, "BOOT listen ignored: Wi-Fi not connected");
+            return false;
+        }
+
+        if (websocket_ == nullptr) {
+            ESP_LOGI(TAG, "BOOT opening WebSocket: %s", CONFIG_ECHOEAR_WEBSOCKET_URL);
+            server_ready_ = false;
+            session_id_.clear();
+            xEventGroupClearBits(wifi_events_, SERVER_READY_BIT);
+
+            esp_websocket_client_config_t ws_cfg = {};
+            ws_cfg.uri = CONFIG_ECHOEAR_WEBSOCKET_URL;
+            ws_cfg.disable_auto_reconnect = false;
+            ws_cfg.reconnect_timeout_ms = 10000;
+            ws_cfg.network_timeout_ms = 10000;
+            websocket_ = esp_websocket_client_init(&ws_cfg);
+            if (websocket_ == nullptr) {
+                ESP_LOGE(TAG, "failed to create WebSocket client");
+                return false;
+            }
+
+            esp_err_t err = esp_websocket_register_events(websocket_, WEBSOCKET_EVENT_ANY, &WebSocketEventHandler, this);
+            if (err != ESP_OK) {
+                ESP_LOGE(TAG, "failed to register WebSocket events: %s", esp_err_to_name(err));
+                esp_websocket_client_destroy(websocket_);
+                websocket_ = nullptr;
+                return false;
+            }
+
+            err = esp_websocket_client_start(websocket_);
+            if (err != ESP_OK) {
+                ESP_LOGE(TAG, "failed to start WebSocket client: %s", esp_err_to_name(err));
+                esp_websocket_client_destroy(websocket_);
+                websocket_ = nullptr;
+                return false;
+            }
+        } else {
+            ESP_LOGI(TAG, "BOOT waiting for existing WebSocket/server hello");
+        }
+
+        bits = xEventGroupWaitBits(wifi_events_, SERVER_READY_BIT, pdFALSE, pdTRUE, pdMS_TO_TICKS(10000));
+        if ((bits & SERVER_READY_BIT) == 0 || !server_ready_ || !ws_connected_) {
+            ESP_LOGW(TAG, "BOOT listen ignored: server hello timeout");
+            return false;
+        }
+        return true;
     }
 
     static void WebSocketEventHandler(void* handler_args, esp_event_base_t base, int32_t event_id, void* event_data) {
@@ -240,6 +301,9 @@ private:
         switch (event_id) {
             case WEBSOCKET_EVENT_CONNECTED:
                 self->ws_connected_ = true;
+                self->server_ready_ = false;
+                self->session_id_.clear();
+                xEventGroupClearBits(self->wifi_events_, SERVER_READY_BIT);
                 ESP_LOGI(TAG, "WebSocket connected");
                 self->SendHello();
                 break;
@@ -248,7 +312,12 @@ private:
                 self->server_ready_ = false;
                 self->streaming_ = false;
                 self->heard_speech_ = false;
+                self->vad_speaking_ = false;
                 self->silence_since_ms_ = 0;
+                if (self->processor_) {
+                    self->processor_->Stop();
+                }
+                xEventGroupClearBits(self->wifi_events_, SERVER_READY_BIT);
                 ESP_LOGW(TAG, "WebSocket disconnected");
                 break;
             case WEBSOCKET_EVENT_DATA:
@@ -297,7 +366,7 @@ private:
                 session_id_ = session->valuestring;
             }
             server_ready_ = true;
-            processor_->Start();
+            xEventGroupSetBits(wifi_events_, SERVER_READY_BIT);
             ESP_LOGI(TAG, "server hello ok session=%s", session_id_.c_str());
         } else if (cJSON_IsString(type) && strcmp(type->valuestring, "tts") == 0) {
             cJSON* state = cJSON_GetObjectItem(root, "state");
@@ -314,14 +383,10 @@ private:
     }
 
     void HandleBinary(const esp_websocket_event_data_t* data) {
-        if (!codec_ || !opus_decoder_) {
+        if (data == nullptr || data->data_ptr == nullptr || data->data_len <= 0) {
             return;
         }
-        std::vector<uint8_t> opus(data->data_ptr, data->data_ptr + data->data_len);
-        std::vector<int16_t> pcm;
-        if (opus_decoder_->Decode(std::move(opus), pcm) && !pcm.empty()) {
-            codec_->OutputData(pcm);
-        }
+        QueueIncomingAudio(reinterpret_cast<const uint8_t*>(data->data_ptr), static_cast<size_t>(data->data_len));
     }
 
     void StartAudioTasks() {
@@ -329,8 +394,11 @@ private:
         filled_pcm_queue_ = xQueueCreateWithCaps(kPcmQueueDepth, sizeof(uint8_t), kInternalMemoryCaps);
         free_opus_queue_ = xQueueCreateWithCaps(kOpusQueueDepth, sizeof(uint8_t), kInternalMemoryCaps);
         filled_opus_queue_ = xQueueCreateWithCaps(kOpusQueueDepth, sizeof(uint8_t), kInternalMemoryCaps);
+        free_incoming_opus_queue_ = xQueueCreateWithCaps(kIncomingOpusQueueDepth, sizeof(uint8_t), kInternalMemoryCaps);
+        filled_incoming_opus_queue_ = xQueueCreateWithCaps(kIncomingOpusQueueDepth, sizeof(uint8_t), kInternalMemoryCaps);
         ESP_ERROR_CHECK(free_pcm_queue_ != nullptr && filled_pcm_queue_ != nullptr &&
-                            free_opus_queue_ != nullptr && filled_opus_queue_ != nullptr
+                            free_opus_queue_ != nullptr && filled_opus_queue_ != nullptr &&
+                            free_incoming_opus_queue_ != nullptr && filled_incoming_opus_queue_ != nullptr
                         ? ESP_OK
                         : ESP_FAIL);
         for (uint8_t i = 0; i < kPcmQueueDepth; ++i) {
@@ -338,6 +406,9 @@ private:
         }
         for (uint8_t i = 0; i < kOpusQueueDepth; ++i) {
             ESP_ERROR_CHECK(xQueueSend(free_opus_queue_, &i, 0) == pdTRUE ? ESP_OK : ESP_FAIL);
+        }
+        for (uint8_t i = 0; i < kIncomingOpusQueueDepth; ++i) {
+            ESP_ERROR_CHECK(xQueueSend(free_incoming_opus_queue_, &i, 0) == pdTRUE ? ESP_OK : ESP_FAIL);
         }
 
         BaseType_t ok = xTaskCreatePinnedToCoreWithCaps(
@@ -351,7 +422,7 @@ private:
             [](void* arg) {
                 static_cast<EchoEarGroundApp*>(arg)->AudioEncodeTask();
             },
-            "audio_encode", kAudioEncodeTaskStackSize, this, 4, nullptr, 1, kInternalMemoryCaps);
+            "audio_encode", kAudioEncodeTaskStackSize, this, 4, nullptr, tskNO_AFFINITY, kInternalMemoryCaps);
         ESP_ERROR_CHECK(ok == pdPASS ? ESP_OK : ESP_FAIL);
 
         ok = xTaskCreatePinnedToCoreWithCaps(
@@ -359,6 +430,13 @@ private:
                 static_cast<EchoEarGroundApp*>(arg)->NetworkSendTask();
             },
             "net_send", kNetworkTaskStackSize, this, 3, nullptr, 0, kInternalMemoryCaps);
+        ESP_ERROR_CHECK(ok == pdPASS ? ESP_OK : ESP_FAIL);
+
+        ok = xTaskCreatePinnedToCoreWithCaps(
+            [](void* arg) {
+                static_cast<EchoEarGroundApp*>(arg)->AudioPlaybackTask();
+            },
+            "tts_play", kAudioPlaybackTaskStackSize, this, 3, nullptr, tskNO_AFFINITY, kInternalMemoryCaps);
         ESP_ERROR_CHECK(ok == pdPASS ? ESP_OK : ESP_FAIL);
 
         ok = xTaskCreatePinnedToCoreWithCaps(
@@ -510,6 +588,32 @@ private:
         }
     }
 
+    void AudioPlaybackTask() {
+        ESP_LOGI(TAG, "tts_play task running stack=%lu", static_cast<unsigned long>(kAudioPlaybackTaskStackSize));
+        while (true) {
+            uint8_t frame_index = 0;
+            if (xQueueReceive(filled_incoming_opus_queue_, &frame_index, portMAX_DELAY) != pdTRUE ||
+                frame_index >= kIncomingOpusQueueDepth) {
+                continue;
+            }
+
+            IncomingOpusFrame& frame = incoming_opus_pool_[frame_index];
+            if (codec_ && opus_decoder_ && frame.bytes > 0) {
+                std::vector<uint8_t> opus(frame.data, frame.data + frame.bytes);
+                std::vector<int16_t> pcm;
+                if (opus_decoder_->Decode(std::move(opus), pcm) && !pcm.empty()) {
+                    if (!codec_->output_enabled()) {
+                        codec_->EnableOutput(true);
+                    }
+                    codec_->OutputData(pcm);
+                }
+            }
+
+            frame.bytes = 0;
+            xQueueSend(free_incoming_opus_queue_, &frame_index, 0);
+        }
+    }
+
     void ControlTask() {
         ESP_LOGI(TAG, "control task running stack=%lu boot_gpio=%d", static_cast<unsigned long>(kControlTaskStackSize), kBootButtonGpio);
         bool last_raw_pressed = gpio_get_level(kBootButtonGpio) == 0;
@@ -606,9 +710,32 @@ private:
         }
     }
 
+    void QueueIncomingAudio(const uint8_t* opus, size_t bytes) {
+        if (!free_incoming_opus_queue_ || !filled_incoming_opus_queue_ || opus == nullptr || bytes == 0) {
+            return;
+        }
+        if (bytes > kMaxIncomingOpusFrameBytes) {
+            ESP_LOGW(TAG, "incoming Opus frame too large: %u bytes", static_cast<unsigned int>(bytes));
+            return;
+        }
+
+        uint8_t frame_index = 0;
+        if (xQueueReceive(free_incoming_opus_queue_, &frame_index, 0) != pdTRUE ||
+            frame_index >= kIncomingOpusQueueDepth) {
+            return;
+        }
+
+        IncomingOpusFrame& frame = incoming_opus_pool_[frame_index];
+        frame.bytes = static_cast<uint16_t>(bytes);
+        std::memcpy(frame.data, opus, bytes);
+        if (xQueueSend(filled_incoming_opus_queue_, &frame_index, 0) != pdTRUE) {
+            frame.bytes = 0;
+            xQueueSend(free_incoming_opus_queue_, &frame_index, 0);
+        }
+    }
+
     void BeginListeningFromBootButton() {
-        if (!server_ready_ || !ws_connected_) {
-            ESP_LOGW(TAG, "BOOT listen ignored: server not ready");
+        if (!EnsureWebSocketReady()) {
             return;
         }
         if (streaming_) {
@@ -616,7 +743,9 @@ private:
             return;
         }
 
-        heard_speech_ = vad_speaking_.load();
+        processor_->Stop();
+        vad_speaking_ = false;
+        heard_speech_ = false;
         silence_since_ms_ = 0;
         ResetOpusEncoder();
         if (!SendListen("start")) {
@@ -625,6 +754,7 @@ private:
         }
         vTaskDelay(pdMS_TO_TICKS(50));
         streaming_ = true;
+        processor_->Start();
         ESP_LOGI(TAG, "BOOT listen started; waiting for %lums VAD silence after speech",
                  static_cast<unsigned long>(kVadSilenceStopMs));
     }
@@ -634,8 +764,12 @@ private:
             return;
         }
         heard_speech_ = false;
+        vad_speaking_ = false;
         silence_since_ms_ = 0;
         SendListen("stop");
+        if (processor_) {
+            processor_->Stop();
+        }
         ESP_LOGI(TAG, "BOOT listen stopped after %lums VAD silence",
                  static_cast<unsigned long>(kVadSilenceStopMs));
     }

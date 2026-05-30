@@ -87,7 +87,11 @@ size_t AfeAudioProcessor::GetFeedSize() {
 }
 
 void AfeAudioProcessor::Feed(const std::vector<int16_t>& data) {
-    if (afe_data_ != nullptr && !data.empty()) {
+    if (afe_data_ == nullptr || data.empty()) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(feed_mutex_);
+    if (IsRunning()) {
         afe_iface_->feed(afe_data_, data.data());
     }
 }
@@ -98,9 +102,11 @@ void AfeAudioProcessor::Start() {
 
 void AfeAudioProcessor::Stop() {
     xEventGroupClearBits(event_group_, PROCESSOR_RUNNING);
+    std::lock_guard<std::mutex> lock(feed_mutex_);
     if (afe_data_ != nullptr) {
         afe_iface_->reset_buffer(afe_data_);
     }
+    is_speaking_ = false;
 }
 
 bool AfeAudioProcessor::IsRunning() {

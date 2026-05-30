@@ -6,6 +6,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/event_groups.h>
 #include <functional>
+#include <mutex>
 
 class AfeAudioProcessor : public AudioProcessor {
 public:
@@ -28,6 +29,7 @@ private:
     esp_afe_sr_data_t* afe_data_ = nullptr;
     AudioCodec* codec_ = nullptr;
     bool is_speaking_ = false;
+    std::mutex feed_mutex_;
     std::function<void(const int16_t* data, size_t samples)> output_callback_;
     std::function<void(bool speaking)> vad_state_change_callback_;
 
