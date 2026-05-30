@@ -38,7 +38,7 @@
 static constexpr int kAfeSampleRate = 16000;
 static constexpr gpio_num_t kBootButtonGpio = GPIO_NUM_0;
 static constexpr uint32_t kAudioFeedTaskStackSize = 4096 * 3;
-static constexpr uint32_t kAudioEncodeTaskStackSize = 2048 * 12;
+static constexpr uint32_t kAudioEncodeTaskStackSize = 4096 * 10;
 static constexpr uint32_t kNetworkTaskStackSize = 4096 * 3;
 static constexpr uint32_t kAudioPlaybackTaskStackSize = 4096 * 4;
 static constexpr uint32_t kControlTaskStackSize = 4096 * 2;
@@ -120,6 +120,9 @@ private:
     std::vector<int16_t> resampled_mic_buffer_;
     std::vector<int16_t> resampled_reference_buffer_;
     std::vector<int16_t> opus_input_buffer_;
+    StackType_t* audio_encode_task_stack_ = nullptr;
+    StaticTask_t audio_encode_task_buffer_ = {};
+    TaskHandle_t audio_encode_task_handle_ = nullptr;
     int opus_frame_samples_ = 0;
 
     static void InitPowerHold() {
@@ -426,12 +429,21 @@ private:
             "audio_feed", kAudioFeedTaskStackSize, this, 5, nullptr, 1, kInternalMemoryCaps);
         ESP_ERROR_CHECK(ok == pdPASS ? ESP_OK : ESP_FAIL);
 
-        ok = xTaskCreatePinnedToCoreWithCaps(
+        audio_encode_task_stack_ = static_cast<StackType_t*>(
+            heap_caps_malloc(kAudioEncodeTaskStackSize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+        ESP_ERROR_CHECK(audio_encode_task_stack_ != nullptr ? ESP_OK : ESP_ERR_NO_MEM);
+        audio_encode_task_handle_ = xTaskCreateStaticPinnedToCore(
             [](void* arg) {
                 static_cast<EchoEarGroundApp*>(arg)->AudioEncodeTask();
             },
-            "audio_encode", kAudioEncodeTaskStackSize, this, 4, nullptr, tskNO_AFFINITY, kInternalMemoryCaps);
-        ESP_ERROR_CHECK(ok == pdPASS ? ESP_OK : ESP_FAIL);
+            "audio_encode",
+            kAudioEncodeTaskStackSize,
+            this,
+            4,
+            audio_encode_task_stack_,
+            &audio_encode_task_buffer_,
+            tskNO_AFFINITY);
+        ESP_ERROR_CHECK(audio_encode_task_handle_ != nullptr ? ESP_OK : ESP_FAIL);
 
         ok = xTaskCreatePinnedToCoreWithCaps(
             [](void* arg) {
@@ -556,7 +568,9 @@ private:
     }
 
     void AudioEncodeTask() {
-        ESP_LOGI(TAG, "audio_encode task running stack=%lu", static_cast<unsigned long>(kAudioEncodeTaskStackSize));
+        ESP_LOGI(TAG, "audio_encode task running stack=%lu caps=SPIRAM",
+                 static_cast<unsigned long>(kAudioEncodeTaskStackSize));
+        uint32_t encoded_frames = 0;
         while (true) {
             uint8_t frame_index = 0;
             if (xQueueReceive(filled_pcm_queue_, &frame_index, portMAX_DELAY) != pdTRUE || frame_index >= kPcmQueueDepth) {
@@ -572,6 +586,11 @@ private:
             const int16_t* pcm = frame.data;
             frame.samples = 0;
             EncodePcmFrame(pcm, samples);
+            ++encoded_frames;
+            if (encoded_frames == 1 || encoded_frames % 50 == 0) {
+                ESP_LOGI(TAG, "audio_encode stack free watermark=%u",
+                         static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr)));
+            }
             xQueueSend(free_pcm_queue_, &frame_index, 0);
         }
     }
