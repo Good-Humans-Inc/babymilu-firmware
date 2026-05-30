@@ -106,15 +106,19 @@ private:
     OpusFrame opus_pool_[kOpusQueueDepth];
     IncomingOpusFrame incoming_opus_pool_[kIncomingOpusQueueDepth];
     std::mutex websocket_send_mutex_;
+    std::mutex opus_decoder_mutex_;
     std::string session_id_;
     std::atomic<bool> ws_connected_{false};
     std::atomic<bool> server_ready_{false};
     std::atomic<bool> streaming_{false};
+    std::atomic<bool> conversation_active_{false};
     std::atomic<bool> playing_tts_{false};
     std::atomic<bool> vad_speaking_{false};
     std::atomic<bool> heard_speech_{false};
     std::atomic<bool> pending_abort_{false};
+    std::atomic<bool> pending_listen_restart_{false};
     std::atomic<uint32_t> silence_since_ms_{0};
+    std::atomic<int> incoming_tts_frames_{0};
     std::vector<int16_t> mic_buffer_;
     std::vector<int16_t> reference_buffer_;
     std::vector<int16_t> resampled_input_buffer_;
@@ -326,8 +330,12 @@ private:
                 self->ws_connected_ = false;
                 self->server_ready_ = false;
                 self->streaming_ = false;
+                self->conversation_active_ = false;
+                self->playing_tts_ = false;
                 self->heard_speech_ = false;
                 self->vad_speaking_ = false;
+                self->pending_abort_ = false;
+                self->pending_listen_restart_ = false;
                 self->silence_since_ms_ = 0;
                 if (self->processor_) {
                     self->processor_->Stop();
@@ -387,10 +395,19 @@ private:
             cJSON* state = cJSON_GetObjectItem(root, "state");
             if (cJSON_IsString(state)) {
                 if (strcmp(state->valuestring, "start") == 0 || strcmp(state->valuestring, "sentence_start") == 0) {
+                    streaming_ = false;
+                    ResetVadTracking();
                     playing_tts_ = true;
+                    pending_listen_restart_ = false;
+                    if (processor_) {
+                        processor_->Start();
+                    }
                     codec_->EnableOutput(true);
                 } else if (strcmp(state->valuestring, "stop") == 0) {
                     playing_tts_ = false;
+                    if (conversation_active_) {
+                        pending_listen_restart_ = true;
+                    }
                 }
             }
         }
@@ -634,7 +651,12 @@ private:
             if (codec_ && opus_decoder_ && frame.bytes > 0) {
                 std::vector<uint8_t> opus(frame.data, frame.data + frame.bytes);
                 std::vector<int16_t> pcm;
-                if (opus_decoder_->Decode(std::move(opus), pcm) && !pcm.empty()) {
+                bool decoded = false;
+                {
+                    std::lock_guard<std::mutex> lock(opus_decoder_mutex_);
+                    decoded = opus_decoder_->Decode(std::move(opus), pcm);
+                }
+                if (decoded && !pcm.empty()) {
                     if (!codec_->output_enabled()) {
                         codec_->EnableOutput(true);
                     }
@@ -651,6 +673,7 @@ private:
             }
 
             frame.bytes = 0;
+            incoming_tts_frames_.fetch_sub(1);
             xQueueSend(free_incoming_opus_queue_, &frame_index, 0);
         }
     }
@@ -671,12 +694,16 @@ private:
             if (raw_pressed != stable_pressed && now_ms - last_change_ms >= 50) {
                 stable_pressed = raw_pressed;
                 if (stable_pressed) {
-                    BeginListeningFromBootButton();
+                    ToggleConversationFromBootButton();
                 }
             }
 
             if (pending_abort_.exchange(false)) {
                 SendAbort();
+            }
+
+            if (pending_listen_restart_.exchange(false)) {
+                ContinueConversationAfterTts();
             }
 
             const uint32_t silence_since = silence_since_ms_.load();
@@ -698,6 +725,7 @@ private:
             if (playing_tts_) {
                 playing_tts_ = false;
                 pending_abort_ = true;
+                DrainIncomingAudio();
             }
         } else {
             vad_speaking_ = false;
@@ -772,47 +800,128 @@ private:
         if (xQueueSend(filled_incoming_opus_queue_, &frame_index, 0) != pdTRUE) {
             frame.bytes = 0;
             xQueueSend(free_incoming_opus_queue_, &frame_index, 0);
+            return;
         }
+        incoming_tts_frames_.fetch_add(1);
     }
 
-    void BeginListeningFromBootButton() {
-        if (!EnsureWebSocketReady()) {
-            return;
-        }
-        if (streaming_) {
-            ESP_LOGI(TAG, "BOOT listen ignored: already listening");
-            return;
-        }
-
-        processor_->Stop();
+    void ResetVadTracking() {
         vad_speaking_ = false;
         heard_speech_ = false;
         silence_since_ms_ = 0;
+    }
+
+    void ToggleConversationFromBootButton() {
+        if (conversation_active_) {
+            StopConversationFromBootButton();
+            return;
+        }
+
+        conversation_active_ = true;
+        pending_abort_ = false;
+        pending_listen_restart_ = false;
+        if (!StartListeningCycle("BOOT conversation started")) {
+            conversation_active_ = false;
+        }
+    }
+
+    void StopConversationFromBootButton() {
+        conversation_active_ = false;
+        pending_abort_ = false;
+        pending_listen_restart_ = false;
+        const bool was_streaming = streaming_.exchange(false);
+        const bool was_playing_tts = playing_tts_.exchange(false);
+        ResetVadTracking();
+        DrainIncomingAudio();
+        if (processor_) {
+            processor_->Stop();
+        }
+
+        if (was_streaming || was_playing_tts) {
+            SendAbort();
+        }
+        ESP_LOGI(TAG, "BOOT conversation stopped");
+    }
+
+    void ContinueConversationAfterTts() {
+        if (!conversation_active_ || streaming_ || playing_tts_) {
+            return;
+        }
+        if (incoming_tts_frames_.load() > 0) {
+            pending_listen_restart_ = true;
+            return;
+        }
+        if (!ws_connected_ || !server_ready_) {
+            ESP_LOGW(TAG, "conversation restart skipped: server not ready");
+            conversation_active_ = false;
+            return;
+        }
+        if (!StartListeningCycle("TTS stopped; continuing conversation")) {
+            conversation_active_ = false;
+        }
+    }
+
+    bool StartListeningCycle(const char* reason) {
+        if (!EnsureWebSocketReady()) {
+            return false;
+        }
+        if (streaming_) {
+            ESP_LOGI(TAG, "listen start ignored: already listening");
+            return true;
+        }
+
+        processor_->Stop();
+        playing_tts_ = false;
+        ResetVadTracking();
         ResetOpusEncoder();
         if (!SendListen("start")) {
-            ESP_LOGW(TAG, "BOOT listen start send failed");
-            return;
+            ESP_LOGW(TAG, "listen start send failed");
+            return false;
         }
         vTaskDelay(pdMS_TO_TICKS(50));
         streaming_ = true;
         processor_->Start();
-        ESP_LOGI(TAG, "BOOT listen started; waiting for %lums VAD silence after speech",
+        ESP_LOGI(TAG, "%s; waiting for %lums VAD silence after speech",
+                 reason ? reason : "listen started",
                  static_cast<unsigned long>(kVadSilenceStopMs));
+        return true;
     }
 
     void StopListeningForSilence() {
         if (!streaming_.exchange(false)) {
             return;
         }
-        heard_speech_ = false;
-        vad_speaking_ = false;
-        silence_since_ms_ = 0;
+        ResetVadTracking();
         SendListen("stop");
         if (processor_) {
             processor_->Stop();
         }
-        ESP_LOGI(TAG, "BOOT listen stopped after %lums VAD silence",
+        ESP_LOGI(TAG, "listen stopped after %lums VAD silence; waiting for TTS",
                  static_cast<unsigned long>(kVadSilenceStopMs));
+    }
+
+    void DrainIncomingAudio() {
+        if (!filled_incoming_opus_queue_ || !free_incoming_opus_queue_) {
+            incoming_tts_frames_ = 0;
+            return;
+        }
+
+        uint8_t frame_index = 0;
+        int drained = 0;
+        while (xQueueReceive(filled_incoming_opus_queue_, &frame_index, 0) == pdTRUE) {
+            if (frame_index < kIncomingOpusQueueDepth) {
+                incoming_opus_pool_[frame_index].bytes = 0;
+                xQueueSend(free_incoming_opus_queue_, &frame_index, 0);
+                ++drained;
+            }
+        }
+        if (drained > 0) {
+            incoming_tts_frames_.fetch_sub(drained);
+        }
+        if (opus_decoder_) {
+            std::lock_guard<std::mutex> lock(opus_decoder_mutex_);
+            opus_decoder_->ResetState();
+        }
     }
 
     bool SendListen(const char* state) {
