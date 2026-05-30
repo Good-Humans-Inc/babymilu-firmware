@@ -42,8 +42,9 @@ void AfeAudioProcessor::Initialize(AudioCodec* codec) {
 
     afe_config_t* afe_config = afe_config_init(input_format.c_str(), nullptr, AFE_TYPE_VC, AFE_MODE_HIGH_PERF);
     afe_config->aec_mode = AEC_MODE_VOIP_HIGH_PERF;
-    afe_config->vad_mode = VAD_MODE_0;
-    afe_config->vad_min_noise_ms = 100;
+    afe_config->vad_mode = VAD_MODE_2;
+    afe_config->vad_min_speech_ms = 300;
+    afe_config->vad_min_noise_ms = 400;
     afe_config->agc_init = true;
     afe_config->afe_perferred_core = 1;
     afe_config->afe_perferred_priority = 1;

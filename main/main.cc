@@ -94,6 +94,7 @@ private:
     std::unique_ptr<OpusDecoderWrapper> opus_decoder_;
     OpusResampler input_resampler_;
     OpusResampler reference_resampler_;
+    OpusResampler output_resampler_;
     esp_websocket_client_handle_t websocket_ = nullptr;
     QueueHandle_t free_pcm_queue_ = nullptr;
     QueueHandle_t filled_pcm_queue_ = nullptr;
@@ -119,6 +120,7 @@ private:
     std::vector<int16_t> resampled_input_buffer_;
     std::vector<int16_t> resampled_mic_buffer_;
     std::vector<int16_t> resampled_reference_buffer_;
+    std::vector<int16_t> resampled_output_buffer_;
     std::vector<int16_t> opus_input_buffer_;
     StackType_t* audio_encode_task_stack_ = nullptr;
     StaticTask_t audio_encode_task_buffer_ = {};
@@ -194,6 +196,9 @@ private:
         opus_frame_samples_ = 16000 / 1000 * OPUS_FRAME_DURATION_MS;
         opus_input_buffer_.reserve(kMaxPcmFrameSamples * 4);
         opus_decoder_ = std::make_unique<OpusDecoderWrapper>(16000, 1, OPUS_FRAME_DURATION_MS);
+        if (opus_decoder_->sample_rate() != codec_->output_sample_rate()) {
+            output_resampler_.Configure(opus_decoder_->sample_rate(), codec_->output_sample_rate());
+        }
         if (codec_->input_sample_rate() != kAfeSampleRate) {
             input_resampler_.Configure(codec_->input_sample_rate(), kAfeSampleRate);
             reference_resampler_.Configure(codec_->input_sample_rate(), kAfeSampleRate);
@@ -632,6 +637,14 @@ private:
                 if (opus_decoder_->Decode(std::move(opus), pcm) && !pcm.empty()) {
                     if (!codec_->output_enabled()) {
                         codec_->EnableOutput(true);
+                    }
+                    if (opus_decoder_->sample_rate() != codec_->output_sample_rate()) {
+                        resampled_output_buffer_.resize(output_resampler_.GetOutputSamples(static_cast<int>(pcm.size())));
+                        output_resampler_.Process(
+                            pcm.data(),
+                            static_cast<int>(pcm.size()),
+                            resampled_output_buffer_.data());
+                        pcm.assign(resampled_output_buffer_.begin(), resampled_output_buffer_.end());
                     }
                     codec_->OutputData(pcm);
                 }
