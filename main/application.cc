@@ -48,10 +48,18 @@
 #define TAG "Application"
 
 #ifndef DEFAULT_MQTT_ENDPOINT
+#ifdef CONFIG_DEFAULT_MQTT_ENDPOINT
+#define DEFAULT_MQTT_ENDPOINT CONFIG_DEFAULT_MQTT_ENDPOINT
+#else
 #define DEFAULT_MQTT_ENDPOINT ""
 #endif
+#endif
 #ifndef DEFAULT_MQTT_PUBLISH_TEMPLATE
+#ifdef CONFIG_DEFAULT_MQTT_PUBLISH_TEMPLATE
+#define DEFAULT_MQTT_PUBLISH_TEMPLATE CONFIG_DEFAULT_MQTT_PUBLISH_TEMPLATE
+#else
 #define DEFAULT_MQTT_PUBLISH_TEMPLATE "xiaozhi/%s/up"
+#endif
 #endif
 
 static bool PlayWavFromMemory(const std::string& label, const uint8_t* wav_data, size_t wav_size, float gain, bool require_codec_sample_rate = false);

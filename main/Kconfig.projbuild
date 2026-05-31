@@ -7,6 +7,20 @@ config OTA_URL
         The application will access this URL to check for new firmwares and server address.
         Leave empty to disable OTA updates. Format: http://host:port/path or https://host:port/path
 
+config DEFAULT_MQTT_ENDPOINT
+    string "Default MQTT endpoint"
+    default ""
+    help
+        Optional first-boot MQTT broker endpoint in host:port form. If empty,
+        the device expects MQTT settings from OTA or previously saved NVS.
+
+config DEFAULT_MQTT_PUBLISH_TEMPLATE
+    string "Default MQTT publish topic template"
+    default "xiaozhi/%s/up"
+    help
+        Topic template used with the lowercase device MAC when seeding MQTT
+        settings. Keep one %s placeholder for the MAC address.
+
 
 
 choice

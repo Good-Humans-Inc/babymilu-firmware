@@ -237,8 +237,12 @@ bool WebsocketProtocol::OpenAudioChannel() {
                 }
                 std::string hostname = ota_url.substr(host_start, host_end - host_start);
                 
-                // Construct WebSocket URL: ws://hostname:8000/xiaozhi/v1/
-                url = ws_protocol + "://" + hostname + ":8000/xiaozhi/v1/";
+                std::string ws_path = "/babymilu/v1/";
+                if (ota_url.find("/xiaozhi/") != std::string::npos &&
+                    ota_url.find("/babymilu/") == std::string::npos) {
+                    ws_path = "/xiaozhi/v1/";
+                }
+                url = ws_protocol + "://" + hostname + ":8000" + ws_path;
                 
                 if (IsValidWebSocketUrl(url)) {
                     ESP_LOGI(TAG, "Using WebSocket URL derived from OTA URL: %s", url.c_str());
@@ -263,6 +267,7 @@ bool WebsocketProtocol::OpenAudioChannel() {
     AppendQueryParamIfMissing(url, "device-id", mac_address);
     AppendQueryParamIfMissing(url, "client-id", client_id);
     AppendQueryParamIfMissing(url, "mode", connection_mode);
+    AppendQueryParamIfMissing(url, "connectionType", connection_mode);
     ESP_LOGI(TAG, "WebSocket URL with connection params: %s", url.c_str());
     
     std::string token = settings.GetString("token");
@@ -415,8 +420,10 @@ std::string WebsocketProtocol::GetHelloMessage() {
     cJSON_AddStringToObject(root, "device_id", mac_address.c_str());
     cJSON_AddStringToObject(root, "client_id", client_id.c_str());
     cJSON_AddStringToObject(root, "mode", connection_mode.c_str());
+    cJSON_AddStringToObject(root, "connectionType", connection_mode.c_str());
     cJSON* request = cJSON_CreateObject();
     cJSON_AddStringToObject(request, "mode", connection_mode.c_str());
+    cJSON_AddStringToObject(request, "connectionType", connection_mode.c_str());
     cJSON_AddItemToObject(root, "request", request);
     cJSON* features = cJSON_CreateObject();
 #if CONFIG_USE_SERVER_AEC

@@ -3,8 +3,11 @@
     "builds": [
         {
             "name": "EchoEar",
-            "sdkconfig_append": []
+            "sdkconfig_append": [
+                "CONFIG_OTA_URL=\"http://35.225.248.38:8000/babymilu/ota/\"",
+                "CONFIG_DEFAULT_MQTT_ENDPOINT=\"35.225.248.38:1883\"",
+                "CONFIG_DEFAULT_MQTT_PUBLISH_TEMPLATE=\"xiaozhi/%s/up\""
+            ]
         }
     ]
 }
-
