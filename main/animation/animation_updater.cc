@@ -22,8 +22,15 @@
 
 #define TAG "AnimationUpdater"
 #define ANIMATION_UPDATER_STACK_SIZE 10240
+#define LEGACY_GIF_TEST_BIN_FILE_COUNT 20u
+#define EXPECTED_GIF_TEST_BIN_FILE_COUNT 21u
 
 namespace {
+
+bool IsSupportedGifTestBinFileCount(uint32_t file_count) {
+    return file_count == LEGACY_GIF_TEST_BIN_FILE_COUNT ||
+           file_count == EXPECTED_GIF_TEST_BIN_FILE_COUNT;
+}
 
 void ShowAnimationDownloadProgress(const char* title, int progress, const std::string& detail) {
     auto* display = Board::GetInstance().GetDisplay();
@@ -2903,9 +2910,9 @@ bool AnimationUpdater::ValidateGifMegaAnimationFileFromDisk(const char* file_pat
              file_count, checksum, combined_length);
     
     // Current format uses startup.gif as a separate SD card root file.
-    // test.bin is expected to contain exactly 20 animation GIFs.
-    if (file_count != 20) {
-        ESP_LOGE(TAG, "Invalid file_count in header: %u (expected 20)", file_count);
+    // Prefer 21 animation GIFs, but accept legacy 20-GIF bundles during rollout.
+    if (!IsSupportedGifTestBinFileCount(file_count)) {
+        ESP_LOGE(TAG, "Invalid file_count in header: %u (expected 20 or 21)", file_count);
         fclose(f);
         return false;
     }

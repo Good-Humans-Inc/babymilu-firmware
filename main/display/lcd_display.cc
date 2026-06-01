@@ -1329,7 +1329,9 @@ void LcdDisplay::SetEmotion(const char *emotion)
     // LLM emotion mapping plus app/utility animations; all others map to normal (still).
     static const std::vector<Emotion> emotions = {
         {ANIMATION_NORMAL, "normal"},
+        {ANIMATION_NORMAL, "neutral"},
         {ANIMATION_SMIRK, "smirk"},
+        {ANIMATION_SMILEY, "cheerful"},
         {ANIMATION_HEARTY, "heart"},
         {ANIMATION_HEARTY, "happy"},
         {ANIMATION_BLUSH, "blush"},

@@ -34,7 +34,7 @@ idf.py build -DDEFAULT_MQTT_ENDPOINT="mqtt.example.com:1883" `
 
 EchoEar uses SD-card animation assets:
 
-- `/sdcard/test.bin`: packed 20-GIF emotion bundle.
+- `/sdcard/test.bin`: packed 21-GIF emotion bundle.
 - `/sdcard/startup.gif`: startup display GIF, separate from `test.bin`.
 - `/sdcard/startup.wav`: optional startup audio asset.
 - `/sdcard/err.txt`: warning/error log file uploaded on the next network-ready
@@ -50,7 +50,7 @@ asset.
 - `docs/MQTT_WEBSOCKET_ARCHITECTURE.md`: MQTT/WebSocket architecture.
 - `docs/websocket.md`: WebSocket protocol reference.
 - `docs/ble-wifi-setup-guide.md`: BLE WiFi provisioning.
-- `MIGRATION_13_TO_20_GIFS_GUIDE.md`: current 20-GIF asset workflow.
+- `MIGRATION_13_TO_20_GIFS_GUIDE.md`: current 21-GIF asset workflow.
 - `STARTUP_GIF_RENDER_FIX.md`: startup GIF display notes.
 
 ## Cleanup Note

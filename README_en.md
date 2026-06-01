@@ -25,7 +25,7 @@ idf.py build
 
 ## Runtime Assets
 
-- `/sdcard/test.bin`: 20 packed GIFs.
+- `/sdcard/test.bin`: 21 packed GIFs.
 - `/sdcard/startup.gif`: separate startup GIF.
 - `/sdcard/startup.wav`: optional startup audio.
 - `/sdcard/err.txt`: warning/error log uploaded on next startup.

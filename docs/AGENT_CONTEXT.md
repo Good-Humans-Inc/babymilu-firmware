@@ -57,7 +57,7 @@ Primary files:
 
 Current SD-card asset contract:
 
-- `/sdcard/test.bin`: 20 packed emotion GIFs.
+- `/sdcard/test.bin`: 21 packed emotion GIFs.
 - `/sdcard/startup.gif`: separate startup GIF.
 - `/sdcard/startup.wav`: optional startup audio.
 - `/sdcard/err.txt`: warning/error log uploaded on next startup.

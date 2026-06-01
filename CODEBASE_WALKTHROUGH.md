@@ -66,7 +66,7 @@ BLE provisioning is provided by `main/boards/common/wifi_board.cc`.
 
 The current runtime format is GIF-based:
 
-- `test.bin` must contain exactly the 20 packed emotion GIF assets.
+- `test.bin` must contain exactly the 21 packed emotion GIF assets.
 - `startup.gif` must be separate at the SD-card root and must not be inside
   `test.bin`.
 - `crop_and_pack_gifs.py` is the current packer.

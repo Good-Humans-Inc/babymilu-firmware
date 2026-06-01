@@ -1,6 +1,6 @@
-# Current 20-GIF Asset Guide
+# Current 21-GIF Asset Guide
 
-This is the active EchoEar animation asset guide. The firmware expects a 20-GIF
+This is the active EchoEar animation asset guide. The firmware expects a 21-GIF
 bundle at `/sdcard/test.bin` and a separate startup GIF at `/sdcard/startup.gif`.
 
 ## Current Files
@@ -14,18 +14,19 @@ bundle at `/sdcard/test.bin` and a separate startup GIF at `/sdcard/startup.gif`
 
 ```text
 /sdcard/
-  test.bin       # packed 20 emotion GIFs
+  test.bin       # packed 21 emotion GIFs
   startup.gif    # separate startup GIF, not inside test.bin
   startup.wav    # optional startup audio
 ```
 
 ## Required GIFs In `test.bin`
 
-`crop_and_pack_gifs.py` packs exactly these 20 files:
+`crop_and_pack_gifs.py` packs exactly these 21 files:
 
 ```text
 smirk.gif
 smirk_start.gif
+smiley.gif
 heart.gif
 heart_start.gif
 blush.gif
@@ -68,11 +69,15 @@ and is written as a separate SD-card root asset.
 The firmware validates the bundle before loading:
 
 - 12-byte header.
-- Exactly 20 file table entries.
+- Exactly 21 file table entries.
 - Each table entry is 44 bytes.
 - GIF data entries are prefixed with `0x5A5A`.
 - File is large enough for the expected GIF bundle.
 - `startup.gif` must not appear in the bundle.
+
+During rollout, firmware also accepts the previous 20-entry bundle. In that
+case `smiley` requests fall back until a 21-entry `test.bin` containing
+`smiley.gif` is installed.
 
 If validation fails, the firmware skips GIF loading and lets the update path
 retry later.
