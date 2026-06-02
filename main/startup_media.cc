@@ -8,6 +8,7 @@
 #include <esp_heap_caps.h>
 #include <esp_log.h>
 #include <freertos/event_groups.h>
+#include <freertos/task.h>
 
 namespace {
 
@@ -20,6 +21,7 @@ const char* TAG = "StartupMedia";
 EventGroupHandle_t s_events = nullptr;
 StartupMedia::Buffer s_startup_gif;
 StartupMedia::Buffer s_startup_wav;
+constexpr int kSdHealthMaxAttempts = 3;
 
 EventGroupHandle_t Events()
 {
@@ -87,6 +89,25 @@ bool LoadFileToBuffer(const char* path, StartupMedia::Buffer& buffer)
     return true;
 }
 
+esp_err_t CheckSdCardHealth()
+{
+    esp_err_t ret = ESP_OK;
+    if (!SdCard::IsMounted()) {
+        ESP_LOGI(TAG, "Mounting SD card for startup media preload");
+        ret = SdCard::Initialize();
+        ESP_LOGI(TAG, "SdCard::Initialize() returned: %s", esp_err_to_name(ret));
+        if (ret != ESP_OK) {
+            return ret;
+        }
+    } else {
+        ESP_LOGI(TAG, "SD card already mounted for startup media preload");
+    }
+
+    ret = SdCard::TestWriteCapability();
+    ESP_LOGI(TAG, "SdCard::TestWriteCapability() returned: %s", esp_err_to_name(ret));
+    return ret;
+}
+
 }  // namespace
 
 namespace StartupMedia {
@@ -103,18 +124,27 @@ esp_err_t PreloadFromSdCard()
     EventGroupHandle_t events = Events();
     xEventGroupSetBits(events, kPreloadStartedBit);
 
-    esp_err_t ret = ESP_OK;
-    if (!SdCard::IsMounted()) {
-        ESP_LOGI(TAG, "Mounting SD card for startup media preload");
-        ret = SdCard::Initialize();
-        ESP_LOGI(TAG, "SdCard::Initialize() returned: %s", esp_err_to_name(ret));
-    } else {
-        ESP_LOGI(TAG, "SD card already mounted for startup media preload");
+    esp_err_t ret = ESP_FAIL;
+    for (int attempt = 1; attempt <= kSdHealthMaxAttempts; ++attempt) {
+        ESP_LOGI(TAG, "SD card health check attempt %d/%d", attempt, kSdHealthMaxAttempts);
+        ret = CheckSdCardHealth();
+        if (ret == ESP_OK) {
+            break;
+        }
+
+        ESP_LOGW(TAG, "SD card health check attempt %d/%d failed: %s",
+                 attempt, kSdHealthMaxAttempts, esp_err_to_name(ret));
+        if (attempt < kSdHealthMaxAttempts) {
+            vTaskDelay(pdMS_TO_TICKS(500));
+        }
     }
 
     if (ret == ESP_OK) {
         LoadFileToBuffer("/sdcard/startup.gif", s_startup_gif);
         LoadFileToBuffer("/sdcard/startup.wav", s_startup_wav);
+    } else {
+        ESP_LOGE(TAG, "SD card health check failed after %d attempts: %s",
+                 kSdHealthMaxAttempts, esp_err_to_name(ret));
     }
 
     xEventGroupSetBits(events, kPreloadFinishedBit);
