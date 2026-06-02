@@ -221,9 +221,8 @@ bool WebsocketProtocol::OpenAudioChannel() {
         websocket_->SetHeader("Authorization", token.c_str());
     }
     websocket_->SetHeader("Protocol-Version", std::to_string(version_).c_str());
-    // Note: Device-Id and Client-Id are now in URL query params, but keep headers for backward compatibility
-    websocket_->SetHeader("Device-Id", mac_address.c_str());
-    websocket_->SetHeader("Client-Id", client_id.c_str());
+    // Device-Id and Client-Id are already in URL query params. Avoid duplicating
+    // them as headers so manual wake/open uses fewer small heap allocations.
 
     websocket_->OnData([this](const char* data, size_t len, bool binary) {
         if (binary) {

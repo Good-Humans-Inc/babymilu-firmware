@@ -47,6 +47,15 @@
 #include "i2c_bus.h"
 
 #define TAG "EchoEar"
+static constexpr const char* kDisplaySettingsNamespace = "display";
+static constexpr const char* kSleepyBrightnessKey = "sleep_bright";
+static constexpr int kSleepyBrightnessUnset = -1;
+static constexpr int kSleepyBrightnessMin = 0;
+static constexpr int kNormalBrightnessMin = 0;
+static constexpr int kSleepyBrightnessDefaultLow = 5;
+static constexpr int kSleepyBrightnessDefaultHigh = 20;
+static constexpr int kBrightnessStep = 10;
+static constexpr int kBrightnessMax = 100;
 
 LV_FONT_DECLARE(font_puhui_20_4);
 LV_FONT_DECLARE(font_awesome_20_4);
@@ -771,6 +780,7 @@ private:
     esp_timer_handle_t volume_message_timer_ = nullptr;  // Timer to clear volume message
     std::string previous_emotion_ = "normal";  // Store previous emotion string to restore
     int previous_volume_ = -1;  // Store volume before muting (for restore on unmute)
+    std::atomic<bool> sleep_visual_active_{false};
 
     void InitializeVolumeMessageTimer() {
         if (volume_message_timer_ != nullptr) {
@@ -816,6 +826,115 @@ private:
         display_->CreateOverlayMessage(message.c_str());
         esp_timer_stop(volume_message_timer_);
         ESP_ERROR_CHECK(esp_timer_start_once(volume_message_timer_, 1000 * 1000));
+    }
+
+    static int ClampBrightnessValue(int brightness, int minimum) {
+        if (brightness < minimum) {
+            return minimum;
+        }
+        if (brightness > kBrightnessMax) {
+            return kBrightnessMax;
+        }
+        return brightness;
+    }
+
+    static int AdjustBrightnessValue(int current, bool increase, int minimum) {
+        current = ClampBrightnessValue(current, minimum);
+        if (increase) {
+            if (current < 5) {
+                return 5;
+            }
+            if (current < 10) {
+                return 10;
+            }
+            return ClampBrightnessValue(current + kBrightnessStep, minimum);
+        }
+
+        if (current <= 0) {
+            return 0;
+        }
+        if (current <= 5) {
+            return 0;
+        }
+        if (current <= 10) {
+            return 5;
+        }
+        return ClampBrightnessValue(current - kBrightnessStep, minimum);
+    }
+
+    int GetSavedNormalBrightness() const {
+        int fallback = backlight_ ? backlight_->brightness() : 75;
+        Settings settings(kDisplaySettingsNamespace);
+        int brightness = settings.GetInt("brightness", fallback);
+        return ClampBrightnessValue(brightness, kNormalBrightnessMin);
+    }
+
+    int GetInitialSleepyBrightness() const {
+        int normal_brightness = GetSavedNormalBrightness();
+        return normal_brightness <= kSleepyBrightnessDefaultHigh
+            ? kSleepyBrightnessDefaultLow
+            : kSleepyBrightnessDefaultHigh;
+    }
+
+    int GetSleepyBrightness() {
+        Settings settings(kDisplaySettingsNamespace);
+        int brightness = settings.GetInt(kSleepyBrightnessKey, kSleepyBrightnessUnset);
+        if (brightness != kSleepyBrightnessUnset) {
+            return ClampBrightnessValue(brightness, kSleepyBrightnessMin);
+        }
+
+        brightness = GetInitialSleepyBrightness();
+        Settings writable_settings(kDisplaySettingsNamespace, true);
+        writable_settings.SetInt(kSleepyBrightnessKey, brightness);
+        ESP_LOGI(TAG, "Initialized sleepy brightness to %d", brightness);
+        return brightness;
+    }
+
+    void SaveSleepyBrightness(int brightness) {
+        brightness = ClampBrightnessValue(brightness, kSleepyBrightnessMin);
+        Settings settings(kDisplaySettingsNamespace, true);
+        settings.SetInt(kSleepyBrightnessKey, brightness);
+    }
+
+    bool IsSleepModeActive() const {
+        return sleep_visual_active_.load() ||
+               (power_save_timer_ != nullptr && power_save_timer_->IsInSleepMode());
+    }
+
+    void ApplySleepVisual(const char* emotion) {
+        int brightness = GetSleepyBrightness();
+        auto backlight = GetBacklight();
+        if (backlight != nullptr) {
+            backlight->SetBrightness(static_cast<uint8_t>(brightness), false);
+        }
+
+        auto display = GetDisplay();
+        if (display != nullptr) {
+            display->SetEmotion(emotion);
+        }
+        sleep_visual_active_.store(true);
+    }
+
+    void ExitSleepVisualToIdle() {
+        sleep_visual_active_.store(false);
+
+        auto backlight = GetBacklight();
+        if (backlight != nullptr) {
+            backlight->RestoreBrightness();
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(100));
+
+        auto display = GetDisplay();
+        if (display != nullptr) {
+            display->SetEmotion("normal");
+        }
+
+        auto& app = Application::GetInstance();
+        if (app.GetDeviceState() != kDeviceStateIdle) {
+            ESP_LOGI(TAG, "Waking from sleep - setting device state to idle");
+            app.SetDeviceState(kDeviceStateIdle);
+        }
     }
 
     // Toggle mute / unmute. Saves the pre-mute volume so unmute can restore it.
@@ -961,11 +1080,8 @@ private:
                     board.ResetWifiConfiguration();
                 }
                 if (board.power_save_timer_) {
-                    // If in sleep mode, just wake up and return to idle state
-                    if (board.power_save_timer_->IsInSleepMode()) {
-                        ESP_LOGI(TAG, "Touch detected during sleep mode - waking up");
-                        board.power_save_timer_->WakeUp();
-                        // WakeUp() callback will set state to idle and show static_normal face
+                    if (board.IsSleepModeActive()) {
+                        ESP_LOGI(TAG, "Touch tap ignored during sleep mode");
                     } else {
                         // Normal operation: wake up and toggle chat state
                         board.power_save_timer_->WakeUp();
@@ -998,11 +1114,8 @@ private:
                     board.ResetWifiConfiguration();
                 }
                 if (board.power_save_timer_) {
-                    // If in sleep mode, just wake up and return to idle state
-                    if (board.power_save_timer_->IsInSleepMode()) {
-                        ESP_LOGI(TAG, "Touch detected during sleep mode - waking up");
-                        board.power_save_timer_->WakeUp();
-                        // WakeUp() callback will set state to idle and show static_normal face
+                    if (board.IsSleepModeActive()) {
+                        ESP_LOGI(TAG, "Touch tap ignored during sleep mode");
                     } else {
                         // Normal operation: wake up and toggle chat state
                         board.power_save_timer_->WakeUp();
@@ -1084,7 +1197,7 @@ private:
                 int y = (tp.y < DISPLAY_HEIGHT) ? tp.y : (DISPLAY_HEIGHT - 1);
 
                 if (!in_stroke) {
-                    // Finger just went down - start a new stroke and wake the device.
+                    // Finger just went down - start a new stroke.
                     in_stroke = true;
                     x0 = last_x = x;
                     y0 = last_y = y;
@@ -1092,10 +1205,11 @@ private:
                     t0_ms = now_ms;
                     ESP_LOGI(TAG, "[TOUCH] Touch pressed at (%d, %d)", x, y);
                     if (board->power_save_timer_) {
-                        if (board->power_save_timer_->IsInSleepMode()) {
-                            ESP_LOGI(TAG, "Touch detected during sleep mode - waking up");
+                        if (board->IsSleepModeActive()) {
+                            ESP_LOGI(TAG, "Touch detected during sleep mode - staying asleep");
+                        } else {
+                            board->power_save_timer_->WakeUp();
                         }
-                        board->power_save_timer_->WakeUp();
                     }
                 } else {
                     // Still dragging - update drift using Chebyshev distance (cheap, no sqrt).
@@ -1116,6 +1230,7 @@ private:
                 int64_t duration_ms = now_ms - t0_ms;
                 ESP_LOGI(TAG, "[TOUCH] Touch released dx=%d dy=%d dur=%dms drift=%d",
                          dx, dy, (int)duration_ms, max_drift);
+                bool sleep_mode_active = board->IsSleepModeActive();
 
                 // Global cooldown - any new gesture must be clearly separate in time.
                 if (now_ms - last_fire_ms < COOLDOWN_MS) {
@@ -1127,6 +1242,13 @@ private:
                 //   >= 5000 ms -> toggle mute (volume-only feedback, no battery overlay)
                 //   >= 800 ms  -> show battery/network overlay (no volume change)
                 if (duration_ms >= LONG_PRESS_MS && max_drift < LONG_PRESS_DRIFT) {
+                    if (sleep_mode_active) {
+                        ESP_LOGI(TAG, "[TOUCH] Long press ignored during sleep mode");
+                        last_fire_ms = now_ms;
+                        last_axis = 0;
+                        last_dir  = 0;
+                        continue;
+                    }
                     if (duration_ms >= MUTE_LONG_PRESS_MS) {
                         ESP_LOGI(TAG, "[TOUCH] Very long press (>=5s) - toggling mute");
                         board->ToggleMute();
@@ -1166,6 +1288,38 @@ private:
                     step = STEP_FAST;
                 }
 
+                if (sleep_mode_active) {
+                    if (axis == 2) {
+                        auto codec = board->GetAudioCodec();
+                        if (codec != nullptr) {
+                            int cur = codec->output_volume();
+                            int delta = (dir < 0) ? -step : +step;
+                            int nv = cur + delta;
+                            if (nv < 0)   nv = 0;
+                            if (nv > 100) nv = 100;
+                            codec->SetOutputVolume(nv);
+                            ESP_LOGI(TAG, "[TOUCH] Swipe %s - Sleepy volume: %d -> %d (step %d)",
+                                     dir < 0 ? "UP" : "DOWN", cur, nv, step);
+                            board->ShowVolumeMessage(nv);
+                            last_fire_ms = now_ms;
+                            last_axis = axis;
+                            last_dir  = dir;
+                        }
+                    } else if (auto bl = board->GetBacklight(); bl != nullptr) {
+                        int cur = board->GetSleepyBrightness();
+                        int nb = AdjustBrightnessValue(cur, dir < 0, kSleepyBrightnessMin);
+                        board->SaveSleepyBrightness(nb);
+                        bl->SetBrightness(static_cast<uint8_t>(nb), false);
+                        ESP_LOGI(TAG, "[TOUCH] Swipe %s - Sleepy brightness: %d -> %d (step %d)",
+                                 dir < 0 ? "LEFT" : "RIGHT", cur, nb, kBrightnessStep);
+                        board->ShowBrightnessMessage(nb);
+                        last_fire_ms = now_ms;
+                        last_axis = axis;
+                        last_dir  = dir;
+                    }
+                    continue;
+                }
+
                 if (axis == 2) {
                     // Vertical: preserve original mapping (UP=decrease, DOWN=increase).
                     auto codec = board->GetAudioCodec();
@@ -1188,13 +1342,10 @@ private:
                     auto bl = board->GetBacklight();
                     if (bl != nullptr) {
                         int cur = bl->brightness();
-                        int delta = (dir < 0) ? +step : -step;
-                        int nb = cur + delta;
-                        if (nb < 10)  nb = 10;
-                        if (nb > 100) nb = 100;
+                        int nb = AdjustBrightnessValue(cur, dir < 0, kNormalBrightnessMin);
                         bl->SetBrightness(nb, true);
                         ESP_LOGI(TAG, "[TOUCH] Swipe %s - Brightness: %d -> %d (step %d)",
-                                 dir < 0 ? "LEFT" : "RIGHT", cur, nb, step);
+                                 dir < 0 ? "LEFT" : "RIGHT", cur, nb, kBrightnessStep);
                         board->ShowBrightnessMessage(nb);
                         last_fire_ms = now_ms;
                         last_axis = axis;
@@ -1296,6 +1447,10 @@ private:
                     // ESP_LOGD(TAG, "[TOUCH] Skipping touch processing - device is in %s mode", 
                     //          current_state == kDeviceStateSpeaking ? "speaking" : "listening");
                     continue;  // Drop the event and continue
+                }
+
+                if (board->IsSleepModeActive()) {
+                    continue;
                 }
                 
                 if (event.state == TOUCH_STATE_ACTIVE) {
@@ -1797,45 +1952,25 @@ private:
                     return;
                 } else if (battery_level < 25 && charging) {
                     // < 25%, charging: always powersaving mode + sleepy.gif
-                    ESP_LOGI(TAG, "Always power saving mode - battery %d%% < 25%% and charging, setting brightness to 20 and switching to sleepy animation", battery_level);
-                    GetBacklight()->SetBrightness(20, false);
-                    auto display = GetDisplay();
-                    if (display) {
-                        display->SetEmotion("sleepy");
-                    }
+                    ESP_LOGI(TAG, "Always power saving mode - battery %d%% < 25%% and charging, switching to sleepy animation", battery_level);
+                    ApplySleepVisual("sleepy");
                 } else if (battery_level >= 25 && battery_level <= 40 && !charging) {
                     // 25-40%, not charging: always powersaving mode + battery.gif
-                    ESP_LOGI(TAG, "Always power saving mode - battery %d%% (25-40%% range) and not charging, setting brightness to 20 and switching to battery animation", battery_level);
-                    GetBacklight()->SetBrightness(20, false);
-                    auto display = GetDisplay();
-                    if (display) {
-                        display->SetEmotion("battery");
-                    }
+                    ESP_LOGI(TAG, "Always power saving mode - battery %d%% (25-40%% range) and not charging, switching to battery animation", battery_level);
+                    ApplySleepVisual("battery");
                 } else if (battery_level >= 25 && battery_level <= 40 && charging) {
                     // 25-40%, charging: 30-sec powersaving mode + sleepy.gif
-                    ESP_LOGI(TAG, "30-sec power saving mode - battery %d%% (25-40%% range) and charging, setting brightness to 20 and switching to sleepy animation", battery_level);
-                    GetBacklight()->SetBrightness(20, false);
-                    auto display = GetDisplay();
-                    if (display) {
-                        display->SetEmotion("sleepy");
-                    }
+                    ESP_LOGI(TAG, "30-sec power saving mode - battery %d%% (25-40%% range) and charging, switching to sleepy animation", battery_level);
+                    ApplySleepVisual("sleepy");
                 } else {
                     // > 40%: 30-sec powersaving mode + sleepy.gif (regardless of charging)
-                    ESP_LOGI(TAG, "30-sec power saving mode - battery %d%% (>40%%), setting brightness to 20 and switching to sleepy animation", battery_level);
-                    GetBacklight()->SetBrightness(20, false);
-                    auto display = GetDisplay();
-                    if (display) {
-                        display->SetEmotion("sleepy");
-                    }
+                    ESP_LOGI(TAG, "30-sec power saving mode - battery %d%% (>40%%), switching to sleepy animation", battery_level);
+                    ApplySleepVisual("sleepy");
                 }
             } else {
                 // Can't read battery - use default behavior (30-sec mode with sleepy)
-                ESP_LOGI(TAG, "30-sec power saving mode - battery level unknown, setting brightness to 20 and switching to sleepy animation");
-                GetBacklight()->SetBrightness(20, false);
-                auto display = GetDisplay();
-                if (display) {
-                    display->SetEmotion("sleepy");
-                }
+                ESP_LOGI(TAG, "30-sec power saving mode - battery level unknown, switching to sleepy animation");
+                ApplySleepVisual("sleepy");
             }
         });
         power_save_timer_->OnExitSleepMode([this]() {
@@ -1857,35 +1992,17 @@ private:
                 if (always_powersaving) {
                     ESP_LOGI(TAG, "Always power saving mode active - immediately re-entering sleep mode");
                     // Immediately re-apply sleep settings
-                    GetBacklight()->SetBrightness(20, false);
-                    auto display = GetDisplay();
-                    if (display) {
-                        if (battery_level < 25 && charging) {
-                            display->SetEmotion("sleepy");
-                        } else if (battery_level >= 25 && battery_level <= 40 && !charging) {
-                            display->SetEmotion("battery");
-                        }
+                    if (battery_level < 25 && charging) {
+                        ApplySleepVisual("sleepy");
+                    } else if (battery_level >= 25 && battery_level <= 40 && !charging) {
+                        ApplySleepVisual("battery");
                     }
                     return;  // Don't restore brightness/animation for always powersaving mode
                 }
             }
 
             ESP_LOGI(TAG, "Exiting sleep mode - restoring brightness and animation");
-            GetBacklight()->RestoreBrightness();
-
-            // Small delay to allow I2C bus and other peripherals to stabilize after wake
-            vTaskDelay(pdMS_TO_TICKS(100));
-
-            auto display = GetDisplay();
-            if (display) {
-                display->SetEmotion("normal");  // Restore to normal animation (maps to ANIMATION_NORMAL)
-            }
-            // Ensure application state is idle after waking from sleep
-            auto& app = Application::GetInstance();
-            if (app.GetDeviceState() != kDeviceStateIdle) {
-                ESP_LOGI(TAG, "Waking from sleep - setting device state to idle");
-                app.SetDeviceState(kDeviceStateIdle);
-            }
+            ExitSleepVisualToIdle();
         });
         power_save_timer_->SetEnabled(true);
 
@@ -1919,27 +2036,19 @@ private:
                         // If just entered always powersaving mode, immediately apply sleep settings
                         if (!was_always_powersaving) {
                             ESP_LOGI(TAG, "[BATTERY] Entered always power saving mode - applying sleep settings immediately");
-                            board->GetBacklight()->SetBrightness(20, false);
-                            auto display = board->GetDisplay();
-                            if (display) {
-                                if (battery_level < 25 && charging) {
-                                    display->SetEmotion("sleepy");
-                                } else if (battery_level >= 25 && battery_level <= 40 && !charging) {
-                                    display->SetEmotion("battery");
-                                }
+                            if (battery_level < 25 && charging) {
+                                board->ApplySleepVisual("sleepy");
+                            } else if (battery_level >= 25 && battery_level <= 40 && !charging) {
+                                board->ApplySleepVisual("battery");
                             }
                         }
                         // If in always powersaving mode and not in sleep mode, force it
                         if (board->power_save_timer_ && !board->power_save_timer_->IsInSleepMode()) {
                             ESP_LOGI(TAG, "[BATTERY] Always power saving mode - ensuring sleep settings applied");
-                            board->GetBacklight()->SetBrightness(20, false);
-                            auto display = board->GetDisplay();
-                            if (display) {
-                                if (battery_level < 25 && charging) {
-                                    display->SetEmotion("sleepy");
-                                } else if (battery_level >= 25 && battery_level <= 40 && !charging) {
-                                    display->SetEmotion("battery");
-                                }
+                            if (battery_level < 25 && charging) {
+                                board->ApplySleepVisual("sleepy");
+                            } else if (battery_level >= 25 && battery_level <= 40 && !charging) {
+                                board->ApplySleepVisual("battery");
                             }
                         }
                     } else if (was_always_powersaving) {
@@ -1999,10 +2108,12 @@ private:
                 return;
             }
             if (power_save_timer_) {
-                // If in sleep mode, wake up and directly start talking
-                if (power_save_timer_->IsInSleepMode()) {
+                if (IsSleepModeActive()) {
                     power_save_timer_->WakeUp();
-                    app.ToggleChatState();
+                    if (IsSleepModeActive()) {
+                        ExitSleepVisualToIdle();
+                    }
+                    return;
                 } else {
                     // Normal operation: wake up and toggle chat state
                     power_save_timer_->WakeUp();
