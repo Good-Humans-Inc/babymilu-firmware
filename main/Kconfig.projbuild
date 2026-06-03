@@ -1,0 +1,126 @@
+menu "EchoEar BabyMilu Ground Firmware Stage 1"
+
+config ECHOEAR_BABYMILU_OTA_URL
+    string "BabyMilu OTA/config hydration URL"
+    default "http://35.225.248.38:8000/babymilu/ota/"
+    help
+        Full HTTP URL used at boot with Device-Id/X-Device-Id headers.
+        Runtime manifest values may override and persist websocket, mqtt,
+        server_time, and firmware metadata.
+
+config ECHOEAR_BABYMILU_WEBSOCKET_URL
+    string "BabyMilu WebSocket URL"
+    default "ws://35.225.248.38:8000/babymilu/v1/"
+    help
+        Full WebSocket URL. The firmware appends device_id, client_id, and
+        canonical connectionType query parameters at runtime.
+
+config ECHOEAR_BABYMILU_MQTT_URL
+    string "BabyMilu MQTT broker URL"
+    default "mqtt://35.225.248.38:1883"
+    help
+        Full MQTT endpoint URL. OTA hydration may override this value and
+        provide per-device topics.
+
+config ECHOEAR_BABYMILU_FIRESTORE_PROJECT
+    string "Firestore project for device Wi-Fi ranking reads"
+    default "composed-augury-469200-g6"
+
+config ECHOEAR_BABYMILU_ANIMATION_BIN_URL
+    string "Optional remote test.bin animation bundle URL"
+    default ""
+    help
+        Optional read-only HTTP(S) URL used by the animation updater. When set,
+        the updater checks this test.bin plus sibling startup.gif/startup.wav
+        unless explicit animation URLs are persisted at runtime.
+
+config ECHOEAR_BABYMILU_ERROR_UPLOAD_URL
+    string "Existing BabyMilu error-log upload endpoint"
+    default "https://upload-error-log-tmdtlnu7zq-uc.a.run.app"
+    help
+        Existing upload-error-log endpoint. Firmware uploads /sdcard/err.txt
+        as multipart/form-data with device_id, timestamp, and file=err.txt.
+
+config ECHOEAR_BABYMILU_ERROR_UPLOAD_API_KEY
+    string "Existing BabyMilu error-log upload API key"
+    default "test-key-123"
+
+config ECHOEAR_BABYMILU_ENABLE_FIRMWARE_UPDATE
+    bool "Enable firmware binary update from OTA manifest metadata"
+    default y
+    help
+        Only runs when the manifest includes firmware.version and firmware.url.
+        Activation code/challenge flow is intentionally not implemented.
+
+config ECHOEAR_BABYMILU_ALLOW_MENUCONFIG_WIFI_FALLBACK
+    bool "Allow menuconfig Wi-Fi fallback if no saved credentials exist"
+    default n
+    help
+        Saved credentials and BLE/app provisioning are the primary path. This
+        fallback is for isolated bench bring-up only.
+
+config ECHOEAR_BABYMILU_WIFI_FALLBACK_SSID
+    string "Bench Wi-Fi fallback SSID"
+    default ""
+    depends on ECHOEAR_BABYMILU_ALLOW_MENUCONFIG_WIFI_FALLBACK
+
+config ECHOEAR_BABYMILU_WIFI_FALLBACK_PASSWORD
+    string "Bench Wi-Fi fallback password"
+    default ""
+    depends on ECHOEAR_BABYMILU_ALLOW_MENUCONFIG_WIFI_FALLBACK
+
+config USE_AUDIO_PROCESSOR
+    bool "Enable ESP-SR AFE Audio Processor"
+    default y
+    depends on IDF_TARGET_ESP32S3 && SPIRAM
+
+config USE_DEVICE_AEC
+    bool "Enable Device-Side AEC"
+    default y
+    depends on USE_AUDIO_PROCESSOR
+
+choice WAKE_WORD_TYPE
+    prompt "Wake Word Implementation Type"
+    default USE_CUSTOM_WAKE_WORD if IDF_TARGET_ESP32S3 && SPIRAM
+    default WAKE_WORD_DISABLED
+    depends on USE_AUDIO_PROCESSOR
+    help
+        Choose whether local wake word detection is disabled or handled by
+        the ESP-SR MultiNet command model.
+
+    config WAKE_WORD_DISABLED
+        bool "Disabled"
+        help
+            Disable local wake word detection.
+
+    config USE_CUSTOM_WAKE_WORD
+        bool "Multinet model (Custom Wake Word)"
+        depends on IDF_TARGET_ESP32S3 && SPIRAM
+        help
+            Detect the configured custom wake phrase with ESP-SR MultiNet.
+
+endchoice
+
+config CUSTOM_WAKE_WORD
+    string "Custom Wake Word"
+    default "xiao tu dou"
+    depends on USE_CUSTOM_WAKE_WORD
+    help
+        Custom wake phrase in pinyin, separated by spaces.
+
+config CUSTOM_WAKE_WORD_DISPLAY
+    string "Custom Wake Word Display"
+    default "xiao tu dou"
+    depends on USE_CUSTOM_WAKE_WORD
+    help
+        Display/log text used when the custom wake phrase is detected.
+
+config CUSTOM_WAKE_WORD_THRESHOLD
+    int "Custom Wake Word Threshold (%)"
+    default 20
+    range 1 99
+    depends on USE_CUSTOM_WAKE_WORD
+    help
+        Detection threshold. Smaller values are more sensitive.
+
+endmenu

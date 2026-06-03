@@ -1,0 +1,53 @@
+set(SOURCES
+    "main.cc"
+    "ble_wifi_provisioner.cc"
+    "audio_codec.cc"
+    "battery_monitor.cc"
+    "animation_store.cc"
+    "box_audio_codec.cc"
+    "display_animator.cc"
+    "echoear_touch.cc"
+    "error_log_uploader.cc"
+    "afe_audio_processor.cc"
+    "i2c_device.cc"
+    "mqtt_control.cc"
+    "ota_client.cc"
+    "power_save_timer.cc"
+    "runtime_config.cc"
+    "settings_store.cc"
+    "system_info.cc"
+    "url_utils.cc"
+    "wifi_manager.cc"
+)
+
+idf_component_register(
+    SRCS ${SOURCES}
+    INCLUDE_DIRS "."
+    REQUIRES
+        cJSON
+        app_update
+        bt
+        driver
+        esp_event
+        esp_http_client
+        esp_https_ota
+        esp_netif
+        esp_partition
+        esp_timer
+        esp_wifi
+        esp_websocket_client
+        fatfs
+        esp_lcd
+        esp_lvgl_port
+        mqtt
+        nvs_flash
+        sdmmc
+        vfs
+        esp_lcd_st77916
+        lvgl
+        mbedtls
+        touch_button_sensor
+        touch_sensor_lowlevel
+        78__esp-opus
+        78__esp-opus-encoder
+)
