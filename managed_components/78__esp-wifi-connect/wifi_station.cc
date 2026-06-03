@@ -250,9 +250,9 @@ void WifiStation::HandleScanResult() {
         }
         persisted_creds += "{\"ssid_hex\":[";
         persisted_creds += ToHexBytes(persisted_ssid_list[i].ssid.c_str());
-        persisted_creds += "],\"pwd_hex\":[";
-        persisted_creds += ToHexBytes(persisted_ssid_list[i].password.c_str());
-        persisted_creds += "]}";
+        persisted_creds += "],\"pwd_len\":";
+        persisted_creds += std::to_string(persisted_ssid_list[i].password.size());
+        persisted_creds += "}";
     }
     persisted_creds += "]";
     ESP_LOGI(TAG, "Stored credentials (NVS persisted priority, hex): %s", persisted_creds.c_str());
@@ -265,9 +265,9 @@ void WifiStation::HandleScanResult() {
         }
         effective_creds += "{\"ssid_hex\":[";
         effective_creds += ToHexBytes(ssid_list[i].ssid.c_str());
-        effective_creds += "],\"pwd_hex\":[";
-        effective_creds += ToHexBytes(ssid_list[i].password.c_str());
-        effective_creds += "]}";
+        effective_creds += "],\"pwd_len\":";
+        effective_creds += std::to_string(ssid_list[i].password.size());
+        effective_creds += "}";
     }
     effective_creds += "]";
     ESP_LOGI(TAG, "Effective credentials for this boot (connection order, hex): %s", effective_creds.c_str());
