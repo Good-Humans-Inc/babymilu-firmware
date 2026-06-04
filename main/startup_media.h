@@ -16,6 +16,7 @@ struct Buffer {
 
 void Initialize();
 esp_err_t PreloadFromSdCard();
+esp_err_t GetSdHealthResult();
 bool HasPreloadStarted();
 bool WaitForPreloadFinished(TickType_t timeout);
 Buffer GetStartupGif();

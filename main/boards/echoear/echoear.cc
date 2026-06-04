@@ -270,37 +270,6 @@ static void ShowStartupGifFromStartupMedia() {
     }
 }
 
-static const char* GetSdCardFailureScreenMessage(esp_err_t ret) {
-    switch (ret) {
-        case ESP_ERR_NOT_FOUND:
-            return "SD card not detected";
-        case ESP_ERR_TIMEOUT:
-            return "SD card timeout";
-        case ESP_FAIL:
-            return "SD card mount failed";
-        default:
-            return "SD card init failed";
-    }
-}
-
-static void ShowSdCardFailureOnDisplay(esp_err_t ret) {
-    auto* display = Board::GetInstance().GetDisplay();
-    if (display == nullptr) {
-        return;
-    }
-
-    const char* message = GetSdCardFailureScreenMessage(ret);
-    display->SetStatus(message);
-    display->ShowNotification(message, 10000);
-
-    auto* lcd_display = static_cast<LcdDisplay*>(display);
-    if (lcd_display != nullptr) {
-        lcd_display->CreateSystemMessage(message);
-    } else {
-        display->SetChatMessage("system", message);
-    }
-}
-
 static void SdAnimInitTask(void* /*arg*/) {
     ESP_LOGI(TAG, "[SD/ANIM] Background init task started on core %d", xPortGetCoreID());
     s_firestore_startup_done.store(false);
@@ -308,9 +277,6 @@ static void SdAnimInitTask(void* /*arg*/) {
     
     esp_err_t ret = StartupMedia::PreloadFromSdCard();
     ESP_LOGI(TAG, "[SD/ANIM] StartupMedia::PreloadFromSdCard() returned: %s", esp_err_to_name(ret));
-    if (ret != ESP_OK) {
-        ShowSdCardFailureOnDisplay(ret);
-    }
 
     ShowStartupGifFromStartupMedia();
 

@@ -78,6 +78,56 @@ void SetStartupVisualLock(bool locked) {
     }
 }
 
+#ifdef CONFIG_BOARD_TYPE_ECHOEAR
+const char* GetDeferredSdCardFailureScreenMessage(esp_err_t ret) {
+    switch (ret) {
+        case ESP_ERR_NOT_FOUND:
+            return "SD card not detected";
+        case ESP_ERR_TIMEOUT:
+            return "SD card timeout";
+        case ESP_FAIL:
+            return "SD card mount failed";
+        default:
+            return "SD card init failed";
+    }
+}
+
+void ShowDeferredSdCardFailureIfNeeded() {
+    if (!StartupMedia::WaitForPreloadFinished(pdMS_TO_TICKS(5000))) {
+        ESP_LOGW(TAG, "SD card health check not finished after server startup; not showing SD error yet");
+        return;
+    }
+
+    esp_err_t ret = StartupMedia::GetSdHealthResult();
+    if (ret == ESP_OK || ret == ESP_ERR_INVALID_STATE) {
+        return;
+    }
+
+    Animation_t* normal_anim = animation_get_normal_animation();
+    if (normal_anim != nullptr && normal_anim->len > 0) {
+        ESP_LOGI(TAG, "Suppressing SD error because normal animation is available");
+        return;
+    }
+
+    auto* display = Board::GetInstance().GetDisplay();
+    if (display == nullptr) {
+        return;
+    }
+
+    const char* message = GetDeferredSdCardFailureScreenMessage(ret);
+    ESP_LOGW(TAG, "Showing deferred SD card error after server startup: %s", message);
+    display->SetStatus(message);
+    display->ShowNotification(message, 10000);
+
+    auto* lcd_display = static_cast<LcdDisplay*>(display);
+    if (lcd_display != nullptr) {
+        lcd_display->CreateSystemMessage(message);
+    } else {
+        display->SetChatMessage("system", message);
+    }
+}
+#endif
+
 }  // namespace
 
 // Minimal WAV-from-HTTP player for POC: expects mono 16-bit PCM at codec sample rate
@@ -1627,6 +1677,12 @@ void Application::Start()
         ResetDecoder();
         PlaySound(Lang::Sounds::P3_SUCCESS);
     }
+
+#ifdef CONFIG_BOARD_TYPE_ECHOEAR
+    if (protocol_started) {
+        ShowDeferredSdCardFailureIfNeeded();
+    }
+#endif
 
     // Print heap stats
     SystemInfo::PrintHeapStats();

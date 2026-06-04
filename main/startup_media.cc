@@ -21,6 +21,7 @@ const char* TAG = "StartupMedia";
 EventGroupHandle_t s_events = nullptr;
 StartupMedia::Buffer s_startup_gif;
 StartupMedia::Buffer s_startup_wav;
+esp_err_t s_sd_health_result = ESP_ERR_INVALID_STATE;
 constexpr int kSdHealthMaxAttempts = 3;
 
 EventGroupHandle_t Events()
@@ -146,9 +147,15 @@ esp_err_t PreloadFromSdCard()
         ESP_LOGE(TAG, "SD card health check failed after %d attempts: %s",
                  kSdHealthMaxAttempts, esp_err_to_name(ret));
     }
+    s_sd_health_result = ret;
 
     xEventGroupSetBits(events, kPreloadFinishedBit);
     return ret;
+}
+
+esp_err_t GetSdHealthResult()
+{
+    return s_sd_health_result;
 }
 
 bool HasPreloadStarted()
