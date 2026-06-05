@@ -12,7 +12,7 @@ Primary files:
 - `main/animation/animation.cc`
 - `crop_and_pack_gifs.py`
 
-Animations are loaded from `/sdcard/test.bin`, which contains the 21 packed GIF
+Animations are loaded from `/sdcard/test.bin`, which contains the 22 packed GIF
 assets. `startup.gif` is separate and is not part of `test.bin`.
 
 ## Current Animation Types
