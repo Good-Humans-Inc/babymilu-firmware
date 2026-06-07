@@ -294,3 +294,7 @@ void Display::SetEmotionGif(const uint8_t* gif_data, size_t gif_size) {
     (void)gif_data;
     (void)gif_size;
 }
+
+void Display::ClearSystemMessages() {
+    // Default implementation does nothing.
+}

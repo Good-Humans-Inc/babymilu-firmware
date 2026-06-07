@@ -39,6 +39,7 @@ typedef enum _AnimationType_e {
     ANIMATION_WIFI,
     ANIMATION_BATTERY,
     ANIMATION_CRY,
+    ANIMATION_SMILEY,
     ANIMATION_NUM
 }AnimationType_e;
 
@@ -65,6 +66,7 @@ Animation_t* animation_get_listening_animation(void);
 Animation_t* animation_get_smirk_animation(void);
 Animation_t* animation_get_battery_animation(void);
 Animation_t* animation_get_wifi_animation(void);
+Animation_t* animation_get_smiley_animation(void);
 void animation_load_sd_card_animations(void);
 void animation_show_current_sources(void);
 

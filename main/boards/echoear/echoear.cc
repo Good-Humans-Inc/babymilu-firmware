@@ -71,7 +71,7 @@ static void ChipTemperatureLogTask(void* /*arg*/) {
 static bool WaitForAnimationUpdaterCheckToFinish() {
     AnimationUpdater& updater = AnimationUpdater::GetInstance();
     const TickType_t wait_step = pdMS_TO_TICKS(500);
-    const int max_wait_for_start_steps = 120;  // 60 seconds max to observe updater start
+    const int max_wait_for_start_steps = 40;   // 20 seconds max to observe updater start
     const int max_wait_for_finish_steps = 240; // 120 seconds max to observe updater finish
 
     bool saw_running = false;
@@ -2118,4 +2118,3 @@ public:
 volatile uint32_t EchoEar::touch_event_count_ = 0;
 
 DECLARE_BOARD(EchoEar);
-

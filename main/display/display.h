@@ -31,6 +31,7 @@ public:
     virtual void UpdateStatusBar(bool update_all = false);
     virtual void SetEmotionImg(const lv_image_dsc_t *img);
     virtual void SetEmotionGif(const uint8_t* gif_data, size_t gif_size);
+    virtual void ClearSystemMessages();
     inline int width() const { return width_; }
     inline int height() const { return height_; }
 

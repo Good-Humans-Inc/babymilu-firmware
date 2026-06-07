@@ -75,7 +75,7 @@ public:
     void CreateSystemMessage(const char* message);
     
     // Public method to clear all system messages created by CreateSystemMessage
-    void ClearSystemMessages();
+    virtual void ClearSystemMessages() override;
 
     // Overlay message (top, does not affect layout)
     void CreateOverlayMessage(const char* message);
