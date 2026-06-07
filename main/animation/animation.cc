@@ -446,9 +446,9 @@ void plat_animation_task(void *arg)
                 anim_source = "SD_CARD";
             }
             
-            /*ESP_LOGI("animation", "Currently displaying: %s (index: %d, type: %s, source: %s, frames: %d)", 
-                     anim_name, now_animation, anim_type, anim_source, current_anim->len);*/
-            
+            ESP_LOGD("animation", "Currently displaying: %s (index: %d, type: %s, source: %s, frames: %d)",
+                     anim_name, now_animation, anim_type, anim_source, current_anim->len);
+
             last_log_time = current_time;
         }
         

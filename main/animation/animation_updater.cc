@@ -1,5 +1,6 @@
 ﻿#include "animation_updater.h"
 #include "board.h"
+#include "display.h"
 #include "system_info.h"
 #include "animation.h"
 #include "sd_card.h"
@@ -2706,14 +2707,10 @@ bool AnimationUpdater::ValidateMegaAnimationFileFromDisk(const char* file_path) 
     
     // Validate each frame in the mega file
     int frame_count = 0;
-    long file_pos = 0;
-    
     for (int anim_idx = 0; anim_idx < 8; anim_idx++) {
         int frame_count_for_anim = animation_frame_counts[anim_idx];
         
         for (int frame_idx = 0; frame_idx < frame_count_for_anim; frame_idx++) {
-            file_pos = ftell(f);
-            
             // Read header (6 uint32_t values)
             uint32_t header_data[6];
             size_t header_read = fread(header_data, sizeof(uint32_t), 6, f);
