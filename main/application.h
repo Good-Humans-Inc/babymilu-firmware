@@ -12,6 +12,7 @@
 #include <vector>
 #include <condition_variable>
 #include <memory>
+#include <atomic>
 
 #include <opus_encoder.h>
 #include <opus_decoder.h>
@@ -89,6 +90,7 @@ public:
     Protocol* GetActiveProtocol();  // Returns the protocol to use for audio (WebSocket if available, else primary)
     void OpenWebSocketConnection();  // Opens WebSocket connection for conversations
     bool IsWebSocketConnected() const;  // Check if WebSocket is already connected
+    bool ShouldDeferStartupNetworkJobsForOta() const { return defer_startup_network_jobs_for_ota_.load(); }
 
 private:
     Application();
@@ -114,6 +116,7 @@ private:
     bool voice_detected_ = false;
     bool busy_decoding_audio_ = false;
     bool wifi_error_reminder_active_ = false;  // First press shows wifi face, second press exits to normal.
+    std::atomic<bool> defer_startup_network_jobs_for_ota_{true};
     
     // VAD interrupt debounce state
     int64_t speaking_start_time_us_ = 0;  // When speaking state started (for grace period)
@@ -149,6 +152,7 @@ private:
     void ResetDecoder();
     void SetDecodeSampleRate(int sample_rate, int frame_duration);
     void CheckNewVersion();
+    void SetStartupNetworkJobsDeferredForOta(bool deferred);
     void ShowActivationCode();
     void OnClockTimer();
     void SetListeningMode(ListeningMode mode);

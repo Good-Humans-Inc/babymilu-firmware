@@ -108,6 +108,31 @@ static bool WaitForAnimationUpdaterCheckToFinish() {
     return false;
 }
 
+static bool WaitForOtaGateBeforeStartupNetworkJob(const char* job_name) {
+    auto& app = Application::GetInstance();
+    if (!app.ShouldDeferStartupNetworkJobsForOta()) {
+        return true;
+    }
+
+    ESP_LOGI(TAG, "[%s] Waiting for OTA check before startup network job", job_name);
+    const TickType_t wait_step = pdMS_TO_TICKS(500);
+    const int max_wait_steps = 120; // 60 seconds max
+    for (int i = 0; i < max_wait_steps; ++i) {
+        if (!app.ShouldDeferStartupNetworkJobsForOta()) {
+            ESP_LOGI(TAG, "[%s] OTA check finished; startup network job can continue", job_name);
+            return true;
+        }
+        if (app.GetDeviceState() == kDeviceStateUpgrading) {
+            ESP_LOGW(TAG, "[%s] OTA upgrade active; skipping startup network job", job_name);
+            return false;
+        }
+        vTaskDelay(wait_step);
+    }
+
+    ESP_LOGW(TAG, "[%s] Timed out waiting for OTA gate; skipping startup network job", job_name);
+    return false;
+}
+
 static void ApplyFirestoreWifiRanking(const std::string& response) {
     cJSON* root = cJSON_Parse(response.c_str());
     if (!root) {
@@ -305,9 +330,13 @@ static void SdAnimInitTask(void* /*arg*/) {
 
     if (wifi_ready) {
         ESP_LOGI(TAG, "[FIRESTORE] WiFi connected");
-        WaitForAnimationUpdaterCheckToFinish();
-        ESP_LOGI(TAG, "[FIRESTORE] Requesting device document after animation updater check");
-        FetchFirestoreDeviceDocumentAndApplyRanking();
+        if (WaitForOtaGateBeforeStartupNetworkJob("FIRESTORE")) {
+            WaitForAnimationUpdaterCheckToFinish();
+            ESP_LOGI(TAG, "[FIRESTORE] Requesting device document after animation updater check");
+            FetchFirestoreDeviceDocumentAndApplyRanking();
+        } else {
+            ESP_LOGI(TAG, "[FIRESTORE] Startup Firestore request skipped");
+        }
     } else {
         ESP_LOGW(TAG, "[FIRESTORE] WiFi was not ready within timeout, skipping device document request");
     }

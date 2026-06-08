@@ -514,8 +514,15 @@ Application::~Application()
     vEventGroupDelete(event_group_);
 }
 
+void Application::SetStartupNetworkJobsDeferredForOta(bool deferred)
+{
+    defer_startup_network_jobs_for_ota_.store(deferred);
+}
+
 void Application::CheckNewVersion()
 {
+    SetStartupNetworkJobsDeferredForOta(true);
+
     const int MAX_RETRY = 10;
     int retry_count = 0;
     int retry_delay = 10; // 初始重试延迟为10秒
@@ -532,6 +539,7 @@ void Application::CheckNewVersion()
             if (retry_count >= MAX_RETRY)
             {
                 ESP_LOGE(TAG, "Too many retries, exit version check");
+                SetStartupNetworkJobsDeferredForOta(false);
                 return;
             }
 
@@ -609,6 +617,7 @@ void Application::CheckNewVersion()
 
         // No new version, mark the current version as valid
         ota_.MarkCurrentVersionValid();
+        SetStartupNetworkJobsDeferredForOta(false);
         if (!ota_.HasActivationCode() && !ota_.HasActivationChallenge())
         {
             xEventGroupSetBits(event_group_, CHECK_NEW_VERSION_DONE_EVENT);
