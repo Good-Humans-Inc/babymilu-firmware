@@ -39,7 +39,8 @@ Important incoming message types:
 
 - `tts`: `state` is `start`, `stop`, or `sentence_start`.
 - `stt`: contains recognized text.
-- `llm`: contains an `emotion` string for display.
+- `llm`: contains an exact `emotion` string for display. To trigger the smiley
+  GIF, send `{"type":"llm","emotion":"cheerful"}`.
 - `listen`: `state` is `start` or `stop`.
 - `mcp`: contains MCP payload for tool/list/call handling.
 

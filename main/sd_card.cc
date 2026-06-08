@@ -739,7 +739,7 @@ esp_err_t SdCard::TestWriteCapability() {
     }
     
     // Test 2: Try to create a temporary file
-    std::string test_file = std::string(MOUNT_POINT) + "/write_test.tmp";
+    std::string test_file = std::string(MOUNT_POINT) + "/WT.TMP";
     FILE* file = fopen(test_file.c_str(), "w");
     if (file == NULL) {
         ESP_LOGE(TAG, "Failed to create test file: %s, errno=%d", test_file.c_str(), errno);

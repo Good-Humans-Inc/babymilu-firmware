@@ -218,25 +218,6 @@ void ShowWifiTimeoutOnDisplay(const std::string& ssid,
     }
 }
 
-void ShowWifiConnectAttemptOnDisplay(const std::string& ssid, const std::string& password) {
-    auto display = Board::GetInstance().GetDisplay();
-    if (display == nullptr) {
-        return;
-    }
-    std::string status = std::string("Trying Wi-Fi: ") + (ssid.empty() ? "<unknown>" : ssid);
-    display->SetStatus(status.c_str());
-    std::string overlay = BuildWifiAttemptOverlay("Trying Wi-Fi credential",
-                                                  ssid,
-                                                  password,
-                                                  "Checking the saved credential now");
-    auto* lcd_display = static_cast<LcdDisplay*>(display);
-    if (lcd_display != nullptr) {
-        lcd_display->CreateOverlayMessage(overlay.c_str());
-    } else {
-        display->SetChatMessage("system", overlay.c_str());
-    }
-}
-
 void ClearWifiOverlay(Display* display) {
     if (display == nullptr) {
         return;
@@ -425,9 +406,9 @@ void WifiBoard::StartNetwork() {
     // Debug: Log stored WiFi credentials
     ESP_LOGI(TAG, "Stored WiFi credentials count: %d", ssid_list.size());
     for (size_t i = 0; i < ssid_list.size(); i++) {
-        ESP_LOGI(TAG, "WiFi %d: SSID='%s', Password='%s'", 
-                 i, ssid_list[i].ssid.c_str(), 
-                 ssid_list[i].password.c_str());
+        ESP_LOGI(TAG, "WiFi %d: SSID='%s', password_len=%u",
+                 i, ssid_list[i].ssid.c_str(),
+                 static_cast<unsigned>(ssid_list[i].password.size()));
     }
     
     if (ssid_list.empty()) {
@@ -528,12 +509,12 @@ void WifiBoard::StartNetwork() {
         auto& ssid_manager = SsidManager::GetInstance();
         auto ssid_list = ssid_manager.GetSsidList();
         bool matched_ssid = false;
-        std::string matched_password;
         for (const auto& item : ssid_list) {
             if (item.ssid == ssid) {
-                ESP_LOGI(TAG, "Connecting with SSID='%s', Password='%s'", item.ssid.c_str(), item.password.c_str());
+                ESP_LOGI(TAG, "Connecting with saved SSID='%s', password_len=%u",
+                         item.ssid.c_str(),
+                         static_cast<unsigned>(item.password.size()));
                 matched_ssid = true;
-                matched_password = item.password;
                 break;
             }
         }
@@ -546,7 +527,6 @@ void WifiBoard::StartNetwork() {
         notification += ssid;
         notification += "...";
         display->ShowNotification(notification.c_str(), 30000);
-        ShowWifiConnectAttemptOnDisplay(ssid, matched_password);
     });
     wifi_station.OnConnected([this](const std::string& ssid) {
         auto display = Board::GetInstance().GetDisplay();
@@ -621,7 +601,7 @@ void WifiBoard::StartNetwork() {
     wifi_station.Start();
 
     // Try to connect to WiFi with saved credentials before falling back to BLE configuration.
-    if (!wifi_station.WaitForConnected(25 * 1000)) {
+    if (!wifi_station.WaitForConnected(60 * 1000)) {
         wifi_station.Stop();
         wifi_config_mode_ = true;
         ESP_LOGI(TAG, "WiFi connection failed, using BLE for configuration");
@@ -964,7 +944,8 @@ void WifiBoard::ParseWifiCredentials(const char* data) {
             password = password.substr(0, pwd_pos);
         }
         
-        ESP_LOGI(TAG, "WiFi password received via BLE: %s", password.c_str());
+        ESP_LOGI(TAG, "WiFi password received via BLE: password_len=%u",
+                 static_cast<unsigned>(password.size()));
         
         // Check if we have a stored SSID
         if (!temp_ssid_.empty()) {
