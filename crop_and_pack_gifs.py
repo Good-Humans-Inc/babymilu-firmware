@@ -4,7 +4,7 @@ Crop, resize, and pack GIF files into a test.bin file.
 
 This script:
 1. Crops and resizes all GIFs in a folder (optional step)
-2. Packs exactly 22 animation GIFs into a single test.bin file for SD card loading
+2. Packs exactly 24 animation GIFs into a single test.bin file for SD card loading
 3. Produces startup.gif as a separate SD card root asset
 
 Usage:
@@ -19,11 +19,13 @@ Example:
     python crop_and_pack_gifs.py gif_folder/ test.bin
     python crop_and_pack_gifs.py gif_folder/ test.bin --no-crop
 
-Expected GIF files in folder (22 packed files + startup.gif at SD root):
+Expected GIF files in folder (24 packed files + startup.gif at SD root):
     - smirk.gif
     - smirk_start.gif
     - smiley.gif
     - smiley_start.gif
+    - speechless.gif
+    - speechless_start.gif
     - heart.gif
     - heart_start.gif
     - blush.gif
@@ -65,12 +67,14 @@ STARTUP_PALETTE_COLORS = 32
 STARTUP_PALETTE_SAMPLE_EVERY = 15
 STARTUP_DISPOSAL = 2
 
-# These 22 GIFs are packed into test.bin.
+# These 24 GIFs are packed into test.bin.
 PACKED_GIFS = [
     "smirk.gif",
     "smirk_start.gif",
     "smiley.gif",
     "smiley_start.gif",
+    "speechless.gif",
+    "speechless_start.gif",
     "heart.gif",
     "heart_start.gif",
     "blush.gif",

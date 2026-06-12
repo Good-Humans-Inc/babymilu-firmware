@@ -1332,6 +1332,7 @@ void LcdDisplay::SetEmotion(const char *emotion)
         {ANIMATION_NORMAL, "neutral"},
         {ANIMATION_SMIRK, "smirk"},
         {ANIMATION_SMILEY, "cheerful"},
+        {ANIMATION_SPEECHLESS, "speechless"},
         {ANIMATION_HEARTY, "heart"},
         {ANIMATION_HEARTY, "happy"},
         {ANIMATION_BLUSH, "blush"},

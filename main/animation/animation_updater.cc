@@ -24,13 +24,15 @@
 #define ANIMATION_UPDATER_STACK_SIZE 10240
 #define LEGACY_GIF_TEST_BIN_FILE_COUNT 20u
 #define SMILEY_LOOP_ONLY_GIF_TEST_BIN_FILE_COUNT 21u
-#define EXPECTED_GIF_TEST_BIN_FILE_COUNT 22u
+#define SMILEY_FULL_GIF_TEST_BIN_FILE_COUNT 22u
+#define EXPECTED_GIF_TEST_BIN_FILE_COUNT 24u
 
 namespace {
 
 bool IsSupportedGifTestBinFileCount(uint32_t file_count) {
     return file_count == LEGACY_GIF_TEST_BIN_FILE_COUNT ||
            file_count == SMILEY_LOOP_ONLY_GIF_TEST_BIN_FILE_COUNT ||
+           file_count == SMILEY_FULL_GIF_TEST_BIN_FILE_COUNT ||
            file_count == EXPECTED_GIF_TEST_BIN_FILE_COUNT;
 }
 
@@ -2912,9 +2914,9 @@ bool AnimationUpdater::ValidateGifMegaAnimationFileFromDisk(const char* file_pat
              file_count, checksum, combined_length);
     
     // Current format uses startup.gif as a separate SD card root file.
-    // Prefer 22 animation GIFs, but accept legacy 20/21-GIF bundles during rollout.
+    // Prefer 24 animation GIFs, but accept legacy 20/21/22-GIF bundles during rollout.
     if (!IsSupportedGifTestBinFileCount(file_count)) {
-        ESP_LOGE(TAG, "Invalid file_count in header: %u (expected 20, 21, or 22)", file_count);
+        ESP_LOGE(TAG, "Invalid file_count in header: %u (expected 20, 21, 22, or 24)", file_count);
         fclose(f);
         return false;
     }

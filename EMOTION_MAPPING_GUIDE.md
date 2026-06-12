@@ -12,7 +12,7 @@ Primary files:
 - `main/animation/animation.cc`
 - `crop_and_pack_gifs.py`
 
-Animations are loaded from `/sdcard/test.bin`, which contains the 22 packed GIF
+Animations are loaded from `/sdcard/test.bin`, which contains the 24 packed GIF
 assets. `startup.gif` is separate and is not part of `test.bin`.
 
 ## Current Animation Types
@@ -35,6 +35,7 @@ assets. `startup.gif` is separate and is not part of `test.bin`.
 - `ANIMATION_BATTERY`
 - `ANIMATION_CRY`
 - `ANIMATION_SMILEY`
+- `ANIMATION_SPEECHLESS`
 
 Older names such as `FIRE`, `INSPIRATION`, `QUESTION`, `TALK`, `HAPPY`, and
 `EMBARRESSED` are not current enum values.
@@ -49,8 +50,9 @@ The current mapping is intentionally narrow and mostly exact:
 | `normal` | normal |
 | `smirk` | smirk |
 | `cheerful` | smiley |
-| `happy` | smirk |
+| `speechless` | speechless |
 | `heart` | hearty |
+| `happy` | hearty |
 | `blush` | blush |
 | `embarressed` | blush |
 | `sad` | sad |
@@ -69,6 +71,7 @@ The current mapping is intentionally narrow and mostly exact:
 Unknown strings fall back to `ANIMATION_NORMAL`.
 
 `cheerful` is the canonical server/LLM string from the Smiley Update Doc.
+`speechless` is the canonical server/LLM string from the Speechless Update Doc.
 `normal` and `neutral` select the normal animation.
 
 ## Overrides
