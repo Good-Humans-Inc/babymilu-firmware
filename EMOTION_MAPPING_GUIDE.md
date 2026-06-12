@@ -50,8 +50,9 @@ The current mapping is intentionally narrow and mostly exact:
 | `normal` | normal |
 | `smirk` | smirk |
 | `cheerful` | smiley |
-| `happy` | smirk |
+| `speechless` | speechless |
 | `heart` | hearty |
+| `happy` | hearty |
 | `blush` | blush |
 | `embarressed` | blush |
 | `sad` | sad |
@@ -70,9 +71,8 @@ The current mapping is intentionally narrow and mostly exact:
 Unknown strings fall back to `ANIMATION_NORMAL`.
 
 `cheerful` is the canonical server/LLM string from the Smiley Update Doc.
+`speechless` is the canonical server/LLM string from the Speechless Update Doc.
 `normal` and `neutral` select the normal animation.
-`ANIMATION_SPEECHLESS` is supported by the firmware and asset bundle, but its
-incoming server/LLM emotion string is TBD and intentionally not listed above.
 
 ## Overrides
 
