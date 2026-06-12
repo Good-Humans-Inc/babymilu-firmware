@@ -19,7 +19,6 @@
 #include <wifi_station.h>
 #include <wifi_configuration_ap.h>
 #include <ssid_manager.h>
-#include "animation/animation.h"
 #include "display/lcd_display.h"
 #include "error_log_uploader.h"
 
@@ -541,38 +540,6 @@ void WifiBoard::StartNetwork() {
             ble_server_stop_advertising();
             ble_server_deinit();
             ble_initialized_ = false;
-        }
-        
-        // Check if animation is available, if not show connected message
-        ESP_LOGI(TAG, "WiFi connected, checking animation availability...");
-        Animation_t* current_anim = animation_get_normal_animation();
-        ESP_LOGI(TAG, "Animation check: current_anim=%p", current_anim);
-        if (current_anim != NULL) {
-            ESP_LOGI(TAG, "Animation available: len=%d", current_anim->len);
-        }
-        
-        if (current_anim == NULL || current_anim->len == 0) {
-            ESP_LOGI(TAG, "No animation available, showing connected message");
-            // No animation available, show connected message (display in center of screen)
-            const char* connected_message = "Connected! I am traveling over :D";
-            
-            // Try to use LcdDisplay::CreateSystemMessage if available
-            LcdDisplay* lcd_display = static_cast<LcdDisplay*>(display);
-            if (lcd_display != nullptr) {
-                ESP_LOGI(TAG, "Display is LcdDisplay, using CreateSystemMessage for connected message");
-                lcd_display->CreateSystemMessage(connected_message);
-            }
-            
-            // Also try standard methods as fallback
-            display->SetChatMessage("system", connected_message);
-            ESP_LOGI(TAG, "Called SetChatMessage with connected message");
-            
-            // Also try ShowNotification as fallback
-            vTaskDelay(pdMS_TO_TICKS(100));
-            display->ShowNotification(connected_message, 0);
-            ESP_LOGI(TAG, "Called ShowNotification with connected message");
-        } else {
-            ESP_LOGI(TAG, "Animation is available, not showing connected message");
         }
     });
     wifi_station.OnDisconnected([this](const std::string& ssid, wifi_err_reason_t reason, int8_t rssi) {

@@ -41,6 +41,8 @@ Important incoming message types:
 - `stt`: contains recognized text.
 - `llm`: contains an exact `emotion` string for display. To trigger the smiley
   GIF, send `{"type":"llm","emotion":"cheerful"}`.
+- `speechless` GIF assets are supported in the 24-GIF animation bundle, but the
+  incoming `llm.emotion` string for that animation is TBD.
 - `listen`: `state` is `start` or `stop`.
 - `mcp`: contains MCP payload for tool/list/call handling.
 

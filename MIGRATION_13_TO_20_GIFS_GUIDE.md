@@ -1,6 +1,6 @@
-# Current 22-GIF Asset Guide
+# Current 24-GIF Asset Guide
 
-This is the active EchoEar animation asset guide. The firmware expects a 22-GIF
+This is the active EchoEar animation asset guide. The firmware expects a 24-GIF
 bundle at `/sdcard/test.bin` and a separate startup GIF at `/sdcard/startup.gif`.
 
 ## Current Files
@@ -14,20 +14,22 @@ bundle at `/sdcard/test.bin` and a separate startup GIF at `/sdcard/startup.gif`
 
 ```text
 /sdcard/
-  test.bin       # packed 22 emotion GIFs
+  test.bin       # packed 24 emotion GIFs
   startup.gif    # separate startup GIF, not inside test.bin
   startup.wav    # optional startup audio
 ```
 
 ## Required GIFs In `test.bin`
 
-`crop_and_pack_gifs.py` packs exactly these 22 files:
+`crop_and_pack_gifs.py` packs exactly these 24 files:
 
 ```text
 smirk.gif
 smirk_start.gif
 smiley.gif
 smiley_start.gif
+speechless.gif
+speechless_start.gif
 heart.gif
 heart_start.gif
 blush.gif
@@ -70,16 +72,18 @@ and is written as a separate SD-card root asset.
 The firmware validates the bundle before loading:
 
 - 12-byte header.
-- Exactly 22 file table entries.
+- Exactly 24 file table entries for the current bundle.
 - Each table entry is 44 bytes.
 - GIF data entries are prefixed with `0x5A5A`.
 - File is large enough for the expected GIF bundle.
 - `startup.gif` must not appear in the bundle.
 
-During rollout, firmware also accepts the previous 20-entry bundle and the
-transitional 21-entry bundle. With 20 entries, `smiley` requests fall back. With
-21 entries, `smiley` can play its loop GIF but has no start GIF. The full
-22-entry bundle includes both `smiley_start.gif` and `smiley.gif`.
+During rollout, firmware also accepts the previous 20-entry bundle, the
+transitional 21-entry bundle, and the full 22-entry smiley bundle. With 20
+entries, `smiley` requests fall back. With 21 entries, `smiley` can play its
+loop GIF but has no start GIF. The 22-entry bundle includes both
+`smiley_start.gif` and `smiley.gif`, but not speechless. The current 24-entry
+bundle adds both `speechless_start.gif` and `speechless.gif`.
 
 If validation fails, the firmware skips GIF loading and lets the update path
 retry later.

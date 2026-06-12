@@ -1091,37 +1091,7 @@ void Application::Start()
             // which is handled inside WifiBoard::StartNetwork().
             ESP_LOGI(TAG, "WiFi not connected but credentials exist; keeping wifi.gif on screen");
         } else {
-            ESP_LOGI(TAG, "WiFi is connected, checking animation availability...");
-            // WiFi is connected, check if animation is available
-            Animation_t* current_anim = animation_get_normal_animation();
-            ESP_LOGI(TAG, "Animation check: current_anim=%p", current_anim);
-            if (current_anim != NULL) {
-                ESP_LOGI(TAG, "Animation available: len=%d", current_anim->len);
-            }
-            
-            if (current_anim == NULL || current_anim->len == 0) {
-                ESP_LOGI(TAG, "No animation available, showing connected message");
-                // No animation available, show connected message (display in center of screen)
-                const char* connected_message = "Connected! I am traveling over :D";
-                
-                // Try to use LcdDisplay::CreateSystemMessage if available
-                LcdDisplay* lcd_display = static_cast<LcdDisplay*>(display);
-                if (lcd_display != nullptr) {
-                    ESP_LOGI(TAG, "Display is LcdDisplay, using CreateSystemMessage for connected message");
-                    lcd_display->CreateSystemMessage(connected_message);
-                }
-                
-                // Also try standard methods as fallback
-                display->SetChatMessage("system", connected_message);
-                ESP_LOGI(TAG, "Called SetChatMessage with connected message");
-                
-                // Also try ShowNotification as fallback
-                vTaskDelay(pdMS_TO_TICKS(100));
-                display->ShowNotification(connected_message, 0);
-                ESP_LOGI(TAG, "Called ShowNotification with connected message");
-            } else {
-                ESP_LOGI(TAG, "Animation is available, not showing connected message");
-            }
+            ESP_LOGI(TAG, "WiFi is connected; skipping fallback connected banner");
         }
     } else {
         ESP_LOGI(TAG, "ML307 board detected, skipping WiFi message display");

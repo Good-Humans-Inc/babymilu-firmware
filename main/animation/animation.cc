@@ -44,11 +44,13 @@ static std::atomic<bool> g_startup_load_blocked{false};
 // Any failure here means we skip all animation loading this boot.
 #define LEGACY_TEST_BIN_FILE_COUNT 20u
 #define SMILEY_LOOP_ONLY_TEST_BIN_FILE_COUNT 21u
-#define EXPECTED_TEST_BIN_FILE_COUNT 22u
+#define SMILEY_FULL_TEST_BIN_FILE_COUNT 22u
+#define EXPECTED_TEST_BIN_FILE_COUNT 24u
 
 static bool IsSupportedGifBundleFileCount(uint32_t file_count) {
     return file_count == LEGACY_TEST_BIN_FILE_COUNT ||
            file_count == SMILEY_LOOP_ONLY_TEST_BIN_FILE_COUNT ||
+           file_count == SMILEY_FULL_TEST_BIN_FILE_COUNT ||
            file_count == EXPECTED_TEST_BIN_FILE_COUNT;
 }
 
@@ -142,7 +144,7 @@ static bool animation_test_bin_looks_valid(void) {
     uint64_t min_needed = 12ull + (uint64_t)file_count * 44ull;
     uint64_t expected_total = 12ull + (uint64_t)data_length;
     // Runtime contract: startup.gif is now delivered independently as /sdcard/startup.gif.
-    // Prefer the 22-GIF bundle, but accept legacy 20/21-GIF bundles during rollout.
+    // Prefer the 24-GIF bundle, but accept legacy 20/21/22-GIF bundles during rollout.
     if (!IsSupportedGifBundleFileCount(file_count) ||
         (uint64_t)st.st_size < min_needed ||
         (uint64_t)st.st_size < expected_total) {
@@ -257,6 +259,7 @@ static Animation_t sd_smirk = {0};
 static Animation_t sd_wifi = {0};
 static Animation_t sd_battery = {0};
 static Animation_t sd_smiley = {0};
+static Animation_t sd_speechless = {0};
 
 // Initialize GIF fields
 #define INIT_ANIM(anim) do { \
@@ -348,6 +351,8 @@ Animation_t* get_animation(int index) {
             return animation_get_cry_animation();
         case ANIMATION_SMILEY:
             return animation_get_smiley_animation();
+        case ANIMATION_SPEECHLESS:
+            return animation_get_speechless_animation();
         default:
             return animation_get_normal_animation();
     }
@@ -370,7 +375,8 @@ Animation_t *animations[] = {
     NULL,  // ANIMATION_WIFI
     NULL,  // ANIMATION_BATTERY
     NULL,  // ANIMATION_CRY
-    NULL   // ANIMATION_SMILEY
+    NULL,  // ANIMATION_SMILEY
+    NULL   // ANIMATION_SPEECHLESS
 };
 
 static int now_animation = ANIMATION_NORMAL;
@@ -385,7 +391,7 @@ static const char* get_animation_name(int animation_index) {
         "NORMAL", "BLUSH", "ANGRY", "STARRY", "SHY",
         "SLEEP", "HEARTY", "LAUGH", "SAD", "SILENCE",
         "LISTENING", "SMIRK", "WIFI", "BATTERY", "CRY",
-        "SMILEY"
+        "SMILEY", "SPEECHLESS"
     };
     
     if (animation_index >= 0 && animation_index < ANIMATION_NUM) {
@@ -603,6 +609,7 @@ void animation_load_sd_card_animations(void)
     INIT_ANIM(sd_wifi);
     INIT_ANIM(sd_battery);
     INIT_ANIM(sd_smiley);
+    INIT_ANIM(sd_speechless);
 
     if (!animation_test_bin_looks_valid()) {
         ESP_LOGW("animation",
@@ -988,6 +995,23 @@ Animation_t* animation_get_smiley_animation(void)
     return animation_get_normal_animation();
 }
 
+// Function to get the appropriate speechless animation (SD card only)
+Animation_t* animation_get_speechless_animation(void)
+{
+    if (sd_speechless.use_gif && sd_speechless.gif_data && sd_speechless.gif_data_size > 0) {
+        return &sd_speechless;
+    }
+    if (sd_speechless.use_spiffs && sd_speechless.imges && sd_speechless.len > 0) {
+        return &sd_speechless;
+    }
+    ESP_LOGW("animation", "No speechless animation available from SD card, falling back to smirk/normal");
+    Animation_t* fallback = animation_get_smirk_animation();
+    if (fallback != NULL) {
+        return fallback;
+    }
+    return animation_get_normal_animation();
+}
+
 void animation_show_current_sources(void)
 {
     ESP_LOGI("animation", "=== Current Animation Sources ===");
@@ -998,7 +1022,7 @@ void animation_show_current_sources(void)
             "NORMAL", "BLUSH", "ANGRY", "STARRY", "SHY",
             "SLEEP", "HEARTY", "LAUGH", "SAD", "SILENCE",
             "LISTENING", "SMIRK", "WIFI", "BATTERY", "CRY",
-            "SMILEY"
+            "SMILEY", "SPEECHLESS"
         };
         
         if (anim && anim->use_spiffs) {
@@ -2361,7 +2385,7 @@ bool animation_load_gifs_from_test_bin(void)
         return false;
     }
     
-    ESP_LOGI("animation", "Loading GIF animations from test.bin (22 fixed GIFs, legacy 20/21 accepted)...");
+    ESP_LOGI("animation", "Loading GIF animations from test.bin (24 fixed GIFs, legacy 20/21/22 accepted)...");
 
     typedef struct {
         const char* logical_name;      // For logging only
@@ -2370,8 +2394,8 @@ bool animation_load_gifs_from_test_bin(void)
         Animation_t* target_anim;     // Target animation struct (sd_*)
     } GifAnimDef;
 
-    // Map the 22 GIF assets to our internal Animation_t slots. Legacy
-    // 20-entry bundles skip smiley, and 21-entry bundles use smiley loop only.
+    // Map the 24 GIF assets to our internal Animation_t slots. Legacy
+    // 20/21/22-entry bundles skip assets that were added later.
     // Multiple enums may later point to the same Animation_t via get_animation().
     const GifAnimDef gif_anims[] = {
         // Main emotional animations
@@ -2379,6 +2403,7 @@ bool animation_load_gifs_from_test_bin(void)
         {"smirk",    "smirk.gif",       "smirk_start.gif",  &sd_smirk},
         {"heart",    "heart.gif",       "heart_start.gif",  &sd_happy},       // reuse sd_happy for heart
         {"smiley",   "smiley.gif",      "smiley_start.gif", &sd_smiley},
+        {"speechless","speechless.gif", "speechless_start.gif", &sd_speechless},
         {"blush",    "blush.gif",       NULL,               &sd_embarrass},   // reuse sd_embarrass for blush
         {"sad",      "sad.gif",         "sad_start.gif",    &sd_sad},
         {"laugh",    "laugh.gif",       "laugh_start.gif",  &sd_laugh},
