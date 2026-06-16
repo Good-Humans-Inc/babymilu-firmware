@@ -42,7 +42,6 @@ static std::atomic<bool> g_startup_load_blocked{false};
 //   - the 12-byte bundle header reads OK
 //   - header is internally consistent with actual file size
 // Any failure here means we skip all animation loading this boot.
-#define EXPECTED_TEST_BIN_FILE_COUNT 20u
 
 static bool IsStartupGifBundleEntry(const char* name) {
     return strcasecmp(name, "startup.gif") == 0;
@@ -134,10 +133,10 @@ static bool animation_test_bin_looks_valid(void) {
     // space to actually hold the file table.
     uint64_t min_needed = 12ull + (uint64_t)file_count * 44ull;
     uint64_t expected_total = 12ull + (uint64_t)data_length;
-    // Runtime contract: startup.gif is now delivered independently as /sdcard/startup.gif,
-    // so test.bin is expected to contain exactly 20 GIF assets.
-    if (file_count != EXPECTED_TEST_BIN_FILE_COUNT ||
-        (uint64_t)st.st_size < min_needed ||
+    // Runtime contract: startup.gif is delivered independently as
+    // /sdcard/startup.gif. test.bin may contain additional GIFs, but its
+    // file table and combined length still need to fit inside the file.
+    if ((uint64_t)st.st_size < min_needed ||
         (uint64_t)st.st_size < expected_total) {
         ESP_LOGW("animation",
                  "test.bin header inconsistent (file_count=%u, combined_length=%u, file_size=%ld); skip animation loading",
@@ -2330,7 +2329,7 @@ bool animation_load_gifs_from_test_bin(void)
         return false;
     }
     
-    ESP_LOGI("animation", "Loading GIF animations from test.bin (20 fixed GIFs)...");
+    ESP_LOGI("animation", "Loading GIF animations from test.bin by filename...");
 
     typedef struct {
         const char* logical_name;      // For logging only
@@ -2339,7 +2338,7 @@ bool animation_load_gifs_from_test_bin(void)
         Animation_t* target_anim;     // Target animation struct (sd_*)
     } GifAnimDef;
 
-    // Map the 20 GIF assets to our internal Animation_t slots.
+    // Map the required GIF assets to our internal Animation_t slots.
     // Multiple enums may later point to the same Animation_t via get_animation().
     const GifAnimDef gif_anims[] = {
         // Main emotional animations

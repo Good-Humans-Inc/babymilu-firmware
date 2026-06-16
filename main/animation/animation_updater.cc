@@ -2833,35 +2833,35 @@ bool AnimationUpdater::ValidateGifMegaAnimationFileFromDisk(const char* file_pat
     ESP_LOGI(TAG, "GIF test.bin header: file_count=%u, checksum=0x%08X, combined_length=%u", 
              file_count, checksum, combined_length);
     
-    // Current format uses startup.gif as a separate SD card root file.
-    // test.bin is expected to contain exactly 20 animation GIFs.
-    if (file_count != 20) {
-        ESP_LOGE(TAG, "Invalid file_count in header: %u (expected 20)", file_count);
+    // Calculate file table size and data section start
+    const uint64_t FILE_TABLE_ENTRY_SIZE = 44ull; // 32 name + 4 size + 4 offset + 2 width + 2 height
+    const uint64_t file_table_size = static_cast<uint64_t>(file_count) * FILE_TABLE_ENTRY_SIZE;
+    const uint64_t data_start = 12ull + file_table_size; // 12 byte header + file table
+
+    // Validate file structure can fit
+    if (static_cast<uint64_t>(file_size) < data_start) {
+        ESP_LOGE(TAG, "File too small for file table: %zu bytes (need at least %llu)",
+                 file_size, static_cast<unsigned long long>(data_start));
         fclose(f);
         return false;
     }
-    
-    // Calculate file table size and data section start
-    const size_t FILE_TABLE_ENTRY_SIZE = 44; // 32 name + 4 size + 4 offset + 2 width + 2 height
-    size_t file_table_size = file_count * FILE_TABLE_ENTRY_SIZE;
-    size_t data_start = 12 + file_table_size; // 12 byte header + file table
-    
-    // Validate combined_length matches expected size
-    if (combined_length != file_table_size + (file_size - data_start)) {
-        ESP_LOGW(TAG, "combined_length (%u) doesn't match calculated size (file_table=%zu, data=%zu)", 
-                 combined_length, file_table_size, file_size - data_start);
+
+    // Current format keeps startup.gif separate at /sdcard/startup.gif, but
+    // local test.bin bundles may include extra GIF entries that can be ignored.
+    // Validate combined_length after confirming the table fits in the file.
+    const uint64_t calculated_combined_length =
+        file_table_size + (static_cast<uint64_t>(file_size) - data_start);
+    if (static_cast<uint64_t>(combined_length) != calculated_combined_length) {
+        ESP_LOGW(TAG,
+                 "combined_length (%u) doesn't match calculated size (file_table=%llu, data=%llu)",
+                 combined_length,
+                 static_cast<unsigned long long>(file_table_size),
+                 static_cast<unsigned long long>(static_cast<uint64_t>(file_size) - data_start));
         // Continue validation anyway, as this might be a minor inconsistency
     }
     
-    // Validate file structure can fit
-    if (file_size < data_start) {
-        ESP_LOGE(TAG, "File too small for file table: %zu bytes (need at least %zu)", file_size, data_start);
-        fclose(f);
-        return false;
-    }
-    
     // Read and validate file table
-    uint32_t total_data_size = 0;
+    uint64_t total_data_size = 0;
     for (uint32_t i = 0; i < file_count; i++) {
         // Read file table entry (44 bytes)
         char name[33] = {0}; // 32 bytes + null terminator
