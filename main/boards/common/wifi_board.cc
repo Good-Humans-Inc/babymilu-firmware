@@ -1,4 +1,5 @@
 #include "wifi_board.h"
+#include "sdkconfig.h"
 
 #include "display.h"
 #include "application.h"
@@ -339,7 +340,12 @@ void WifiBoard::EnterWifiConfigMode() {
     hint += "\n\n";
     
     // 播报配置 WiFi 的提示
+#if CONFIG_BABYMILU_CERTIFICATION_QUIET_MODE
+    (void)hint;
+    ESP_LOGI(TAG, "Certification quiet mode: skipping WiFi AP configuration prompt audio/display");
+#else
     application.Alert(Lang::Strings::WIFI_CONFIG_MODE, hint.c_str(), "", Lang::Sounds::P3_WIFICONFIG);
+#endif
     
     // Wait forever until reset after configuration
     while (true) {
@@ -366,14 +372,21 @@ void WifiBoard::EnterWifiConfigModeViaBLE() {
     }
     
     // Enable error logging to SD card during WiFi config mode
+#if !CONFIG_BABYMILU_CERTIFICATION_QUIET_MODE
     ErrorLogUploader::EnableErrorLoggingToSD();
+#endif
     
     auto& application = Application::GetInstance();
     application.SetDeviceState(kDeviceStateWifiConfiguring);
     
     // Display BLE configuration instructions for reconnection
     std::string hint = "WiFi disconnected. Connect to BLE device 'BabyMilu' to reconfigure WiFi";
+#if CONFIG_BABYMILU_CERTIFICATION_QUIET_MODE
+    (void)hint;
+    ESP_LOGI(TAG, "Certification quiet mode: skipping BLE reconnection prompt audio/display");
+#else
     application.Alert("WiFi Reconfiguration", hint.c_str(), "", Lang::Sounds::P3_WIFICONFIG);
+#endif
     
     // Wait for BLE configuration
     while (wifi_config_mode_) {
@@ -399,13 +412,20 @@ void WifiBoard::StartNetwork() {
                 InitializeBleServer();
             }
 
+#if !CONFIG_BABYMILU_CERTIFICATION_QUIET_MODE
             ErrorLogUploader::EnableErrorLoggingToSD();
+#endif
 
             auto& application = Application::GetInstance();
             application.SetDeviceState(kDeviceStateWifiConfiguring);
 
             std::string hint = "Connect to BLE device 'BabyMilu' to add WiFi credentials";
+#if CONFIG_BABYMILU_CERTIFICATION_QUIET_MODE
+            (void)hint;
+            ESP_LOGI(TAG, "Certification quiet mode: skipping forced BLE prompt audio/display");
+#else
             application.Alert("WiFi Configuration", hint.c_str(), "", Lang::Sounds::P3_WIFICONFIG);
+#endif
 
             while (wifi_config_mode_) {
                 vTaskDelay(pdMS_TO_TICKS(1000));
@@ -441,13 +461,19 @@ void WifiBoard::StartNetwork() {
         }
         
         // Enable error logging to SD card during WiFi config mode
+#if !CONFIG_BABYMILU_CERTIFICATION_QUIET_MODE
         ErrorLogUploader::EnableErrorLoggingToSD();
+#endif
         
         auto& application = Application::GetInstance();
         application.SetDeviceState(kDeviceStateWifiConfiguring);
         
         // Display BLE configuration instructions
         std::string hint = "Connect to BLE device 'BabyMilu' to configure WiFi";
+#if CONFIG_BABYMILU_CERTIFICATION_QUIET_MODE
+        (void)hint;
+        ESP_LOGI(TAG, "Certification quiet mode: skipping first-boot BLE prompt audio/display");
+#else
         application.Alert("WiFi Configuration", hint.c_str(), "", Lang::Sounds::P3_WIFICONFIG);
         
         // Show message to guide user to connect WiFi (display in center of screen)
@@ -478,6 +504,7 @@ void WifiBoard::StartNetwork() {
                 ESP_LOGI(TAG, "Called SetChatMessage");
             }
         }
+#endif
         
         // Wait for BLE configuration
         while (wifi_config_mode_) {
@@ -521,8 +548,10 @@ void WifiBoard::StartNetwork() {
     }
 
     wifi_station.OnScanBegin([this]() {
+#if !CONFIG_BABYMILU_CERTIFICATION_QUIET_MODE
         auto display = Board::GetInstance().GetDisplay();
         display->ShowNotification(Lang::Strings::SCANNING_WIFI, 30000);
+#endif
     });
     wifi_station.OnConnect([this](const std::string& ssid) {
         auto& ssid_manager = SsidManager::GetInstance();
@@ -541,19 +570,28 @@ void WifiBoard::StartNetwork() {
             ESP_LOGW(TAG, "Connecting with SSID='%s', password not found in stored credentials", ssid.c_str());
         }
 
+#if !CONFIG_BABYMILU_CERTIFICATION_QUIET_MODE
         auto display = Board::GetInstance().GetDisplay();
         std::string notification = Lang::Strings::CONNECT_TO;
         notification += ssid;
         notification += "...";
         display->ShowNotification(notification.c_str(), 30000);
         ShowWifiConnectAttemptOnDisplay(ssid, matched_password);
+#else
+        (void)matched_password;
+#endif
     });
     wifi_station.OnConnected([this](const std::string& ssid) {
         auto display = Board::GetInstance().GetDisplay();
+#if !CONFIG_BABYMILU_CERTIFICATION_QUIET_MODE
         std::string notification = Lang::Strings::CONNECTED_TO;
         notification += ssid;
         display->ShowNotification(notification.c_str(), 30000);
         ClearWifiOverlay(display);
+#else
+        (void)ssid;
+        (void)display;
+#endif
         
         // Stop BLE server when WiFi is connected
         if (ble_initialized_) {
@@ -564,6 +602,7 @@ void WifiBoard::StartNetwork() {
         }
         
         // Check if animation is available, if not show connected message
+#if !CONFIG_BABYMILU_CERTIFICATION_QUIET_MODE
         ESP_LOGI(TAG, "WiFi connected, checking animation availability...");
         Animation_t* current_anim = animation_get_normal_animation();
         ESP_LOGI(TAG, "Animation check: current_anim=%p", current_anim);
@@ -594,6 +633,7 @@ void WifiBoard::StartNetwork() {
         } else {
             ESP_LOGI(TAG, "Animation is available, not showing connected message");
         }
+#endif
     });
     wifi_station.OnDisconnected([this](const std::string& ssid, wifi_err_reason_t reason, int8_t rssi) {
         if (ShouldIgnoreWifiFailure(reason)) {
@@ -632,7 +672,9 @@ void WifiBoard::StartNetwork() {
         }
         
         // Enable error logging to SD card during WiFi config mode
+#if !CONFIG_BABYMILU_CERTIFICATION_QUIET_MODE
         ErrorLogUploader::EnableErrorLoggingToSD();
+#endif
         
         auto& application = Application::GetInstance();
         application.SetDeviceState(kDeviceStateWifiConfiguring);
@@ -651,7 +693,9 @@ void WifiBoard::StartNetwork() {
             snapshot.reason_name = last_wifi_failure_reason_name_;
             snapshot.screen_message = last_wifi_failure_screen_message_;
             LogWifiFailure(snapshot);
+#if !CONFIG_BABYMILU_CERTIFICATION_QUIET_MODE
             ShowWifiFailureOnDisplay(snapshot);
+#endif
         } else {
             std::string timeout_ssid = "<unknown>";
             std::string timeout_password;
@@ -665,9 +709,16 @@ void WifiBoard::StartNetwork() {
             ESP_LOGW(TAG, "[WIFI_FAIL] code=CONNECT_TIMEOUT reason=0 reason_name=TIMEOUT ssid=%s rssi=0 screen=\"%s\"",
                      timeout_ssid.c_str(),
                      timeout_message.c_str());
+#if !CONFIG_BABYMILU_CERTIFICATION_QUIET_MODE
             ShowWifiTimeoutOnDisplay(timeout_ssid, timeout_password, timeout_message);
+#endif
         }
+#if CONFIG_BABYMILU_CERTIFICATION_QUIET_MODE
+        (void)hint;
+        ESP_LOGI(TAG, "Certification quiet mode: skipping WiFi failure prompt audio/display");
+#else
         application.Alert("WiFi Configuration", hint.c_str(), "wifi", Lang::Sounds::P3_WIFICONFIG);
+#endif
 
         // Credentials already exist on this device: do NOT show the
         // "Connect me to wifi with BabyMilu App..." onboarding message.
@@ -1053,5 +1104,3 @@ void WifiBoard::ParseWifiCredentials(const char* data) {
         }
     }
 }
-
-

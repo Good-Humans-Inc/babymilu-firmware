@@ -5,6 +5,7 @@
  * Copyright (c) 2025 by helloworldjiao@163.com, All Rights Reserved.
  */
 #include "animation.h"
+#include "sdkconfig.h"
 #include "lvgl.h"
 #include "board.h"
 #include "display.h"
@@ -514,6 +515,11 @@ void plat_animation_task(void *arg)
 
 void animation_set_now_animation(int animation)
 {
+#if CONFIG_BABYMILU_CERTIFICATION_QUIET_MODE
+    now_animation = animation;
+    pos = 0;
+    return;
+#endif
     // If animation is locked by silence, only allow silence animation
     if (animation_locked_by_silence && animation != ANIMATION_SILENCE) {
         ESP_LOGI("animation_set_now_animation", "Animation locked by silence, ignoring request for animation %d", animation);
@@ -558,6 +564,10 @@ void animation_check_volume_and_lock(int volume)
 // Animation initialization function
 void animation_init(void)
 {
+#if CONFIG_BABYMILU_CERTIFICATION_QUIET_MODE
+    ESP_LOGI("animation", "Certification quiet mode: skipping SD animation init");
+    return;
+#endif
     animation_wait_for_startup_load_clear(25);
     ESP_LOGI("animation", "Initializing animations from SD card...");
     
@@ -754,6 +764,9 @@ void animation_cleanup_sd_card_animation(Animation_t* anim)
 // Function to get the appropriate normal animation (SD card only)
 Animation_t* animation_get_normal_animation(void)
 {
+#if CONFIG_BABYMILU_CERTIFICATION_QUIET_MODE
+    return NULL;
+#endif
     // Check if GIF animation is loaded
     if (sd_normal.use_gif && sd_normal.gif_data && sd_normal.gif_data_size > 0) {
         return &sd_normal;
@@ -2442,4 +2455,3 @@ bool animation_load_gifs_from_test_bin(void)
         return false;
     }
 }
-

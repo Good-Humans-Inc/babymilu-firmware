@@ -1,4 +1,5 @@
 #include "application.h"
+#include "sdkconfig.h"
 #include "board.h"
 #include "display.h"
 #include "system_info.h"
@@ -959,12 +960,16 @@ void Application::Start()
     codec->Start();
 
 #ifdef CONFIG_BOARD_TYPE_ECHOEAR
+#if CONFIG_BABYMILU_CERTIFICATION_QUIET_MODE
+    ESP_LOGI(TAG, "Certification quiet mode: skipping startup.wav playback");
+#else
     animation_block_startup_load(true);
     if (!PlayWavFromSdCard("/sdcard/startup.wav", 1.0f)) {
         ESP_LOGW(TAG, "startup.wav playback skipped or failed");
     } else {
         ESP_LOGI(TAG, "startup.wav playback finished");
     }
+#endif
 #endif
 
 #if CONFIG_USE_AUDIO_PROCESSOR
@@ -1000,6 +1005,9 @@ void Application::Start()
     // Update the status bar immediately to show the network state
     display->UpdateStatusBar(true);
 
+#if CONFIG_BABYMILU_CERTIFICATION_QUIET_MODE
+    ESP_LOGI(TAG, "Certification quiet mode: skipping WiFi connection display messages");
+#else
     // Check WiFi connection status and show message if not connected
     // Note: If no WiFi credentials exist, StartNetwork() will block in WiFi config mode,
     // so this code only runs if WiFi credentials exist but connection failed or is in progress
@@ -1054,6 +1062,7 @@ void Application::Start()
     } else {
         ESP_LOGI(TAG, "ML307 board detected, skipping WiFi message display");
     }
+#endif
 
     // Initialize and start the animation updater
     // COMMENTED OUT: Disable automatic animation updater startup
@@ -1061,6 +1070,9 @@ void Application::Start()
     // AnimationUpdater::GetInstance().Initialize();
     // AnimationUpdater::GetInstance().Start();
 
+#if CONFIG_BABYMILU_CERTIFICATION_QUIET_MODE
+    ESP_LOGI(TAG, "Certification quiet mode: skipping SD error-log upload/hook/test messages");
+#else
     // Upload error log before other startup network jobs.
     ESP_LOGI(TAG, "Attempting to upload error log...");
     esp_err_t upload_result = ErrorLogUploader::UploadErrorLog();
@@ -1079,15 +1091,24 @@ void Application::Start()
     ESP_LOGE(TAG, "[TEST] Error: This is a test error message to verify SD card error logging");
     ESP_LOGE(TAG, "[TEST] Simulated error condition: File operation failed");
     ESP_LOGW(TAG, "[TEST] Test completed - check /sdcard/err.txt for logged errors");
+#endif
 
     // Check for new firmware version or get the MQTT broker address
+#if CONFIG_BABYMILU_CERTIFICATION_QUIET_MODE
+    ESP_LOGI(TAG, "Certification quiet mode: skipping OTA/version check");
+    xEventGroupSetBits(event_group_, CHECK_NEW_VERSION_DONE_EVENT);
+#else
     CheckNewVersion();
+#endif
 
 #ifdef CONFIG_BOARD_TYPE_ECHOEAR
     animation_block_startup_load(false);
     SetStartupVisualLock(false);
 #endif
 
+#if CONFIG_BABYMILU_CERTIFICATION_QUIET_MODE
+    ESP_LOGI(TAG, "Certification quiet mode: skipping startup animation update check and startup network jobs");
+#else
     // Check for animation updates after network is confirmed ready
     // Only trigger once after startup when server connection is established
     ESP_LOGI(TAG, "Checking if network is ready for animation update check...");
@@ -1141,6 +1162,7 @@ void Application::Start()
     }
 
     board_instance.WaitForStartupNetworkTasks();
+#endif
 
     // Seed MQTT config on first boot if unset (allows setting broker at build time)
     {
@@ -1611,8 +1633,12 @@ void Application::Start()
         // DISABLED: Comment out transcript display to reduce memory usage
         // display->SetChatMessage("system", "");
         // Play the success sound to indicate the device is ready
+#if CONFIG_BABYMILU_CERTIFICATION_QUIET_MODE
+        ESP_LOGI(TAG, "Certification quiet mode: skipping ready sound");
+#else
         ResetDecoder();
         PlaySound(Lang::Sounds::P3_SUCCESS);
+#endif
     }
 
     // Print heap stats

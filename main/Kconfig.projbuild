@@ -7,6 +7,15 @@ config OTA_URL
         The application will access this URL to check for new firmware and server address.
         Leave empty to disable OTA updates. Format: http://host:port/path or https://host:port/path.
 
+config BABYMILU_CERTIFICATION_QUIET_MODE
+    bool "BabyMilu certification quiet mode"
+    default n
+    help
+        Build a low-activity firmware image for FCC/RE certification debugging.
+        This keeps the radio stack and existing TX power caps, but skips startup
+        audio, SD animation loading, startup downloads, OTA checks, SD error-log
+        hooks, and periodic diagnostic telemetry that can add unrelated load.
+
 choice
     prompt "Default Language"
     default LANGUAGE_EN_US

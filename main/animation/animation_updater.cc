@@ -1,4 +1,5 @@
 ﻿#include "animation_updater.h"
+#include "sdkconfig.h"
 #include "board.h"
 #include "system_info.h"
 #include "animation.h"
@@ -100,6 +101,10 @@ void AnimationUpdater::Initialize() {
 }
 
 void AnimationUpdater::Start() {
+#if CONFIG_BABYMILU_CERTIFICATION_QUIET_MODE
+    ESP_LOGI(TAG, "Certification quiet mode: animation updater disabled");
+    return;
+#endif
     if (is_running_.load()) {
         ESP_LOGW(TAG, "Animation updater is already running");
         return;
@@ -770,6 +775,10 @@ void AnimationUpdater::RemoteUpdateTask(void* parameter) {
 }
 
 void AnimationUpdater::TriggerUpdateLoop() {
+#if CONFIG_BABYMILU_CERTIFICATION_QUIET_MODE
+    ESP_LOGI(TAG, "Certification quiet mode: skipping animation update trigger");
+    return;
+#endif
     ESP_LOGI(TAG, "Triggering update loop from remote request");
 
     if (is_running_.load()) {

@@ -1,4 +1,5 @@
 ﻿#include "wifi_board.h"
+#include "sdkconfig.h"
 #include "audio_codecs/box_audio_codec.h"
 #include "display/lcd_display.h"
 #include "application.h"
@@ -54,6 +55,7 @@ temperature_sensor_handle_t temp_sensor = NULL;
 float tsens_value;
 static std::atomic<bool> s_firestore_startup_done{false};
 
+#if !CONFIG_BABYMILU_CERTIFICATION_QUIET_MODE
 static void ChipTemperatureLogTask(void* /*arg*/) {
     while (true) {
         float chip_temperature = 0.0f;
@@ -67,6 +69,7 @@ static void ChipTemperatureLogTask(void* /*arg*/) {
         vTaskDelay(pdMS_TO_TICKS(20000));
     }
 }
+#endif
 
 static bool WaitForAnimationUpdaterCheckToFinish() {
     AnimationUpdater& updater = AnimationUpdater::GetInstance();
@@ -907,6 +910,9 @@ private:
         temperature_sensor_config_t temp_sensor_config = TEMPERATURE_SENSOR_CONFIG_DEFAULT(10, 50);
         ESP_ERROR_CHECK(temperature_sensor_install(&temp_sensor_config, &temp_sensor));
         ESP_ERROR_CHECK(temperature_sensor_enable(temp_sensor));
+#if CONFIG_BABYMILU_CERTIFICATION_QUIET_MODE
+        ESP_LOGI(TAG, "[TEMP] Certification quiet mode: chip temperature log task disabled");
+#else
         BaseType_t temp_task_ret = xTaskCreatePinnedToCore(
             ChipTemperatureLogTask,
             "chip_temp_log",
@@ -918,6 +924,7 @@ private:
         if (temp_task_ret != pdPASS) {
             ESP_LOGW(TAG, "[TEMP] Failed to start chip temperature log task");
         }
+#endif
         
         ESP_LOGI(TAG, "[BMI270] I2C bus initialization complete");
     }
@@ -1894,6 +1901,9 @@ private:
     }
 
     void InitializeBatteryMonitor() {
+#if CONFIG_BABYMILU_CERTIFICATION_QUIET_MODE
+        ESP_LOGI(TAG, "[BATTERY] Certification quiet mode: battery monitor task disabled");
+#else
         // Create battery monitoring task to check for "always powersaving" mode
         xTaskCreate([](void* arg) {
             EchoEar* board = static_cast<EchoEar*>(arg);
@@ -1967,6 +1977,7 @@ private:
             }
         }, "battery_monitor", 4096, this, 5, NULL);
         ESP_LOGI(TAG, "[BATTERY] Battery monitoring task started for always power saving mode");
+#endif
     }
 
     void InitializeEmotionResetTimer() {
@@ -2043,6 +2054,11 @@ public:
         InitializeTouchButton();
         ESP_LOGI(TAG, "[TOUCH] InitializeTouchButton() returned");
         
+#if CONFIG_BABYMILU_CERTIFICATION_QUIET_MODE
+        ESP_LOGI(TAG, "[SD/ANIM] Certification quiet mode: SD animation/Firestore startup task disabled");
+        s_firestore_startup_done.store(true);
+        animation_block_startup_load(false);
+#else
         // Start SD card + animation init in background to allow WiFi startup in parallel.
         // Pin to core 0 so WiFi (core 1 in your logs) can connect concurrently.
         ESP_LOGI(TAG, "[SD/ANIM] Starting background init task");
@@ -2053,6 +2069,7 @@ public:
             s_firestore_startup_done.store(true);
             animation_block_startup_load(false);
         }
+#endif
     }
 
     virtual AudioCodec* GetAudioCodec() override {
@@ -2120,6 +2137,7 @@ public:
         if (level > 100) level = 100;
         
         // Log as E so the SD error-log hook captures battery telemetry in err.txt.
+#if !CONFIG_BABYMILU_CERTIFICATION_QUIET_MODE
         static int64_t last_log_time = 0;
         int64_t current_time = esp_timer_get_time() / 1000; // Convert to milliseconds
         const int64_t LOG_INTERVAL_MS = 15000; // 15 seconds
@@ -2129,11 +2147,15 @@ public:
                      voltage_mv, current_ma, level, charging ? "yes" : "no", discharging ? "yes" : "no");
             last_log_time = current_time;
         }
+#endif
         
         return true;
     }
 
     virtual void WaitForStartupNetworkTasks() override {
+#if CONFIG_BABYMILU_CERTIFICATION_QUIET_MODE
+        return;
+#endif
         if (s_firestore_startup_done.load()) {
             return;
         }
@@ -2156,4 +2178,3 @@ public:
 volatile uint32_t EchoEar::touch_event_count_ = 0;
 
 DECLARE_BOARD(EchoEar);
-
