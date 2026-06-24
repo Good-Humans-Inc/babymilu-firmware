@@ -1,4 +1,5 @@
 #include "application.h"
+#include "sdkconfig.h"
 #include "board.h"
 #include "display.h"
 #include "system_info.h"
@@ -680,6 +681,18 @@ void Application::StopListening()
 void Application::Start()
 {
     auto &board = Board::GetInstance();
+
+#if CONFIG_BABYMILU_FCC_ULTRA_SAFE_MODE
+    ESP_LOGW(TAG, "FCC ultra-safe mode active: entering silent idle loop");
+    if (auto backlight = board.GetBacklight()) {
+        backlight->SetBrightness(0, false);
+    }
+    device_state_ = kDeviceStateIdle;
+    while (true) {
+        vTaskDelay(pdMS_TO_TICKS(60000));
+    }
+#endif
+
     SetDeviceState(kDeviceStateStarting);
 
     /* Setup the display */

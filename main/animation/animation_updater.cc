@@ -1,4 +1,5 @@
 #include "animation_updater.h"
+#include "sdkconfig.h"
 #include "board.h"
 #include "system_info.h"
 #include "animation.h"
@@ -56,6 +57,11 @@ void AnimationUpdater::Initialize() {
 }
 
 void AnimationUpdater::Start() {
+#if CONFIG_BABYMILU_FCC_ULTRA_SAFE_MODE
+    ESP_LOGW(TAG, "[FCC] Animation updater disabled in ultra-safe mode");
+    return;
+#endif
+
     if (is_running_.load()) {
         ESP_LOGW(TAG, "Animation updater is already running");
         return;
@@ -399,6 +405,11 @@ void AnimationUpdater::RemoteUpdateTask(void* parameter) {
 }
 
 void AnimationUpdater::TriggerUpdateLoop() {
+#if CONFIG_BABYMILU_FCC_ULTRA_SAFE_MODE
+    ESP_LOGW(TAG, "[FCC] Remote animation update disabled in ultra-safe mode");
+    return;
+#endif
+
     ESP_LOGI(TAG, "Triggering update loop from remote request");
     
     // Check available heap memory before creating task
@@ -2079,4 +2090,3 @@ void AnimationUpdater::SetCurrentVersion(const std::string& version) {
     SaveConfiguration();  // Save to NVS storage
     ESP_LOGI(TAG, "Animation version updated to: %s", version.c_str());
 }
-

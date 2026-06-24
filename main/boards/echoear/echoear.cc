@@ -1,4 +1,5 @@
 #include "wifi_board.h"
+#include "sdkconfig.h"
 #include "audio_codecs/box_audio_codec.h"
 #include "display/lcd_display.h"
 #include "application.h"
@@ -412,22 +413,22 @@ class EchoEar : public WifiBoard {
 private:
     // I2C bus handles
     i2c_bus_handle_t shared_i2c_bus_handle_ = nullptr;  // For BMI270 (i2c_bus wrapper)
-    i2c_master_bus_handle_t i2c_bus_;                   // For other I2C devices (traditional API)
+    i2c_master_bus_handle_t i2c_bus_ = nullptr;         // For other I2C devices (traditional API)
     
     // BMI270 sensor handle
     bmi270_handle_t bmi270_handle_ = nullptr;
     
-    Cst816s* cst816s_;
-    Charge* charge_;
+    Cst816s* cst816s_ = nullptr;
+    Charge* charge_ = nullptr;
     Button boot_button_;
-    LcdDisplay* display_;
+    LcdDisplay* display_ = nullptr;
     PwmBacklight* backlight_ = nullptr;
-    esp_timer_handle_t touchpad_timer_;
-    esp_lcd_touch_handle_t tp;   // LCD touch handle
+    esp_timer_handle_t touchpad_timer_ = nullptr;
+    esp_lcd_touch_handle_t tp = nullptr;   // LCD touch handle
     touch_button_handle_t touch_button_handle_ = nullptr;  // Touch button sensor handle for GPIO7
     static volatile uint32_t touch_event_count_;  // Counter for touch events
-    QueueHandle_t touch_event_queue_;  // Queue for touch interrupt events (used by CST816S)
-    TaskHandle_t touch_event_task_handle_;  // Task handle for processing touch events (used by CST816S)
+    QueueHandle_t touch_event_queue_ = nullptr;  // Queue for touch interrupt events (used by CST816S)
+    TaskHandle_t touch_event_task_handle_ = nullptr;  // Task handle for processing touch events (used by CST816S)
     QueueHandle_t touch_button_app_queue_ = nullptr;  // Queue for app-level touch button events
     PowerSaveTimer* power_save_timer_ = nullptr;
     esp_timer_handle_t emotion_reset_timer_ = nullptr;  // Timer to reset emotion to previous state after one animation cycle
@@ -1637,6 +1638,15 @@ private:
 
 public:
     EchoEar() : boot_button_(BOOT_BUTTON_GPIO, false, 5000, 0) {  // 5-second long press time
+#if CONFIG_BABYMILU_FCC_ULTRA_SAFE_MODE
+        gpio_config_t power_gpio_config = {
+            .pin_bit_mask = (BIT64(POWER_CTRL)),
+            .mode = GPIO_MODE_OUTPUT,
+        };
+        ESP_ERROR_CHECK(gpio_config(&power_gpio_config));
+        gpio_set_level(POWER_CTRL, 0);
+        ESP_LOGW(TAG, "[FCC] Ultra-safe mode: skipped I2C, audio, display, sensors, touch, charge, power-save, SD, and animation startup");
+#else
         InitializeI2c();
         InitializeBmi270();  // Initialize BMI270 after I2C bus is ready
         InitializeCharge();
@@ -1655,9 +1665,14 @@ public:
         // Pin to core 0 so WiFi (core 1 in your logs) can connect concurrently.
         ESP_LOGI(TAG, "[SD/ANIM] Starting background init task");
         xTaskCreatePinnedToCore(SdAnimInitTask, "sd_anim_init", 8192, nullptr, 1, nullptr, 0);
+#endif
     }
 
     virtual AudioCodec* GetAudioCodec() override {
+#if CONFIG_BABYMILU_FCC_ULTRA_SAFE_MODE
+        ESP_LOGW(TAG, "[FCC] Audio codec is disabled in ultra-safe mode");
+        return nullptr;
+#else
         static BoxAudioCodec audio_codec(
             i2c_bus_, 
             AUDIO_INPUT_SAMPLE_RATE, 
@@ -1672,9 +1687,15 @@ public:
             AUDIO_CODEC_ES7210_ADDR, 
             AUDIO_INPUT_REFERENCE);
         return &audio_codec;
+#endif
     }
     
     virtual Display* GetDisplay() override {
+#if CONFIG_BABYMILU_FCC_ULTRA_SAFE_MODE
+        if (display_ == nullptr) {
+            return Board::GetDisplay();
+        }
+#endif
         return display_;
     }
 
@@ -1745,4 +1766,3 @@ public:
 volatile uint32_t EchoEar::touch_event_count_ = 0;
 
 DECLARE_BOARD(EchoEar);
-

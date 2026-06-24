@@ -7,6 +7,15 @@ config OTA_URL
         The application will access this URL to check for new firmwares and server address.
         Leave empty to disable OTA updates. Format: http://host:port/path or https://host:port/path
 
+config BABYMILU_FCC_ULTRA_SAFE_MODE
+    bool "BabyMilu FCC ultra-safe certification mode"
+    default n
+    help
+        Build a certification-only firmware that boots into a silent idle loop
+        and skips radio, audio, OTA, protocol, SD card, animation, sensor,
+        touch, charge-monitor, and diagnostic startup paths. This is not a
+        production user-experience build.
+
 
 
 choice
