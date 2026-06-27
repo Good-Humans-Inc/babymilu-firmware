@@ -275,8 +275,8 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
                 Application::GetInstance().Schedule([update_url]() {
                     auto& anim_updater = AnimationUpdater::GetInstance();
                     anim_updater.SetServerUrl(update_url);
-                    ESP_LOGI(TAG, "Calling AnimationUpdater::TriggerUpdateLoop() for auto_update");
-                    anim_updater.TriggerUpdateLoop();
+                    ESP_LOGI(TAG, "Saved auto_update URL for next startup animation update check; rebooting now");
+                    esp_restart();
                 });
             }
             // Don't forward auto_update to on_incoming_json_ as it's a protocol-level message

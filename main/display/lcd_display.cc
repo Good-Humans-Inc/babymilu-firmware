@@ -24,6 +24,85 @@
 
 #define TAG "LcdDisplay"
 
+namespace {
+
+static uint16_t ReadLe16(const uint8_t* data)
+{
+    return static_cast<uint16_t>(data[0]) |
+           static_cast<uint16_t>(data[1] << 8);
+}
+
+static void FormatFirstBytes(const uint8_t* data, size_t size, char* out, size_t out_size)
+{
+    if (out == nullptr || out_size == 0) {
+        return;
+    }
+
+    out[0] = '\0';
+    if (data == nullptr || size == 0) {
+        snprintf(out, out_size, "<none>");
+        return;
+    }
+
+    const size_t bytes_to_print = std::min<size_t>(size, 16);
+    size_t offset = 0;
+    for (size_t i = 0; i < bytes_to_print && offset < out_size; ++i) {
+        int written = snprintf(out + offset, out_size - offset, "%s%02X",
+                               (i == 0) ? "" : " ", data[i]);
+        if (written < 0) {
+            break;
+        }
+        offset += static_cast<size_t>(written);
+    }
+}
+
+static void LogGifDescriptorDetails(const char* prefix, const uint8_t* gif_data, size_t gif_size)
+{
+    char first_bytes[64];
+    FormatFirstBytes(gif_data, gif_size, first_bytes, sizeof(first_bytes));
+
+    char version[4] = "---";
+    uint16_t width = 0;
+    uint16_t height = 0;
+    bool has_gif_signature = false;
+    bool has_global_color_table = false;
+    uint8_t packed = 0;
+
+    if (gif_data != nullptr && gif_size >= 13) {
+        has_gif_signature = memcmp(gif_data, "GIF", 3) == 0;
+        memcpy(version, gif_data + 3, 3);
+        version[3] = '\0';
+        width = ReadLe16(gif_data + 6);
+        height = ReadLe16(gif_data + 8);
+        packed = gif_data[10];
+        has_global_color_table = (packed & 0x80) != 0;
+    }
+
+    ESP_LOGW(TAG,
+             "%s: data=%p, size=%u, sig=%s, version=%s, canvas=%ux%u, gct=%s, packed=0x%02X, first16=[%s]",
+             prefix,
+             gif_data,
+             static_cast<unsigned>(gif_size),
+             has_gif_signature ? "GIF" : "invalid",
+             version,
+             static_cast<unsigned>(width),
+             static_cast<unsigned>(height),
+             has_global_color_table ? "yes" : "no",
+             static_cast<unsigned>(packed),
+             first_bytes);
+    ESP_LOGW(TAG,
+             "%s heap: free_8bit=%u, largest_8bit=%u, free_internal=%u, largest_internal=%u, free_spiram=%u, largest_spiram=%u",
+             prefix,
+             static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_8BIT)),
+             static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)),
+             static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+             static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)),
+             static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)),
+             static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM)));
+}
+
+} // namespace
+
 // Color definitions for dark theme
 #define DARK_BACKGROUND_COLOR lv_color_hex(0x000000)       // Complete black background
 #define DARK_TEXT_COLOR lv_color_white()                   // White text
@@ -1477,6 +1556,8 @@ void LcdDisplay::SetEmotionGif(const uint8_t* gif_data, size_t gif_size)
     // if the new GIF fails to load.
     lv_gif_pause(emotion_gif_);
 
+    LogGifDescriptorDetails("GIF load attempt", gif_data, gif_size);
+
     // Use a persistent descriptor; LVGL keeps this pointer for async playback.
     emotion_gif_desc_.header.magic = LV_IMAGE_HEADER_MAGIC;
     emotion_gif_desc_.header.cf = LV_COLOR_FORMAT_L8; // GIF uses its own format internally
@@ -1493,7 +1574,7 @@ void LcdDisplay::SetEmotionGif(const uint8_t* gif_data, size_t gif_size)
     // Set GIF source from persistent descriptor
     lv_gif_set_src(emotion_gif_, &emotion_gif_desc_);
     if (!lv_gif_is_loaded(emotion_gif_)) {
-        ESP_LOGW(TAG, "GIF source failed to load; keeping animation paused");
+        LogGifDescriptorDetails("GIF source failed to load; keeping animation paused", gif_data, gif_size);
         return;
     }
     

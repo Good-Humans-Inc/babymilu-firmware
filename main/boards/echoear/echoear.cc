@@ -363,8 +363,7 @@ static void SdAnimInitTask(void* /*arg*/) {
 
     if (wifi_ready) {
         ESP_LOGI(TAG, "[FIRESTORE] WiFi connected");
-        WaitForAnimationUpdaterCheckToFinish();
-        ESP_LOGI(TAG, "[FIRESTORE] Requesting device document after animation updater check");
+        ESP_LOGI(TAG, "[FIRESTORE] Requesting device document (startup animation update wait disabled)");
         FetchFirestoreDeviceDocumentAndApplyRanking();
     } else {
         ESP_LOGW(TAG, "[FIRESTORE] WiFi was not ready within timeout, skipping device document request");

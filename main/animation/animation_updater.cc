@@ -808,32 +808,7 @@ void AnimationUpdater::UpdateLoop() {
     url = AppendCacheBuster(url);
     ESP_LOGI(TAG, "Checking for updates from: %s", url.c_str());
 
-    std::string startup_gif_url = BuildStartupGifDownloadUrl();
-    if (startup_gif_url.empty()) {
-        ESP_LOGW(TAG, "Could not build startup.gif URL from %s", url.c_str());
-    } else {
-        bool local_startup_gif_exists = (access("/sdcard/startup.gif", F_OK) == 0);
-        if (DownloadStartupGifFile(startup_gif_url)) {
-            ESP_LOGI(TAG, "startup.gif download succeeded in update loop");
-        } else {
-            if (local_startup_gif_exists) {
-                ESP_LOGW(TAG, "Optional startup.gif download failed in update loop from %s", startup_gif_url.c_str());
-            } else {
-                ESP_LOGW(TAG, "startup.gif missing locally and optional download could not complete in update loop; continuing updater flow");
-            }
-        }
-    }
-
-    std::string startup_wav_url = BuildStartupWavDownloadUrl();
-    if (startup_wav_url.empty()) {
-        ESP_LOGW(TAG, "Could not build startup.wav URL from %s", url.c_str());
-    } else {
-        if (DownloadStartupWavFile(startup_wav_url)) {
-            ESP_LOGI(TAG, "startup.wav download succeeded in update loop");
-        } else {
-            ESP_LOGW(TAG, "Optional startup.wav download failed in update loop from %s", startup_wav_url.c_str());
-        }
-    }
+    ESP_LOGI(TAG, "Skipping startup.gif and startup.wav fetches in update loop");
     
     // Ensure SD card is available
     if (!SdCard::IsMounted()) {
@@ -983,13 +958,13 @@ void AnimationUpdater::UpdateLoop() {
     }
     
     // Download and write to file
-    std::unique_ptr<char[]> buffer(new char[8192]);
+    std::unique_ptr<char[]> buffer(new char[4096]);
     size_t total_read = 0;
     
     ESP_LOGI(TAG, "Starting download stream to %s...", file_path);
     
     while (true) {
-        int bytes_read = http->Read(buffer.get(), 8192);
+        int bytes_read = http->Read(buffer.get(), 4096);
         if (bytes_read <= 0) {
             break; // End of data
         }
@@ -1237,32 +1212,7 @@ bool AnimationUpdater::TestHttpsDownload() {
     std::string download_url = BuildMegaDownloadUrl();
     ESP_LOGI(TAG, "Fetching: %s", download_url.c_str());
 
-    std::string startup_gif_url = BuildStartupGifDownloadUrl();
-    if (startup_gif_url.empty()) {
-        ESP_LOGW(TAG, "Could not build startup.gif URL from %s", download_url.c_str());
-    } else {
-        bool local_startup_gif_exists = (access("/sdcard/startup.gif", F_OK) == 0);
-        if (DownloadStartupGifFile(startup_gif_url)) {
-            ESP_LOGI(TAG, "startup.gif download succeeded");
-        } else {
-            if (local_startup_gif_exists) {
-                ESP_LOGW(TAG, "Optional startup.gif download failed from %s", startup_gif_url.c_str());
-            } else {
-                ESP_LOGW(TAG, "startup.gif missing locally and optional download could not complete; continuing updater flow");
-            }
-        }
-    }
-
-    std::string startup_wav_url = BuildStartupWavDownloadUrl();
-    if (startup_wav_url.empty()) {
-        ESP_LOGW(TAG, "Could not build startup.wav URL from %s", download_url.c_str());
-    } else {
-        if (DownloadStartupWavFile(startup_wav_url)) {
-            ESP_LOGI(TAG, "startup.wav download succeeded");
-        } else {
-            ESP_LOGW(TAG, "Optional startup.wav download failed from %s", startup_wav_url.c_str());
-        }
-    }
+    ESP_LOGI(TAG, "Skipping startup.gif and startup.wav fetches for animation update check");
 
     const char* local_file = "/sdcard/test.bin";
     
@@ -2324,9 +2274,9 @@ bool AnimationUpdater::DownloadMegaAnimationFile(const std::string& url) {
             return false;
         }
         
-        // Use larger buffer (8KB) for better performance with large file downloads
-        std::unique_ptr<char[]> buffer(new char[8192]);
-        const size_t buf_size = 8192;
+        // Use a smaller buffer (4KB) to reduce contiguous heap pressure during updates
+        std::unique_ptr<char[]> buffer(new char[4096]);
+        const size_t buf_size = 4096;
         size_t total_read = 0;
         bool download_success = true;
         uint32_t timeout_start = esp_timer_get_time() / 1000; // Start time in ms
@@ -2798,6 +2748,39 @@ static bool IsStartupGifBundleEntry(const char* name) {
     return strcasecmp(name, "startup.gif") == 0;
 }
 
+static bool IsPackedGifProbeValid(const uint8_t* probe, size_t size) {
+    return probe != nullptr &&
+           size >= 8 &&
+           probe[0] == 0x5A &&
+           probe[1] == 0x5A &&
+           memcmp(probe + 2, "GIF", 3) == 0 &&
+           (memcmp(probe + 5, "87a", 3) == 0 || memcmp(probe + 5, "89a", 3) == 0);
+}
+
+static bool ComputePackedChecksum(FILE* f, uint32_t combined_length, uint32_t& out_checksum) {
+    if (fseek(f, 12, SEEK_SET) != 0) {
+        return false;
+    }
+
+    uint8_t buffer[512];
+    uint32_t checksum = 0;
+    uint32_t remaining = combined_length;
+    while (remaining > 0) {
+        size_t to_read = remaining < sizeof(buffer) ? remaining : sizeof(buffer);
+        size_t read = fread(buffer, 1, to_read, f);
+        if (read != to_read) {
+            return false;
+        }
+        for (size_t i = 0; i < read; ++i) {
+            checksum += buffer[i];
+        }
+        remaining -= static_cast<uint32_t>(read);
+    }
+
+    out_checksum = checksum;
+    return true;
+}
+
 bool AnimationUpdater::ValidateGifMegaAnimationFileFromDisk(const char* file_path) {
     ESP_LOGI(TAG, "Validating GIF-based test.bin from disk: %s", file_path);
     
@@ -2852,12 +2835,32 @@ bool AnimationUpdater::ValidateGifMegaAnimationFileFromDisk(const char* file_pat
     const uint64_t calculated_combined_length =
         file_table_size + (static_cast<uint64_t>(file_size) - data_start);
     if (static_cast<uint64_t>(combined_length) != calculated_combined_length) {
-        ESP_LOGW(TAG,
+        ESP_LOGE(TAG,
                  "combined_length (%u) doesn't match calculated size (file_table=%llu, data=%llu)",
                  combined_length,
                  static_cast<unsigned long long>(file_table_size),
                  static_cast<unsigned long long>(static_cast<uint64_t>(file_size) - data_start));
-        // Continue validation anyway, as this might be a minor inconsistency
+        fclose(f);
+        return false;
+    }
+
+    uint32_t calculated_checksum = 0;
+    if (!ComputePackedChecksum(f, combined_length, calculated_checksum)) {
+        ESP_LOGE(TAG, "Failed to compute GIF test.bin checksum");
+        fclose(f);
+        return false;
+    }
+    if (calculated_checksum != checksum) {
+        ESP_LOGE(TAG, "GIF test.bin checksum mismatch: header=0x%08X calculated=0x%08X",
+                 checksum, calculated_checksum);
+        fclose(f);
+        return false;
+    }
+
+    if (fseek(f, 12, SEEK_SET) != 0) {
+        ESP_LOGE(TAG, "Failed to seek back to GIF test.bin file table");
+        fclose(f);
+        return false;
     }
     
     // Read and validate file table
@@ -2902,28 +2905,53 @@ bool AnimationUpdater::ValidateGifMegaAnimationFileFromDisk(const char* file_pat
             return false;
         }
         
-        // Validate offset is within data section bounds (lightweight check - no file content reading)
-        size_t data_entry_start = data_start + file_offset;
-        size_t data_entry_end = data_entry_start + file_size_entry + 2; // +2 for magic bytes
-        if (data_entry_end > file_size) {
+        // Validate offset is within data section bounds
+        const uint64_t data_entry_start = data_start + static_cast<uint64_t>(file_offset);
+        const uint64_t data_entry_end =
+            data_entry_start + static_cast<uint64_t>(file_size_entry) + 2ull; // +2 for magic bytes
+        if (data_entry_end > static_cast<uint64_t>(file_size)) {
             ESP_LOGE(TAG, "File entry %u (%s) extends beyond file end: offset=%u, size=%u, file_size=%zu", 
                      i, name, file_offset, file_size_entry, file_size);
             fclose(f);
             return false;
         }
-        
-        // Lightweight validation: only check structure, not file content
-        // Skip reading actual GIF files to avoid expensive I/O operations
+
+        long next_table_pos = ftell(f);
+        if (next_table_pos < 0) {
+            ESP_LOGE(TAG, "Failed to remember file table position for entry %u (%s)", i, name);
+            fclose(f);
+            return false;
+        }
+
+        uint8_t probe[8] = {0};
+        if (fseek(f, static_cast<long>(data_entry_start), SEEK_SET) != 0 ||
+            fread(probe, 1, sizeof(probe), f) != sizeof(probe)) {
+            ESP_LOGE(TAG, "Failed to read GIF payload probe for entry %u (%s)", i, name);
+            fclose(f);
+            return false;
+        }
+        if (!IsPackedGifProbeValid(probe, sizeof(probe))) {
+            ESP_LOGE(TAG,
+                     "Invalid GIF payload for entry %u (%s): offset=%u size=%u first8=[%02X %02X %02X %02X %02X %02X %02X %02X]",
+                     i, name, file_offset, file_size_entry,
+                     probe[0], probe[1], probe[2], probe[3],
+                     probe[4], probe[5], probe[6], probe[7]);
+            fclose(f);
+            return false;
+        }
+        if (fseek(f, next_table_pos, SEEK_SET) != 0) {
+            ESP_LOGE(TAG, "Failed to resume GIF test.bin file table after entry %u (%s)", i, name);
+            fclose(f);
+            return false;
+        }
+
         total_data_size += file_size_entry + 2; // Include magic bytes in total
         ESP_LOGD(TAG, "File table entry %u: %s, size=%u, offset=%u", i, name, file_size_entry, file_offset);
     }
     
-    // Lightweight validation: skip checksum validation to avoid reading entire file
-    // Structure validation (header, file table, offsets) is sufficient for pre-download check
-    
     fclose(f);
     
-    ESP_LOGI(TAG, "✅ Successfully validated GIF test.bin with %u files", file_count);
+    ESP_LOGI(TAG, "✅ Successfully validated GIF test.bin with %u files (checksum=0x%08X)", file_count, calculated_checksum);
     
     return true;
 }
@@ -2941,16 +2969,14 @@ void AnimationUpdater::ReloadAnimations() {
 }
 
 void AnimationUpdater::LoadConfiguration() {
-    // Animation server URL is dynamically constructed from MAC address
-    // Pattern: https://storage.googleapis.com/milu-public/device_bin/<MAC_encoded>/mega.bin
-    // Leave server_url_ empty to use the dynamic GCS URL (handled in BuildMegaDownloadUrl)
-    server_url_ = "";
-    
+    // Load persisted updater configuration. Leave server_url_ empty to use the
+    // default MAC-derived GCS URL in BuildMegaDownloadUrl().
+    Settings settings("animudter", true);
+    server_url_ = settings.GetString("server_url", "");
     check_interval_seconds_ = 10;  // 10 seconds
     enabled_.store(true);  // Always enabled for testing
-    
+
     // Load version from NVS storage
-    Settings settings("animudter", true);
     std::string saved_version = settings.GetString("version", "1.0.0");  // Default to 1.0.0 if not found
     if (!saved_version.empty()) {
         current_version_ = saved_version;
@@ -2958,10 +2984,12 @@ void AnimationUpdater::LoadConfiguration() {
 }
 
 void AnimationUpdater::SaveConfiguration() {
-    // Save version to NVS storage
+    // Save updater configuration to NVS storage
     Settings settings("animudter", true);
+    settings.SetString("server_url", server_url_);
     settings.SetString("version", current_version_);
-    ESP_LOGD(TAG, "Version save attempted: %s", current_version_.c_str());
+    ESP_LOGD(TAG, "Updater configuration save attempted: server_url=%s version=%s",
+             server_url_.c_str(), current_version_.c_str());
 }
 
 std::string AnimationUpdater::GetCurrentVersion() const {

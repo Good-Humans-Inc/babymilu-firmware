@@ -381,6 +381,77 @@ static const char* get_animation_name(int animation_index) {
     return "UNKNOWN";
 }
 
+static void format_gif_first_bytes(const uint8_t* data, size_t size, char* out, size_t out_size)
+{
+    if (out == NULL || out_size == 0) {
+        return;
+    }
+
+    out[0] = '\0';
+    if (data == NULL || size == 0) {
+        snprintf(out, out_size, "<none>");
+        return;
+    }
+
+    const size_t bytes_to_print = size < 16 ? size : 16;
+    size_t offset = 0;
+    for (size_t i = 0; i < bytes_to_print && offset < out_size; ++i) {
+        int written = snprintf(out + offset, out_size - offset, "%s%02X",
+                               (i == 0) ? "" : " ", data[i]);
+        if (written < 0) {
+            break;
+        }
+        offset += static_cast<size_t>(written);
+    }
+}
+
+static bool gif_header_looks_valid(const uint8_t* data, size_t size)
+{
+    return data != NULL &&
+           size >= 6 &&
+           memcmp(data, "GIF", 3) == 0 &&
+           (memcmp(data + 3, "87a", 3) == 0 || memcmp(data + 3, "89a", 3) == 0);
+}
+
+static void log_gif_buffer_probe(const char* stage, const char* gif_name,
+                                 const uint8_t* data, size_t size)
+{
+    char first_bytes[64];
+    format_gif_first_bytes(data, size, first_bytes, sizeof(first_bytes));
+
+    char version[4] = "---";
+    if (data != NULL && size >= 6) {
+        memcpy(version, data + 3, 3);
+        version[3] = '\0';
+    }
+
+    ESP_LOGW("animation",
+             "GIF probe [%s]: name=%s, data=%p, size=%u, valid_header=%s, version=%s, first16=[%s]",
+             stage ? stage : "unknown",
+             gif_name ? gif_name : "<null>",
+             data,
+             static_cast<unsigned>(size),
+             gif_header_looks_valid(data, size) ? "yes" : "no",
+             version,
+             first_bytes);
+}
+
+static void log_gif_render_request(const char* phase, int animation_index, const Animation_t* anim,
+                                   const uint8_t* gif_data, size_t gif_size)
+{
+    ESP_LOGI("plat_animation_task",
+             "GIF render request: animation=%s(%d), phase=%s, asset=%s, data=%p, size=%u, has_start=%s, start_size=%u, loop_size=%u",
+             get_animation_name(animation_index),
+             animation_index,
+             phase ? phase : "unknown",
+             (anim != NULL && anim->gif_path != NULL) ? anim->gif_path : "<unknown>",
+             gif_data,
+             static_cast<unsigned>(gif_size),
+             (anim != NULL && anim->has_start_gif) ? "yes" : "no",
+             (anim != NULL) ? static_cast<unsigned>(anim->gif_start_data_size) : 0,
+             (anim != NULL) ? static_cast<unsigned>(anim->gif_loop_data_size) : 0);
+}
+
 void plat_animation_task(void *arg)
 {
     auto display = Board::GetInstance().GetDisplay();
@@ -459,6 +530,9 @@ void plat_animation_task(void *arg)
                     start_gif_played = true; // Mark that we've played the start GIF
                     loop_gif_set = false; // Loop GIF not set yet
                     start_phase_start_time = xTaskGetTickCount();
+                    log_gif_render_request("start", now_animation, current_anim,
+                                           current_anim->gif_start_data,
+                                           current_anim->gif_start_data_size);
                     display->SetEmotionGif(current_anim->gif_start_data, current_anim->gif_start_data_size);
                     ESP_LOGD("plat_animation_task", "Animation changed to %d: Starting with start GIF", now_animation);
                 } else {
@@ -466,6 +540,9 @@ void plat_animation_task(void *arg)
                     in_start_phase = false;
                     start_gif_played = true; // Mark as played (no start GIF to play)
                     loop_gif_set = true; // Main GIF is the loop
+                    log_gif_render_request("main", now_animation, current_anim,
+                                           current_anim->gif_data,
+                                           current_anim->gif_data_size);
                     display->SetEmotionGif(current_anim->gif_data, current_anim->gif_data_size);
                     ESP_LOGD("plat_animation_task", "Animation changed to %d: Using main GIF", now_animation);
                 }
@@ -478,6 +555,9 @@ void plat_animation_task(void *arg)
                         TickType_t elapsed = xTaskGetTickCount() - start_phase_start_time;
                         if (elapsed >= pdMS_TO_TICKS(1000)) {
                             // Switch to loop phase (only once)
+                            log_gif_render_request("loop", now_animation, current_anim,
+                                                   current_anim->gif_loop_data,
+                                                   current_anim->gif_loop_data_size);
                             display->SetEmotionGif(current_anim->gif_loop_data, current_anim->gif_loop_data_size);
                             in_start_phase = false; // Stay in loop phase
                             loop_gif_set = true; // Mark loop GIF as set
@@ -2189,6 +2269,14 @@ bool animation_extract_gif_from_test_bin(const char* gif_name, uint8_t** data, s
     *size = gif_size;
     fclose(f);
     
+    log_gif_buffer_probe("after fread from test.bin", gif_name, *data, *size);
+    if (!gif_header_looks_valid(*data, *size)) {
+        ESP_LOGE("animation", "Invalid GIF payload extracted from test.bin: %s", gif_name);
+        free(*data);
+        *data = NULL;
+        *size = 0;
+        return false;
+    }
     ESP_LOGI("animation", "Successfully extracted GIF: %s (%d bytes)", gif_name, gif_size);
     return true;
 }
@@ -2220,6 +2308,7 @@ bool animation_load_gif_animation(Animation_t* anim, const char* gif_name, uint8
     
     memcpy(anim->gif_data, gif_data, gif_size);
     anim->gif_data_size = gif_size;
+    log_gif_buffer_probe("after persistent copy", gif_name, anim->gif_data, anim->gif_data_size);
     anim->use_gif = true;
     anim->use_spiffs = true; // Mark as loaded from storage
     anim->has_start_gif = false; // Single GIF, no start/loop separation
@@ -2271,6 +2360,8 @@ bool animation_load_gif_animation_with_start_loop(Animation_t* anim,
     }
     memcpy(anim->gif_loop_data, gif_loop_data, gif_loop_size);
     anim->gif_loop_data_size = gif_loop_size;
+    log_gif_buffer_probe("after loop persistent copy", gif_loop_name,
+                         anim->gif_loop_data, anim->gif_loop_data_size);
     
     // Set loop GIF as the main GIF data for backward compatibility
     anim->gif_data = anim->gif_loop_data;
@@ -2288,6 +2379,8 @@ bool animation_load_gif_animation_with_start_loop(Animation_t* anim,
         }
         memcpy(anim->gif_start_data, gif_start_data, gif_start_size);
         anim->gif_start_data_size = gif_start_size;
+        log_gif_buffer_probe("after start persistent copy", gif_start_name,
+                             anim->gif_start_data, anim->gif_start_data_size);
         anim->has_start_gif = true;
     } else {
         anim->has_start_gif = false;
