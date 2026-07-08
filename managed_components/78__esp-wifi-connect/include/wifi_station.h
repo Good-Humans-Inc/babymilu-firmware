@@ -13,7 +13,17 @@ struct WifiApRecord {
     std::string ssid;
     std::string password;
     int channel;
+    int8_t rssi;
     wifi_auth_mode_t authmode;
+    wifi_second_chan_t second;
+    wifi_cipher_type_t pairwise_cipher;
+    wifi_cipher_type_t group_cipher;
+    bool phy_11b;
+    bool phy_11g;
+    bool phy_11n;
+    bool phy_lr;
+    bool phy_11ax;
+    std::string diagnostics;
     uint8_t bssid[6];
 };
 
@@ -54,6 +64,10 @@ private:
     int8_t max_tx_power_;
     uint8_t remember_bssid_;
     int reconnect_count_ = 0;
+    uint32_t scan_count_ = 0;
+    uint32_t connect_attempt_count_ = 0;
+    uint32_t current_attempt_id_ = 0;
+    std::string current_attempt_diagnostics_;
     std::function<void(const std::string& ssid)> on_connect_;
     std::function<void(const std::string& ssid)> on_connected_;
     std::function<void(const std::string& ssid, wifi_err_reason_t reason, int8_t rssi)> on_disconnected_;
