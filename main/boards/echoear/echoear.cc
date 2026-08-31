@@ -1746,100 +1746,36 @@ private:
         // Create power save timer: -1 (no CPU freq limit), 30 seconds to sleep, -1 (no shutdown)
         power_save_timer_ = new PowerSaveTimer(-1, 30, -1);
         power_save_timer_->OnEnterSleepMode([this]() {
-            // Check battery level to determine sleep behavior
+            // Inactivity always uses the same visual sleep state. Battery level only
+            // controls whether the low-battery text is added on top of that state.
             int battery_level = 0;
             bool charging = false;
             bool discharging = false;
+            const bool battery_available = GetBatteryLevel(battery_level, charging, discharging);
 
-            if (GetBatteryLevel(battery_level, charging, discharging)) {
-                if (battery_level < 25 && !charging) {
-                    // < 25%, not charging: shutdown
-                    ESP_LOGW(TAG, "Battery level %d%% < 25%% and not charging - shutting down", battery_level);
-                    gpio_set_level(POWER_CTRL, 1);
-                    return;
-                } else if (battery_level < 25 && charging) {
-                    // < 25%, charging: always powersaving mode + sleepy.gif
-                    ESP_LOGI(TAG, "Always power saving mode - battery %d%% < 25%% and charging, setting brightness to 20 and switching to sleepy animation", battery_level);
-                    GetBacklight()->SetBrightness(20, false);
-                    auto display = GetDisplay();
-                    if (display) {
-                        display->SetEmotion("sleepy");
-                    }
-                } else if (battery_level >= 25 && battery_level <= 40 && !charging) {
-                    // 25-40%, not charging: always powersaving mode + battery.gif
-                    ESP_LOGI(TAG, "Always power saving mode - battery %d%% (25-40%% range) and not charging, setting brightness to 20 and switching to battery animation", battery_level);
-                    GetBacklight()->SetBrightness(20, false);
-                    auto display = GetDisplay();
-                    if (display) {
-                        display->SetEmotion("battery");
-                    }
-                } else if (battery_level >= 25 && battery_level <= 40 && charging) {
-                    // 25-40%, charging: 30-sec powersaving mode + sleepy.gif
-                    ESP_LOGI(TAG, "30-sec power saving mode - battery %d%% (25-40%% range) and charging, setting brightness to 20 and switching to sleepy animation", battery_level);
-                    GetBacklight()->SetBrightness(20, false);
-                    auto display = GetDisplay();
-                    if (display) {
-                        display->SetEmotion("sleepy");
-                    }
+            ESP_LOGI(TAG, "30-sec inactivity - setting brightness to 20 and switching to sleepy animation");
+            GetBacklight()->SetBrightness(20, false);
+            auto display = display_;
+            if (display) {
+                display->SetEmotion("sleepy");
+                if (battery_available && battery_level < 25) {
+                    ESP_LOGI(TAG, "Battery level %d%% < 25%% during inactivity - showing tired overlay", battery_level);
+                    display->CreateOverlayMessage("I'm tired");
                 } else {
-                    // > 40%: 30-sec powersaving mode + sleepy.gif (regardless of charging)
-                    ESP_LOGI(TAG, "30-sec power saving mode - battery %d%% (>40%%), setting brightness to 20 and switching to sleepy animation", battery_level);
-                    GetBacklight()->SetBrightness(20, false);
-                    auto display = GetDisplay();
-                    if (display) {
-                        display->SetEmotion("sleepy");
-                    }
-                }
-            } else {
-                // Can't read battery - use default behavior (30-sec mode with sleepy)
-                ESP_LOGI(TAG, "30-sec power saving mode - battery level unknown, setting brightness to 20 and switching to sleepy animation");
-                GetBacklight()->SetBrightness(20, false);
-                auto display = GetDisplay();
-                if (display) {
-                    display->SetEmotion("sleepy");
+                    display->ClearOverlayMessage();
                 }
             }
         });
         power_save_timer_->OnExitSleepMode([this]() {
-            // Check if we're in "always powersaving" mode - if so, immediately put back to sleep
-            int battery_level = 0;
-            bool charging = false;
-            bool discharging = false;
-
-            if (GetBatteryLevel(battery_level, charging, discharging)) {
-                bool always_powersaving = false;
-                if (battery_level < 25 && charging) {
-                    // < 25%, charging: always powersaving
-                    always_powersaving = true;
-                } else if (battery_level >= 25 && battery_level <= 40 && !charging) {
-                    // 25-40%, not charging: always powersaving
-                    always_powersaving = true;
-                }
-
-                if (always_powersaving) {
-                    ESP_LOGI(TAG, "Always power saving mode active - immediately re-entering sleep mode");
-                    // Immediately re-apply sleep settings
-                    GetBacklight()->SetBrightness(20, false);
-                    auto display = GetDisplay();
-                    if (display) {
-                        if (battery_level < 25 && charging) {
-                            display->SetEmotion("sleepy");
-                        } else if (battery_level >= 25 && battery_level <= 40 && !charging) {
-                            display->SetEmotion("battery");
-                        }
-                    }
-                    return;  // Don't restore brightness/animation for always powersaving mode
-                }
-            }
-
             ESP_LOGI(TAG, "Exiting sleep mode - restoring brightness and animation");
             GetBacklight()->RestoreBrightness();
 
             // Small delay to allow I2C bus and other peripherals to stabilize after wake
             vTaskDelay(pdMS_TO_TICKS(100));
 
-            auto display = GetDisplay();
+            auto display = display_;
             if (display) {
+                display->ClearOverlayMessage();
                 display->SetEmotion("normal");  // Restore to normal animation (maps to ANIMATION_NORMAL)
             }
             // Ensure application state is idle after waking from sleep
@@ -1851,15 +1787,15 @@ private:
         });
         power_save_timer_->SetEnabled(true);
 
-        // Start battery monitoring task for "always powersaving" mode
+        // Start periodic battery telemetry.
         InitializeBatteryMonitor();
     }
 
     void InitializeBatteryMonitor() {
-        // Create battery monitoring task to check for "always powersaving" mode
+        // Battery monitoring reports telemetry only. Inactivity presentation is
+        // owned exclusively by the 30-second power-save callback above.
         xTaskCreate([](void* arg) {
             EchoEar* board = static_cast<EchoEar*>(arg);
-            bool was_always_powersaving = false;
             int log_counter = 0;  // Counter for 5-minute battery logging (60 iterations * 5 seconds = 5 minutes)
             
             while (true) {
@@ -1868,52 +1804,6 @@ private:
                 bool discharging = false;
 
                 if (board->GetBatteryLevel(battery_level, charging, discharging)) {
-                    bool always_powersaving = false;
-                    if (battery_level < 25 && charging) {
-                        // < 25%, charging: always powersaving
-                        always_powersaving = true;
-                    } else if (battery_level >= 25 && battery_level <= 40 && !charging) {
-                        // 25-40%, not charging: always powersaving
-                        always_powersaving = true;
-                    }
-
-                    if (always_powersaving) {
-                        // If just entered always powersaving mode, immediately apply sleep settings
-                        if (!was_always_powersaving) {
-                            ESP_LOGI(TAG, "[BATTERY] Entered always power saving mode - applying sleep settings immediately");
-                            board->GetBacklight()->SetBrightness(20, false);
-                            auto display = board->GetDisplay();
-                            if (display) {
-                                if (battery_level < 25 && charging) {
-                                    display->SetEmotion("sleepy");
-                                } else if (battery_level >= 25 && battery_level <= 40 && !charging) {
-                                    display->SetEmotion("battery");
-                                }
-                            }
-                        }
-                        // If in always powersaving mode and not in sleep mode, force it
-                        if (board->power_save_timer_ && !board->power_save_timer_->IsInSleepMode()) {
-                            ESP_LOGI(TAG, "[BATTERY] Always power saving mode - ensuring sleep settings applied");
-                            board->GetBacklight()->SetBrightness(20, false);
-                            auto display = board->GetDisplay();
-                            if (display) {
-                                if (battery_level < 25 && charging) {
-                                    display->SetEmotion("sleepy");
-                                } else if (battery_level >= 25 && battery_level <= 40 && !charging) {
-                                    display->SetEmotion("battery");
-                                }
-                            }
-                        }
-                    } else if (was_always_powersaving) {
-                        // Exited always powersaving mode - restore normal brightness if not in timer-based sleep mode
-                        if (board->power_save_timer_ && !board->power_save_timer_->IsInSleepMode()) {
-                            ESP_LOGI(TAG, "[BATTERY] Exited always power saving mode - restoring brightness");
-                            board->GetBacklight()->RestoreBrightness();
-                        }
-                    }
-                    
-                    was_always_powersaving = always_powersaving;
-
                     // Log battery percentage every 30 seconds (6 iterations * 5 seconds)
                     log_counter++;
                     if (log_counter >= 6) {

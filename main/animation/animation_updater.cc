@@ -3,6 +3,7 @@
 #include "display.h"
 #include "system_info.h"
 #include "animation.h"
+#include "display/display.h"
 #include "sd_card.h"
 #include "settings.h"
 #include "config.h"
