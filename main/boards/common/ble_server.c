@@ -22,12 +22,13 @@ static struct {
     uint8_t addr_type;
     ble_data_callback_t data_callback;
     ble_connection_callback_t connection_callback;
+    ble_read_callback_t read_callback;
     ble_device_control_callback_t device_control_callback;
     uint16_t conn_handle;
 } ble_server_state = {0};
 
 // Buffer for current READ characteristic value
-static char ble_read_value[128];
+static char ble_read_value[512];
 static uint16_t ble_read_len = 0;
 
 // Forward declarations
@@ -51,7 +52,7 @@ static const struct ble_gatt_svc_def gatt_svcs[] = {
             },
             {
                 .uuid = BLE_UUID16_DECLARE(0xDEAD),           // Define UUID for writing
-                .flags = BLE_GATT_CHR_F_WRITE,
+                .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP,
                 .access_cb = ble_device_write
             },
             {0}
@@ -64,10 +65,17 @@ static const struct ble_gatt_svc_def gatt_svcs[] = {
 static int ble_device_write(uint16_t conn_handle, uint16_t attr_handle, 
                            struct ble_gatt_access_ctxt *ctxt, void *arg)
 {
-    char *data = (char *)ctxt->om->om_data;
-    data[ctxt->om->om_len] = '\0'; // Null terminate the string
-    
-    ESP_LOGI(TAG, "Data from client: %.*s", ctxt->om->om_len, ctxt->om->om_data);
+    const uint16_t length = OS_MBUF_PKTLEN(ctxt->om);
+    if (length == 0 || length > 512) {
+        ESP_LOGW(TAG, "Rejected BLE write length: %u", length);
+        return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+    }
+    char data[513];
+    if (os_mbuf_copydata(ctxt->om, 0, length, data) != 0) {
+        ESP_LOGW(TAG, "Failed to flatten BLE write");
+        return BLE_ATT_ERR_UNLIKELY;
+    }
+    data[length] = '\0';
     
     // Handle device control commands internally
     if (strcmp(data, "LIGHT ON") == 0) {
@@ -97,7 +105,7 @@ static int ble_device_write(uint16_t conn_handle, uint16_t attr_handle,
     else {
         // Call user data callback for other data
         if (ble_server_state.data_callback) {
-            ble_server_state.data_callback(data, ctxt->om->om_len);
+            ble_server_state.data_callback(data, length);
         }
     }
     
@@ -113,6 +121,9 @@ static int ble_device_read(uint16_t con_handle, uint16_t attr_handle,
     } else {
         const char *response = "";
         os_mbuf_append(ctxt->om, response, strlen(response));
+    }
+    if (ble_server_state.read_callback) {
+        ble_server_state.read_callback();
     }
     return 0;
 }
@@ -223,7 +234,7 @@ static void host_task(void *param)
 }
 
 // Public API Implementation
-bool ble_server_init(const char* device_name, ble_data_callback_t data_cb, ble_connection_callback_t conn_cb, ble_device_control_callback_t device_cb)
+bool ble_server_init(const char* device_name, ble_data_callback_t data_cb, ble_connection_callback_t conn_cb, ble_read_callback_t read_cb, ble_device_control_callback_t device_cb)
 {
     if (ble_server_state.initialized) {
         ESP_LOGW(TAG, "BLE Server already initialized");
@@ -239,6 +250,7 @@ bool ble_server_init(const char* device_name, ble_data_callback_t data_cb, ble_c
     memset(&ble_server_state, 0, sizeof(ble_server_state));
     ble_server_state.data_callback = data_cb;
     ble_server_state.connection_callback = conn_cb;
+    ble_server_state.read_callback = read_cb;
     ble_server_state.device_control_callback = device_cb;
 
     // Initialize BLE
