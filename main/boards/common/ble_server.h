@@ -14,6 +14,9 @@ typedef void (*ble_data_callback_t)(const char* data, uint16_t length);
 // BLE Server callback function type for connection events
 typedef void (*ble_connection_callback_t)(bool connected);
 
+// BLE Server callback invoked after the client reads the current value
+typedef void (*ble_read_callback_t)(void);
+
 // BLE Server callback function type for device control commands
 typedef void (*ble_device_control_callback_t)(const char* command);
 
@@ -22,10 +25,11 @@ typedef void (*ble_device_control_callback_t)(const char* command);
  * @param device_name Name to advertise as BLE device
  * @param data_cb Callback function for received data
  * @param conn_cb Callback function for connection events (optional, can be NULL)
+ * @param read_cb Callback invoked after a characteristic read (optional, can be NULL)
  * @param device_cb Callback function for device control commands (optional, can be NULL)
  * @return true if initialization successful, false otherwise
  */
-bool ble_server_init(const char* device_name, ble_data_callback_t data_cb, ble_connection_callback_t conn_cb, ble_device_control_callback_t device_cb);
+bool ble_server_init(const char* device_name, ble_data_callback_t data_cb, ble_connection_callback_t conn_cb, ble_read_callback_t read_cb, ble_device_control_callback_t device_cb);
 
 /**
  * @brief Start BLE advertising

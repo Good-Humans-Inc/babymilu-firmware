@@ -31,6 +31,7 @@ public:
     // BLE handler methods (enabled)
     void HandleBleData(const char* data, uint16_t length);
     void HandleBleConnection(bool connected);
+    void HandleBleRead();
     virtual Http* CreateHttp() override;
     virtual WebSocket* CreateWebSocket() override;
     virtual Mqtt* CreateMqtt() override;

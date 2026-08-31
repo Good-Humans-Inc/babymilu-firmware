@@ -718,6 +718,12 @@ static void ble_connection_callback(bool connected) {
     }
 }
 
+static void ble_read_callback() {
+    if (g_wifi_board_instance) {
+        g_wifi_board_instance->HandleBleRead();
+    }
+}
+
 void WifiBoard::InitializeBleServer() {
     ESP_LOGI(TAG, "Initializing BLE server for WiFi configuration");
     
@@ -728,6 +734,7 @@ void WifiBoard::InitializeBleServer() {
     if (ble_server_init("BabyMilu", 
                        ble_data_callback,
                        ble_connection_callback,
+                       ble_read_callback,
                        nullptr)) { // No device control callback for now
         ble_initialized_ = true;
         ble_server_start_advertising();
@@ -766,11 +773,16 @@ void WifiBoard::HandleBleConnection(bool connected) {
         }
     } else {
         ESP_LOGI(TAG, "BLE client disconnected");
-        if (provisioning_failure_exposed_) {
-            ClearProvisioningState();
-            provisioning_failure_exposed_ = false;
-        }
     }
+}
+
+void WifiBoard::HandleBleRead() {
+    if (!provisioning_failure_exposed_) return;
+
+    ESP_LOGI(TAG, "Acknowledged saved provisioning failure over BLE");
+    ClearProvisioningState();
+    provisioning_failure_exposed_ = false;
+    PublishBleValue(ProvisioningCapabilities());
 }
 
 std::string WifiBoard::ProvisioningCapabilities() const {
@@ -1125,6 +1137,12 @@ void WifiBoard::OnRuntimeReady() {
                 return;
             }
             ESP_LOGW(TAG, "Provisioning report rejected with status %d", status_code);
+            if (status_code >= 400 && status_code < 500 &&
+                status_code != 408 && status_code != 429) {
+                ESP_LOGE(TAG, "Discarding provisioning report after terminal response");
+                ClearProvisioningState();
+                return;
+            }
         } else {
             ESP_LOGW(TAG, "Provisioning report attempt %d failed", attempt);
         }
