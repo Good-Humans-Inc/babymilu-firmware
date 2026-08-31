@@ -7,6 +7,13 @@ config OTA_URL
         The application will access this URL to check for new firmwares and server address.
         Leave empty to disable OTA updates. Format: http://host:port/path or https://host:port/path
 
+config PROVISIONING_RESULT_URL
+    string "Wi-Fi provisioning result URL"
+    default "https://us-central1-composed-augury-469200-g6.cloudfunctions.net/device-api-miffy-dev/v3/device/provisioning-result"
+    help
+        Authenticated BM2 success-report endpoint. Firmware uses the one-time
+        reporting token received over BLE and never logs it.
+
 config DEFAULT_MQTT_ENDPOINT
     string "Default MQTT endpoint"
     default ""

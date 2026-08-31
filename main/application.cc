@@ -651,6 +651,13 @@ void Application::CheckNewVersion()
 
         if (!ota_.CheckVersion())
         {
+            auto& board = Board::GetInstance();
+            if (board.HasPendingWifiProvisioning())
+            {
+                ESP_LOGW(TAG, "Runtime unreachable during WiFi provisioning");
+                board.OnWifiProvisioningRuntimeFailure();
+                return;
+            }
             retry_count++;
             if (retry_count >= MAX_RETRY)
             {
@@ -726,6 +733,7 @@ void Application::CheckNewVersion()
         ota_.MarkCurrentVersionValid();
         if (!ota_.HasActivationCode() && !ota_.HasActivationChallenge())
         {
+            Board::GetInstance().OnRuntimeReady();
             xEventGroupSetBits(event_group_, CHECK_NEW_VERSION_DONE_EVENT);
             // Exit the loop if done checking new version
             break;

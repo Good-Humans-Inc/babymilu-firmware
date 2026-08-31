@@ -3,16 +3,23 @@
 
 #include "board.h"
 #include "ble_server.h"  // BLE server enabled
+#include "wifi_provisioning_protocol.h"
 
 class WifiBoard : public Board {
 protected:
     bool wifi_config_mode_ = false;
     bool ble_initialized_ = false;  // BLE server enabled
     std::string temp_ssid_;  // Temporary storage for SSID during BLE configuration
+    WifiProvisioningReassembler provisioning_reassembler_;
+    bool provisioning_failure_exposed_ = false;
     void EnterWifiConfigMode();
     void EnterWifiConfigModeViaBLE();  // Enter BLE config mode after WiFi disconnect
     void InitializeBleServer();  // BLE server enabled
     void ParseWifiCredentials(const char* data);  // BLE server enabled
+    bool ParseProvisioningMessage(const WifiProvisioningMessage& message);
+    void StartBm1NetworkCheck();
+    std::string ProvisioningCapabilities() const;
+    std::string PendingProvisioningStatus() const;
     virtual std::string GetBoardJson() override;
 
 public:
@@ -33,6 +40,9 @@ public:
     virtual void ResetWifiConfiguration();
     virtual void ClearWifiConfiguration();
     virtual void EnterBleWifiConfigMode() override;
+    virtual bool HasPendingWifiProvisioning() override;
+    virtual void OnWifiProvisioningRuntimeFailure() override;
+    virtual void OnRuntimeReady() override;
     virtual AudioCodec* GetAudioCodec() override { return nullptr; }
     virtual std::string GetDeviceStatusJson() override;
 };

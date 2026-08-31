@@ -53,6 +53,9 @@ public:
     virtual void ClearWifiConfiguration() {}
     virtual void EnterBleWifiConfigMode() {}
     virtual void WaitForStartupNetworkTasks() {}
+    virtual bool HasPendingWifiProvisioning() { return false; }
+    virtual void OnWifiProvisioningRuntimeFailure() {}
+    virtual void OnRuntimeReady() {}
     virtual std::string GetBoardJson() = 0;
     virtual std::string GetDeviceStatusJson() = 0;
 };

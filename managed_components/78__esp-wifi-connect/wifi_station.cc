@@ -238,35 +238,8 @@ void WifiStation::HandleScanResult() {
         preferred_ssid_once_.clear();
     }
 
-    // Debug: print persisted credentials from NVS (actual stored priority).
-    std::string persisted_creds = "[";
-    for (size_t i = 0; i < persisted_ssid_list.size(); ++i) {
-        if (i > 0) {
-            persisted_creds += ", ";
-        }
-        persisted_creds += "{\"ssid_hex\":[";
-        persisted_creds += ToHexBytes(persisted_ssid_list[i].ssid.c_str());
-        persisted_creds += "],\"pwd_hex\":[";
-        persisted_creds += ToHexBytes(persisted_ssid_list[i].password.c_str());
-        persisted_creds += "]}";
-    }
-    persisted_creds += "]";
-    ESP_LOGI(TAG, "Stored credentials (NVS persisted priority, hex): %s", persisted_creds.c_str());
-
-    // Debug: print effective credentials used for this boot's connection queue.
-    std::string effective_creds = "[";
-    for (size_t i = 0; i < ssid_list.size(); ++i) {
-        if (i > 0) {
-            effective_creds += ", ";
-        }
-        effective_creds += "{\"ssid_hex\":[";
-        effective_creds += ToHexBytes(ssid_list[i].ssid.c_str());
-        effective_creds += "],\"pwd_hex\":[";
-        effective_creds += ToHexBytes(ssid_list[i].password.c_str());
-        effective_creds += "]}";
-    }
-    effective_creds += "]";
-    ESP_LOGI(TAG, "Effective credentials for this boot (connection order, hex): %s", effective_creds.c_str());
+    ESP_LOGI(TAG, "Loaded %u stored WiFi credential(s)",
+             static_cast<unsigned>(persisted_ssid_list.size()));
 
     // Build connection queue by stored credential order (priority list),
     // not by AP RSSI. Use exact SSID byte match only.
@@ -346,6 +319,8 @@ void WifiStation::StartConnect() {
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
 
     reconnect_count_ = 0;
+    last_disconnect_reason_ = 0;
+    was_associated_ = false;
     ESP_ERROR_CHECK(esp_wifi_connect());
 }
 
@@ -390,6 +365,7 @@ void WifiStation::WifiEventHandler(void* arg, esp_event_base_t event_base, int32
     } else if (event_id == WIFI_EVENT_STA_DISCONNECTED) {
         auto* disc = static_cast<wifi_event_sta_disconnected_t*>(event_data);
         if (disc != nullptr) {
+            this_->last_disconnect_reason_ = disc->reason;
             ESP_LOGW(TAG,
                      "Disconnected from %s, reason=%d, rssi=%d",
                      reinterpret_cast<const char*>(disc->ssid),
@@ -420,6 +396,7 @@ void WifiStation::WifiEventHandler(void* arg, esp_event_base_t event_base, int32
         ESP_LOGI(TAG, "No more AP to connect, wait for next scan");
         esp_timer_start_once(this_->timer_handle_, 10 * 1000);
     } else if (event_id == WIFI_EVENT_STA_CONNECTED) {
+        this_->was_associated_ = true;
     }
 }
 

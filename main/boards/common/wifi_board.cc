@@ -14,6 +14,11 @@
 #include <tls_transport.h>
 #include <web_socket.h>
 #include <esp_log.h>
+#include <esp_app_desc.h>
+#include <esp_system.h>
+#include <cJSON.h>
+#include <memory>
+#include <utility>
 
 #include <wifi_station.h>
 #include <wifi_configuration_ap.h>
@@ -23,6 +28,115 @@
 #include "error_log_uploader.h"
 
 static const char *TAG = "WifiBoard";
+
+namespace {
+
+constexpr const char* kProvisioningNamespace = "wifi_prov";
+constexpr int kProvisioningPendingCloud = 1;
+constexpr int kProvisioningBleFailure = 2;
+constexpr int kProvisioningBm1Active = 3;
+
+std::string BuildProvisioningStatus(
+    const std::string& attempt_id,
+    const char* status,
+    const char* reason) {
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "v", 1);
+    cJSON_AddStringToObject(root, "type", "wifi.status");
+    cJSON_AddStringToObject(root, "attemptId", attempt_id.c_str());
+    cJSON_AddStringToObject(root, "status", status);
+    cJSON_AddStringToObject(root, "reason", reason);
+    char* encoded = cJSON_PrintUnformatted(root);
+    std::string result = encoded == nullptr ? "" : encoded;
+    cJSON_free(encoded);
+    cJSON_Delete(root);
+    return result;
+}
+
+void PublishBleValue(const std::string& value) {
+    if (!value.empty()) {
+        ble_server_send_data(value.data(), static_cast<uint16_t>(value.size()));
+    }
+}
+
+void ClearProvisioningState() {
+    Settings settings(kProvisioningNamespace, true);
+    settings.EraseAll();
+}
+
+void SaveProvisioningState(
+    int state,
+    const std::string& protocol,
+    const std::string& attempt_id,
+    const std::string& report_token = "",
+    const std::string& status = "",
+    const std::string& reason = "",
+    const std::string& target_ssid = "") {
+    Settings settings(kProvisioningNamespace, true);
+    settings.SetInt("state", state);
+    settings.SetString("protocol", protocol);
+    settings.SetString("attempt", attempt_id);
+    if (!report_token.empty()) settings.SetString("token", report_token);
+    else settings.EraseKey("token");
+    if (!status.empty()) settings.SetString("status", status);
+    else settings.EraseKey("status");
+    if (!reason.empty()) settings.SetString("reason", reason);
+    else settings.EraseKey("reason");
+    if (!target_ssid.empty()) settings.SetString("target_ssid", target_ssid);
+    else settings.EraseKey("target_ssid");
+}
+
+bool HasForbiddenControl(const char* value) {
+    if (value == nullptr) return true;
+    for (const unsigned char* cursor = reinterpret_cast<const unsigned char*>(value);
+         *cursor != 0; ++cursor) {
+        if (*cursor < 0x20 || *cursor == 0x7f) return true;
+    }
+    return false;
+}
+
+bool IsValidReportToken(const std::string& token) {
+    if (token.size() < 32 || token.size() > 128) return false;
+    for (char value : token) {
+        if (!((value >= 'A' && value <= 'Z') ||
+              (value >= 'a' && value <= 'z') ||
+              (value >= '0' && value <= '9') || value == '_' || value == '-')) {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::pair<const char*, const char*> ClassifyWifiFailure(const WifiStation& station) {
+    const uint8_t reason = station.GetLastDisconnectReason();
+    switch (reason) {
+        case WIFI_REASON_AUTH_EXPIRE:
+        case WIFI_REASON_AUTH_FAIL:
+        case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT:
+        case WIFI_REASON_HANDSHAKE_TIMEOUT:
+        case WIFI_REASON_ASSOC_FAIL:
+            return {"auth_failed", "AUTH_FAILED"};
+        default:
+            break;
+    }
+    if (station.WasAssociated()) return {"dhcp_failed", "DHCP_TIMEOUT"};
+    return {"auth_failed", "AP_NOT_FOUND"};
+}
+
+bool ProbeRuntimeEndpoint(WifiBoard* board) {
+    const std::string url = CONFIG_OTA_URL;
+    if (url.empty()) return false;
+    auto http = std::unique_ptr<Http>(board->CreateHttp());
+    http->SetHeader("Device-Id", SystemInfo::GetMacAddress().c_str());
+    http->SetHeader("Content-Type", "application/json");
+    http->SetTimeout(15000);
+    if (!http->Open("GET", url)) return false;
+    const int status = http->GetStatusCode();
+    http->Close();
+    return status == 200;
+}
+
+}  // namespace
 
 // Keep newly added WiFi credentials at the lowest priority so existing
 // networks are tried first on startup.
@@ -186,13 +300,7 @@ void WifiBoard::StartNetwork() {
     auto& ssid_manager = SsidManager::GetInstance();
     auto ssid_list = ssid_manager.GetSsidList();
     
-    // Debug: Log stored WiFi credentials
     ESP_LOGI(TAG, "Stored WiFi credentials count: %d", ssid_list.size());
-    for (size_t i = 0; i < ssid_list.size(); i++) {
-        ESP_LOGI(TAG, "WiFi %d: SSID='%s', Password='%s'", 
-                 i, ssid_list[i].ssid.c_str(), 
-                 ssid_list[i].password.c_str());
-    }
     
     if (ssid_list.empty()) {
         // No WiFi credentials found, use BLE for configuration
@@ -281,19 +389,7 @@ void WifiBoard::StartNetwork() {
         display->ShowNotification(Lang::Strings::SCANNING_WIFI, 30000);
     });
     wifi_station.OnConnect([this](const std::string& ssid) {
-        auto& ssid_manager = SsidManager::GetInstance();
-        auto ssid_list = ssid_manager.GetSsidList();
-        bool matched_ssid = false;
-        for (const auto& item : ssid_list) {
-            if (item.ssid == ssid) {
-                ESP_LOGI(TAG, "Connecting with SSID='%s', Password='%s'", item.ssid.c_str(), item.password.c_str());
-                matched_ssid = true;
-                break;
-            }
-        }
-        if (!matched_ssid) {
-            ESP_LOGW(TAG, "Connecting with SSID='%s', password not found in stored credentials", ssid.c_str());
-        }
+        ESP_LOGI(TAG, "Connecting with SSID='%s'", ssid.c_str());
 
         auto display = Board::GetInstance().GetDisplay();
         std::string notification = Lang::Strings::CONNECT_TO;
@@ -357,6 +453,20 @@ void WifiBoard::StartNetwork() {
     // Keep this longer than per-SSID retry window (3 retries x 15s) so
     // WifiStation can finish retries before BLE fallback.
     if (!wifi_station.WaitForConnected(60 * 1000)) {
+        {
+            Settings provisioning(kProvisioningNamespace, false);
+            if (provisioning.GetInt("state") == kProvisioningPendingCloud) {
+                const std::string attempt_id = provisioning.GetString("attempt");
+                const auto failure = ClassifyWifiFailure(wifi_station);
+                SaveProvisioningState(
+                    kProvisioningBleFailure,
+                    "BM2",
+                    attempt_id,
+                    "",
+                    failure.first,
+                    failure.second);
+            }
+        }
         wifi_station.Stop();
         wifi_config_mode_ = true;
         ESP_LOGI(TAG, "WiFi connection failed, using BLE for configuration");
@@ -628,32 +738,193 @@ void WifiBoard::InitializeBleServer() {
 }
 
 void WifiBoard::HandleBleData(const char* data, uint16_t length) {
-    ESP_LOGI(TAG, "BLE data received: %.*s", length, data);
+    if (data == nullptr || length == 0) return;
+    if ((length >= 4 && memcmp(data, "BM1|", 4) == 0) ||
+        (length >= 4 && memcmp(data, "BM2|", 4) == 0)) {
+        WifiProvisioningMessage message;
+        const auto result = provisioning_reassembler_.Push(
+            reinterpret_cast<const uint8_t*>(data), length, &message);
+        if (result == WifiProvisioningFrameResult::kInvalid) {
+            ESP_LOGW(TAG, "Rejected invalid WiFi provisioning frame");
+        } else if (result == WifiProvisioningFrameResult::kComplete) {
+            ParseProvisioningMessage(message);
+        }
+        return;
+    }
     ParseWifiCredentials(data);
 }
 
 void WifiBoard::HandleBleConnection(bool connected) {
     if (connected) {
         ESP_LOGI(TAG, "BLE client connected");
-        // Send status message to client
-        ble_server_send_data("Ready for WiFi configuration", 30);
-
-        // Also send device MAC address to the app upon connection
-        std::string mac = SystemInfo::GetMacAddress();
-        std::string msg = std::string("MAC:") + mac;
-        ESP_LOGI(TAG, "Sending MAC to BLE client: %s", mac.c_str());
-        bool mac_sent = ble_server_send_data(msg.c_str(), msg.size());
-        if (!mac_sent) {
-            ESP_LOGW(TAG, "Failed to send MAC to BLE client");
+        const std::string pending_status = PendingProvisioningStatus();
+        if (!pending_status.empty()) {
+            provisioning_failure_exposed_ = true;
+            PublishBleValue(pending_status);
+        } else {
+            PublishBleValue(ProvisioningCapabilities());
         }
     } else {
         ESP_LOGI(TAG, "BLE client disconnected");
+        if (provisioning_failure_exposed_) {
+            ClearProvisioningState();
+            provisioning_failure_exposed_ = false;
+        }
     }
 }
 
+std::string WifiBoard::ProvisioningCapabilities() const {
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "v", 1);
+    cJSON_AddStringToObject(root, "type", "wifi.capabilities");
+    cJSON_AddStringToObject(root, "deviceId", SystemInfo::GetMacAddress().c_str());
+    cJSON* protocols = cJSON_AddArrayToObject(root, "protocols");
+    cJSON_AddItemToArray(protocols, cJSON_CreateString("BM1"));
+    cJSON_AddNumberToObject(root, "maxFrameBytes", 160);
+    cJSON_AddNumberToObject(root, "maxLogicalBytes", 384);
+    cJSON_AddNumberToObject(root, "maxFrames", 4);
+    cJSON* supported = cJSON_AddArrayToObject(root, "supportedProtocols");
+    cJSON_AddItemToArray(supported, cJSON_CreateString("BM2"));
+    cJSON_AddItemToArray(supported, cJSON_CreateString("BM1"));
+    cJSON_AddItemToArray(supported, cJSON_CreateString("legacy"));
+    cJSON_AddStringToObject(root, "preferredProtocol", "BM2");
+    cJSON* channels = cJSON_AddArrayToObject(root, "resultChannels");
+    cJSON_AddItemToArray(channels, cJSON_CreateString("cloud"));
+    cJSON_AddItemToArray(channels, cJSON_CreateString("ble"));
+    cJSON_AddStringToObject(root, "firmwareVersion", esp_app_get_description()->version);
+    char* encoded = cJSON_PrintUnformatted(root);
+    std::string result = encoded == nullptr ? "" : encoded;
+    cJSON_free(encoded);
+    cJSON_Delete(root);
+    return result;
+}
+
+std::string WifiBoard::PendingProvisioningStatus() const {
+    Settings settings(kProvisioningNamespace, false);
+    if (settings.GetInt("state") != kProvisioningBleFailure) return "";
+    const std::string attempt_id = settings.GetString("attempt");
+    const std::string status = settings.GetString("status");
+    const std::string reason = settings.GetString("reason");
+    if (!IsCanonicalProvisioningAttemptId(attempt_id) || status.empty() || reason.empty()) {
+        return "";
+    }
+    return BuildProvisioningStatus(attempt_id, status.c_str(), reason.c_str());
+}
+
+bool WifiBoard::ParseProvisioningMessage(const WifiProvisioningMessage& message) {
+    cJSON* root = cJSON_ParseWithLength(message.payload.data(), message.payload.size());
+    const int expected_version = message.protocol == "BM2" ? 2 : 1;
+    cJSON* version = root == nullptr ? nullptr : cJSON_GetObjectItem(root, "v");
+    cJSON* type = root == nullptr ? nullptr : cJSON_GetObjectItem(root, "type");
+    cJSON* attempt = root == nullptr ? nullptr : cJSON_GetObjectItem(root, "attemptId");
+    cJSON* ssid_item = root == nullptr ? nullptr : cJSON_GetObjectItem(root, "ssid");
+    cJSON* password_item = root == nullptr ? nullptr : cJSON_GetObjectItem(root, "password");
+    cJSON* token_item = root == nullptr ? nullptr : cJSON_GetObjectItem(root, "reportToken");
+
+    const bool base_valid =
+        cJSON_IsNumber(version) && version->valueint == expected_version &&
+        cJSON_IsString(type) && strcmp(type->valuestring, "wifi.provision") == 0 &&
+        cJSON_IsString(attempt) && message.attempt_id == attempt->valuestring &&
+        cJSON_IsString(ssid_item) && cJSON_IsString(password_item);
+    const std::string ssid = base_valid ? ssid_item->valuestring : "";
+    const std::string password = base_valid ? password_item->valuestring : "";
+    const bool credentials_valid =
+        base_valid && !ssid.empty() && ssid.size() <= 32 &&
+        (password.empty() || (password.size() >= 8 && password.size() <= 63)) &&
+        !HasForbiddenControl(ssid.c_str()) && !HasForbiddenControl(password.c_str());
+    const std::string report_token =
+        cJSON_IsString(token_item) ? token_item->valuestring : "";
+    const bool token_valid =
+        message.protocol == "BM1" || IsValidReportToken(report_token);
+
+    if (!credentials_valid || !token_valid) {
+        PublishBleValue(BuildProvisioningStatus(
+            message.attempt_id, "invalid", "INVALID_REQUEST"));
+        cJSON_Delete(root);
+        return false;
+    }
+
+    if (ConsumeNextBleCredentialLowestFlag()) {
+        SaveCredentialAsLowestPriority(ssid, password);
+    } else {
+        SsidManager::GetInstance().AddSsid(ssid, password);
+    }
+    {
+        Settings wifi("wifi", true);
+        wifi.SetString("nxt_boot_ssid", ssid);
+    }
+
+    if (message.protocol == "BM2") {
+        SaveProvisioningState(
+            kProvisioningPendingCloud,
+            "BM2",
+            message.attempt_id,
+            report_token,
+            "",
+            "",
+            ssid);
+        PublishBleValue(BuildProvisioningStatus(
+            message.attempt_id, "accepted", "CREDENTIALS_STAGED"));
+        wifi_config_mode_ = false;
+        cJSON_Delete(root);
+        vTaskDelay(pdMS_TO_TICKS(750));
+        esp_restart();
+        return true;
+    }
+
+    SaveProvisioningState(
+        kProvisioningBm1Active,
+        "BM1",
+        message.attempt_id,
+        "",
+        "",
+        "",
+        ssid);
+    PublishBleValue(BuildProvisioningStatus(
+        message.attempt_id, "accepted", "CREDENTIALS_STAGED"));
+    cJSON_Delete(root);
+    StartBm1NetworkCheck();
+    return true;
+}
+
+void WifiBoard::StartBm1NetworkCheck() {
+    xTaskCreate([](void* argument) {
+        auto* board = static_cast<WifiBoard*>(argument);
+        Settings provisioning(kProvisioningNamespace, false);
+        const std::string attempt_id = provisioning.GetString("attempt");
+        const std::string target_ssid = provisioning.GetString("target_ssid");
+        auto& station = WifiStation::GetInstance();
+        station.Start();
+        if (!station.WaitForConnected(40 * 1000)) {
+            const auto failure = ClassifyWifiFailure(station);
+            station.Stop();
+            PublishBleValue(BuildProvisioningStatus(
+                attempt_id, failure.first, failure.second));
+            vTaskDelete(nullptr);
+            return;
+        }
+        if (station.GetSsid() != target_ssid) {
+            station.Stop();
+            PublishBleValue(BuildProvisioningStatus(
+                attempt_id, "auth_failed", "TARGET_NETWORK_NOT_CONNECTED"));
+            vTaskDelete(nullptr);
+            return;
+        }
+        if (!ProbeRuntimeEndpoint(board)) {
+            station.Stop();
+            PublishBleValue(BuildProvisioningStatus(
+                attempt_id, "internet_failed", "RUNTIME_UNREACHABLE"));
+            vTaskDelete(nullptr);
+            return;
+        }
+        PublishBleValue(BuildProvisioningStatus(
+            attempt_id, "connected", "RUNTIME_READY"));
+        vTaskDelay(pdMS_TO_TICKS(3000));
+        esp_restart();
+    }, "bm1_wifi_check", 6144, this, 5, nullptr);
+}
+
 void WifiBoard::ParseWifiCredentials(const char* data) {
-    ESP_LOGI(TAG, "BLE data received: %s", data);
-    
     if (strncmp(data, "ssid:", 5) == 0) {
         std::string ssid = data + 5;
         ESP_LOGI(TAG, "WiFi SSID received via BLE: %s", ssid.c_str());
@@ -670,8 +941,6 @@ void WifiBoard::ParseWifiCredentials(const char* data) {
         if (pwd_pos != std::string::npos) {
             password = password.substr(0, pwd_pos);
         }
-        
-        ESP_LOGI(TAG, "WiFi password received via BLE: %s", password.c_str());
         
         // Check if we have a stored SSID
         if (!temp_ssid_.empty()) {
@@ -761,4 +1030,104 @@ void WifiBoard::ParseWifiCredentials(const char* data) {
     }
 }
 
+bool WifiBoard::HasPendingWifiProvisioning() {
+    Settings provisioning(kProvisioningNamespace, false);
+    return provisioning.GetInt("state") == kProvisioningPendingCloud &&
+        provisioning.GetString("protocol") == "BM2";
+}
 
+void WifiBoard::OnWifiProvisioningRuntimeFailure() {
+    Settings provisioning(kProvisioningNamespace, false);
+    const std::string attempt_id = provisioning.GetString("attempt");
+    if (!IsCanonicalProvisioningAttemptId(attempt_id)) {
+        ClearProvisioningState();
+        return;
+    }
+    SaveProvisioningState(
+        kProvisioningBleFailure,
+        "BM2",
+        attempt_id,
+        "",
+        "internet_failed",
+        "RUNTIME_UNREACHABLE");
+    {
+        Settings wifi("wifi", true);
+        wifi.SetInt("force_ble_cfg", 1);
+    }
+    vTaskDelay(pdMS_TO_TICKS(250));
+    esp_restart();
+}
+
+void WifiBoard::OnRuntimeReady() {
+    Settings provisioning(kProvisioningNamespace, false);
+    if (provisioning.GetInt("state") != kProvisioningPendingCloud ||
+        provisioning.GetString("protocol") != "BM2") {
+        return;
+    }
+    const std::string attempt_id = provisioning.GetString("attempt");
+    const std::string report_token = provisioning.GetString("token");
+    const std::string target_ssid = provisioning.GetString("target_ssid");
+    if (!IsCanonicalProvisioningAttemptId(attempt_id) ||
+        !IsValidReportToken(report_token)) {
+        ESP_LOGW(TAG, "Discarding invalid pending provisioning state");
+        ClearProvisioningState();
+        return;
+    }
+    if (WifiStation::GetInstance().GetSsid() != target_ssid) {
+        SaveProvisioningState(
+            kProvisioningBleFailure,
+            "BM2",
+            attempt_id,
+            "",
+            "auth_failed",
+            "TARGET_NETWORK_NOT_CONNECTED");
+        {
+            Settings wifi("wifi", true);
+            wifi.SetInt("force_ble_cfg", 1);
+        }
+        vTaskDelay(pdMS_TO_TICKS(250));
+        esp_restart();
+        return;
+    }
+
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "operation", "report");
+    cJSON_AddStringToObject(root, "deviceId", SystemInfo::GetMacAddress().c_str());
+    cJSON_AddStringToObject(root, "attemptId", attempt_id.c_str());
+    cJSON_AddStringToObject(root, "status", "connected");
+    cJSON_AddStringToObject(root, "reason", "RUNTIME_READY");
+    cJSON_AddStringToObject(
+        root, "firmwareVersion", esp_app_get_description()->version);
+    char* encoded = cJSON_PrintUnformatted(root);
+    std::string body = encoded == nullptr ? "" : encoded;
+    cJSON_free(encoded);
+    cJSON_Delete(root);
+    if (body.empty()) return;
+
+    const std::string url = CONFIG_PROVISIONING_RESULT_URL;
+    if (url.empty()) {
+        ESP_LOGW(TAG, "Provisioning result URL is not configured");
+        return;
+    }
+    for (int attempt = 1; attempt <= 3; ++attempt) {
+        auto http = std::unique_ptr<Http>(CreateHttp());
+        http->SetHeader("Authorization", ("Device " + report_token).c_str());
+        http->SetHeader("Content-Type", "application/json");
+        http->SetTimeout(15000);
+        http->SetContent(std::string(body));
+        if (http->Open("POST", url)) {
+            const int status_code = http->GetStatusCode();
+            http->ReadAll();
+            http->Close();
+            if (status_code == 200) {
+                ESP_LOGI(TAG, "Provisioning success reported");
+                ClearProvisioningState();
+                return;
+            }
+            ESP_LOGW(TAG, "Provisioning report rejected with status %d", status_code);
+        } else {
+            ESP_LOGW(TAG, "Provisioning report attempt %d failed", attempt);
+        }
+        vTaskDelay(pdMS_TO_TICKS(attempt * 1000));
+    }
+}

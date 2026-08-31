@@ -29,6 +29,8 @@ public:
     std::string GetSsid() const { return ssid_; }
     std::string GetIpAddress() const { return ip_address_; }
     uint8_t GetChannel();
+    uint8_t GetLastDisconnectReason() const { return last_disconnect_reason_; }
+    bool WasAssociated() const { return was_associated_; }
     void SetPowerSaveMode(bool enabled);
     void SetPreferredSsidForNextConnect(const std::string& ssid);
 
@@ -58,6 +60,8 @@ private:
     std::function<void()> on_scan_begin_;
     std::vector<WifiApRecord> connect_queue_;
     std::string preferred_ssid_once_;
+    uint8_t last_disconnect_reason_ = 0;
+    bool was_associated_ = false;
 
     void HandleScanResult();
     void StartConnect();
