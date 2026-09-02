@@ -17,7 +17,6 @@ protected:
     void InitializeBleServer();  // BLE server enabled
     void ParseWifiCredentials(const char* data);  // BLE server enabled
     bool ParseProvisioningMessage(const WifiProvisioningMessage& message);
-    void StartBm1NetworkCheck();
     std::string ProvisioningCapabilities() const;
     std::string PendingProvisioningStatus() const;
     virtual std::string GetBoardJson() override;
