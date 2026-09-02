@@ -123,19 +123,6 @@ std::pair<const char*, const char*> ClassifyWifiFailure(const WifiStation& stati
     return {"auth_failed", "AP_NOT_FOUND"};
 }
 
-bool ProbeRuntimeEndpoint(WifiBoard* board) {
-    const std::string url = CONFIG_OTA_URL;
-    if (url.empty()) return false;
-    auto http = std::unique_ptr<Http>(board->CreateHttp());
-    http->SetHeader("Device-Id", SystemInfo::GetMacAddress().c_str());
-    http->SetHeader("Content-Type", "application/json");
-    http->SetTimeout(15000);
-    if (!http->Open("GET", url)) return false;
-    const int status = http->GetStatusCode();
-    http->Close();
-    return status == 200;
-}
-
 }  // namespace
 
 // Keep newly added WiFi credentials at the lowest priority so existing
@@ -455,12 +442,14 @@ void WifiBoard::StartNetwork() {
     if (!wifi_station.WaitForConnected(60 * 1000)) {
         {
             Settings provisioning(kProvisioningNamespace, false);
-            if (provisioning.GetInt("state") == kProvisioningPendingCloud) {
+            const int provisioning_state = provisioning.GetInt("state");
+            if (provisioning_state == kProvisioningPendingCloud ||
+                provisioning_state == kProvisioningBm1Active) {
                 const std::string attempt_id = provisioning.GetString("attempt");
                 const auto failure = ClassifyWifiFailure(wifi_station);
                 SaveProvisioningState(
                     kProvisioningBleFailure,
-                    "BM2",
+                    provisioning_state == kProvisioningPendingCloud ? "BM2" : "BM1",
                     attempt_id,
                     "",
                     failure.first,
@@ -894,46 +883,15 @@ bool WifiBoard::ParseProvisioningMessage(const WifiProvisioningMessage& message)
         ssid);
     PublishBleValue(BuildProvisioningStatus(
         message.attempt_id, "accepted", "CREDENTIALS_STAGED"));
+    wifi_config_mode_ = false;
     cJSON_Delete(root);
-    StartBm1NetworkCheck();
+    // Starting Wi-Fi while NimBLE and the configuration UI are still alive can
+    // exhaust the ESP32 heap before the station driver allocates its buffers.
+    // BM1 now follows BM2's safe lifecycle: persist first, acknowledge over
+    // BLE, then reboot into a clean Wi-Fi process.
+    vTaskDelay(pdMS_TO_TICKS(750));
+    esp_restart();
     return true;
-}
-
-void WifiBoard::StartBm1NetworkCheck() {
-    xTaskCreate([](void* argument) {
-        auto* board = static_cast<WifiBoard*>(argument);
-        Settings provisioning(kProvisioningNamespace, false);
-        const std::string attempt_id = provisioning.GetString("attempt");
-        const std::string target_ssid = provisioning.GetString("target_ssid");
-        auto& station = WifiStation::GetInstance();
-        station.Start();
-        if (!station.WaitForConnected(40 * 1000)) {
-            const auto failure = ClassifyWifiFailure(station);
-            station.Stop();
-            PublishBleValue(BuildProvisioningStatus(
-                attempt_id, failure.first, failure.second));
-            vTaskDelete(nullptr);
-            return;
-        }
-        if (station.GetSsid() != target_ssid) {
-            station.Stop();
-            PublishBleValue(BuildProvisioningStatus(
-                attempt_id, "auth_failed", "TARGET_NETWORK_NOT_CONNECTED"));
-            vTaskDelete(nullptr);
-            return;
-        }
-        if (!ProbeRuntimeEndpoint(board)) {
-            station.Stop();
-            PublishBleValue(BuildProvisioningStatus(
-                attempt_id, "internet_failed", "RUNTIME_UNREACHABLE"));
-            vTaskDelete(nullptr);
-            return;
-        }
-        PublishBleValue(BuildProvisioningStatus(
-            attempt_id, "connected", "RUNTIME_READY"));
-        vTaskDelay(pdMS_TO_TICKS(3000));
-        esp_restart();
-    }, "bm1_wifi_check", 6144, this, 5, nullptr);
 }
 
 void WifiBoard::ParseWifiCredentials(const char* data) {
@@ -1072,7 +1030,13 @@ void WifiBoard::OnWifiProvisioningRuntimeFailure() {
 
 void WifiBoard::OnRuntimeReady() {
     Settings provisioning(kProvisioningNamespace, false);
-    if (provisioning.GetInt("state") != kProvisioningPendingCloud ||
+    const int provisioning_state = provisioning.GetInt("state");
+    if (provisioning_state == kProvisioningBm1Active) {
+        ESP_LOGI(TAG, "BM1 provisioning reached runtime after clean reboot");
+        ClearProvisioningState();
+        return;
+    }
+    if (provisioning_state != kProvisioningPendingCloud ||
         provisioning.GetString("protocol") != "BM2") {
         return;
     }
