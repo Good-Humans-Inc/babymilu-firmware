@@ -1174,6 +1174,12 @@ void Application::Start()
     /* Setup the display */
     auto display = board.GetDisplay();
 
+    // A critically depleted battery can brown out repeatedly when audio and
+    // Wi-Fi start together. Let the board hold on a low-power charging screen
+    // before either subsystem is initialized. Boards without a battery keep
+    // the default no-op behavior.
+    board.WaitForSafeStartupPower();
+
     /* Setup the audio codec */
     auto codec = board.GetAudioCodec();
     opus_decoder_ = std::make_unique<OpusDecoderWrapper>(codec->output_sample_rate(), 1, OPUS_FRAME_DURATION_MS);
