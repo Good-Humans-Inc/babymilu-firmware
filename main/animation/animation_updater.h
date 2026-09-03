@@ -59,6 +59,9 @@ public:
     // Trigger the update loop (runs in a separate task)
     void TriggerUpdateLoop();
 
+    // Apply an MQTT-provided stable asset identity before triggering an update.
+    void PrepareRemoteUpdate(const std::string& asset_url, const std::string& sha256);
+
 private:
     AnimationUpdater();
     ~AnimationUpdater();
@@ -104,6 +107,8 @@ private:
     size_t GetLocalFileSize(const char* file_path);
     bool GetLocalFileHeader(const char* file_path, uint32_t& file_count, uint32_t& checksum, uint32_t& combined_length);
     bool GetRemoteFileHeader(const std::string& url, uint32_t& file_count, uint32_t& checksum, uint32_t& combined_length);
+    bool GetRemoteSha256(const std::string& url, std::string& sha256);
+    bool GetLocalSha256(const char* file_path, std::string& sha256);
     std::string BuildMegaDownloadUrl();
     std::string BuildStartupWavDownloadUrl();
     std::string BuildStartupGifDownloadUrl();
@@ -120,6 +125,7 @@ private:
     std::atomic<bool> is_running_{false};
     std::atomic<bool> enabled_{true};
     std::string server_url_;
+    std::string expected_sha256_;
     uint32_t check_interval_seconds_{10}; // Default 10 seconds
     TaskHandle_t update_task_handle_{nullptr};
     TimerHandle_t update_timer_{nullptr};

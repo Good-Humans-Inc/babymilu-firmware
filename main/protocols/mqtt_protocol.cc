@@ -208,6 +208,12 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
                 ESP_LOGI(TAG, "Successfully subscribed to topic (from OnConnected): %s", subscribe_topic_.c_str());
             }
         }
+        // Reconcile the one stable per-device animation object after every
+        // authenticated MQTT connection. The SHA sidecar makes this a cheap
+        // no-op when the installed bundle is already current.
+        Application::GetInstance().Schedule([]() {
+            AnimationUpdater::GetInstance().TriggerUpdateLoop();
+        });
     });
 
     mqtt_->OnMessage([this](const std::string& topic, const std::string& payload) {
@@ -301,8 +307,11 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
         } else if (strcmp(type->valuestring, "remote_anim_update") == 0) {
             // Remote animation update request - trigger animation updater's update loop
             ESP_LOGI(TAG, "Received remote_anim_update message, triggering animation update loop");
-            Application::GetInstance().Schedule([]() {
+            const std::string asset_url = GetStringField(root, "assetUrl");
+            const std::string sha256 = GetStringField(root, "sha256");
+            Application::GetInstance().Schedule([asset_url, sha256]() {
                 auto& anim_updater = AnimationUpdater::GetInstance();
+                anim_updater.PrepareRemoteUpdate(asset_url, sha256);
                 ESP_LOGI(TAG, "Calling AnimationUpdater::TriggerUpdateLoop()");
                 anim_updater.TriggerUpdateLoop();
             });
