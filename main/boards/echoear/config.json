@@ -4,6 +4,10 @@
         {
             "name": "EchoEar",
             "sdkconfig_append": [
+                "# CONFIG_USE_AFE_WAKE_WORD is not set",
+                "# CONFIG_SR_WN_WN9_NIHAOXIAOZHI_TTS is not set",
+                "# CONFIG_USE_AUDIO_PROCESSOR is not set",
+                "# CONFIG_USE_DEVICE_AEC is not set",
                 "CONFIG_OTA_URL=\"http://35.225.248.38:8000/babymilu/ota/\"",
                 "CONFIG_DEFAULT_MQTT_ENDPOINT=\"35.225.248.38:1883\"",
                 "CONFIG_DEFAULT_MQTT_PUBLISH_TEMPLATE=\"xiaozhi/%s/up\""

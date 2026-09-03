@@ -1,6 +1,6 @@
 # BM2 Wi-Fi provisioning
 
-Firmware 2.0.14 negotiates BM2 while preserving BM1 and legacy compatibility.
+Firmware 2.0.15 negotiates BM2 while preserving BM1 and legacy compatibility.
 The capability payload keeps the original `protocols: ["BM1"]` fields unchanged
 for strict released clients and advertises BM2 through additive
 `supportedProtocols`, `preferredProtocol`, and `resultChannels` fields.
@@ -24,6 +24,27 @@ If OTA/runtime hydration fails, the device similarly reboots into BLE mode with
 `internet_failed`. Only successful runtime hydration triggers the authenticated
 cloud `connected` report.
 
+EchoEar does not instantiate an ESP-SR AFE. Live hardware measurements showed
+that even the communication AFE alone left only about 13 KB of internal RAM and
+prevented the Wi-Fi driver from starting. EchoEar therefore uses the lightweight
+raw-microphone processor, which extracts the microphone channel and sends mono
+60 ms Opus frames. Local wake word, on-device AEC/VAD, and the WakeNet model are
+disabled; conversation activation uses button/touch/app paths. This preserves
+Wi-Fi and voice uplink within the board's internal-RAM budget.
+EchoEar may mount the SD card concurrently, but its animation task waits until
+both the audio runtime and Wi-Fi initialization are complete before decoding or
+loading assets. This keeps transient allocations from fragmenting the internal
+heap needed by the speech runtime and Wi-Fi driver. A first-boot BLE
+provisioning process remains audio-free. Allocation and task-creation failures
+disable the affected audio feature instead of leaving a partially initialized
+object that can crash later.
+
+EchoEar no longer reads a device document directly from the public Firestore
+REST API during startup. That unauthenticated request targeted the legacy
+`(default)` database, duplicated the device's persisted credential ordering and
+MQTT Wi-Fi switching behavior, delayed startup, and increased heap pressure.
+Cloud-owned device metadata stays behind authenticated backend APIs.
+
 The reporting URL is configured by `CONFIG_PROVISIONING_RESULT_URL`. Its
 default points at the production-facing `device-api-miffy-dev` route. The app
 owns attempt creation and polling; firmware possesses only the short-lived
@@ -33,6 +54,7 @@ Host parser tests run with:
 
 ```sh
 ./scripts/test_wifi_provisioning_protocol.sh
+python3 tests/echoear_startup_contract_test.py
 ```
 
 An EchoEar build uses ESP-IDF 5.5 and must finish before flashing. Physical QA

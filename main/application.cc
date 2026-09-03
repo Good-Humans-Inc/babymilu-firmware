@@ -36,6 +36,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <esp_log.h>
+#include <esp_heap_caps.h>
 #include <cJSON.h>
 #include <driver/gpio.h>
 #include <arpa/inet.h>
@@ -1200,6 +1201,27 @@ void Application::Start()
     }
     codec->Start();
 
+    auto& ssid_manager = SsidManager::GetInstance();
+    auto ssid_list = ssid_manager.GetSsidList();
+
+    // Initialize the board-selected audio path before EchoEar starts GIF
+    // decoding and before Wi-Fi/HTTP/MQTT create transient allocations. A
+    // first-boot BLE provisioning process stays audio-free and reboots after
+    // credentials are staged.
+    if (!ssid_list.empty()) {
+        ESP_LOGI(TAG,
+                 "Initializing audio runtime before deferred assets and network "
+                 "(internal free=%u, largest=%u)",
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+        audio_debugger_ = std::make_unique<AudioDebugger>();
+        audio_processor_->Initialize(codec);
+        wake_word_->Initialize(codec);
+        ESP_LOGI(TAG,
+                 "Audio runtime initialized (internal free=%u, largest=%u)",
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    }
 #ifdef CONFIG_BOARD_TYPE_ECHOEAR
     animation_block_startup_load(true);
     if (!PlayWavFromSdCard("/sdcard/startup.wav", 1.0f)) {
@@ -1229,8 +1251,6 @@ void Application::Start()
 
     /* Check if we should clear WiFi configuration to force nimBLE setup */
     // Only clear WiFi if no credentials exist (first boot or manual clearing)
-    auto& ssid_manager = SsidManager::GetInstance();
-    auto ssid_list = ssid_manager.GetSsidList();
     if (ssid_list.empty()) {
         ESP_LOGI(TAG, "No WiFi credentials found, nimBLE will start for configuration");
     } else {
@@ -1239,6 +1259,11 @@ void Application::Start()
 
     /* Wait for the network to be ready */
     board.StartNetwork();
+
+    // EchoEar's SD task may now decode the startup GIF and load animations.
+    // Keep those transient allocations behind both the resident audio runtime
+    // and Wi-Fi initialization so they cannot starve either subsystem.
+    board.ReleaseDeferredStartupResources();
 
     // Update the status bar immediately to show the network state
     display->UpdateStatusBar(true);
@@ -1376,8 +1401,6 @@ void Application::Start()
     } else {
         ESP_LOGW(TAG, "Network not ready yet, skipping animation update check");
     }
-
-    board_instance.WaitForStartupNetworkTasks();
 
     // Seed MQTT config on first boot if unset (allows setting broker at build time)
     {
@@ -1747,8 +1770,6 @@ void Application::Start()
         } });
     bool protocol_started = protocol_->Start();
 
-    audio_debugger_ = std::make_unique<AudioDebugger>();
-    audio_processor_->Initialize(codec);
     audio_processor_->OnOutput([this](std::vector<int16_t> &&data)
                                {
         background_task_->Schedule([this, data = std::move(data)]() mutable {
@@ -1812,7 +1833,6 @@ void Application::Start()
             xEventGroupSetBits(event_group_, MAIN_EVENT_VAD_CHANGE);
         } });
 
-    wake_word_->Initialize(codec);
     wake_word_->OnWakeWordDetected([this](const std::string &wake_word)
                                    { Schedule([this, &wake_word]()
                                               {
