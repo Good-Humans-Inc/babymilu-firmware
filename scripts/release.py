@@ -81,7 +81,9 @@ def release(board_type, board_config):
     
     for build in builds:
         name = build["name"]
-        if not name.startswith(board_type):
+        # Product-facing build names may use title case (for example
+        # "EchoEar") while the board directory and BOARD_TYPE stay lowercase.
+        if not name.lower().startswith(board_type.lower()):
             raise ValueError(f"name {name} 必须以 {board_type} 开头")
         output_path = f"releases/v{project_version}_{name}.zip"
         if os.path.exists(output_path):

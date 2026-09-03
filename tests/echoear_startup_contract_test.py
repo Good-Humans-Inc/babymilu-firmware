@@ -15,6 +15,11 @@ ECHOEAR_CONFIG = json.loads(
 NO_AUDIO_PROCESSOR = (
     ROOT / "main/audio_processing/no_audio_processor.cc"
 ).read_text(encoding="utf-8")
+WIFI_BOARD = (ROOT / "main/boards/common/wifi_board.cc").read_text(encoding="utf-8")
+WIFI_STATION = (
+    ROOT / "managed_components/78__esp-wifi-connect/wifi_station.cc"
+).read_text(encoding="utf-8")
+RELEASE_SCRIPT = (ROOT / "scripts/release.py").read_text(encoding="utf-8")
 FIRMWARE_SOURCE = "\n".join(
     path.read_text(encoding="utf-8", errors="ignore")
     for path in (ROOT / "main").rglob("*.cc")
@@ -70,6 +75,20 @@ class EchoEarStartupContractTest(unittest.TestCase):
         self.assertLess(wake_word, protocol_start)
         self.assertEqual(APPLICATION.count("audio_processor_->Initialize(codec);"), 1)
         self.assertEqual(APPLICATION.count("wake_word_->Initialize(codec);"), 1)
+
+    def test_wifi_allocation_failure_falls_back_without_rebooting(self) -> None:
+        self.assertNotIn("ESP_ERROR_CHECK(esp_wifi_init", WIFI_STATION)
+        self.assertIn("WiFi initialization failed without rebooting", WIFI_STATION)
+        self.assertIn("if (!initialized_)", WIFI_STATION)
+        self.assertIn("const bool wifi_started = wifi_station.Start();", WIFI_BOARD)
+        self.assertIn(
+            "if (!wifi_started || !wifi_station.WaitForConnected", WIFI_BOARD
+        )
+
+    def test_echoear_release_build_accepts_product_name_case(self) -> None:
+        self.assertIn(
+            "name.lower().startswith(board_type.lower())", RELEASE_SCRIPT
+        )
 
 
 if __name__ == "__main__":

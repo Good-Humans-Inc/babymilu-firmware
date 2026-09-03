@@ -6,6 +6,7 @@
 #include <functional>
 
 #include <esp_event.h>
+#include <esp_netif.h>
 #include <esp_timer.h>
 #include <esp_wifi_types_generic.h>
 
@@ -21,7 +22,7 @@ class WifiStation {
 public:
     static WifiStation& GetInstance();
     void AddAuth(const std::string &&ssid, const std::string &&password);
-    void Start();
+    bool Start();
     void Stop();
     bool IsConnected();
     bool WaitForConnected(int timeout_ms = 10000);
@@ -49,6 +50,8 @@ private:
     esp_timer_handle_t reconnect_timer_handle_ = nullptr;
     esp_event_handler_instance_t instance_any_id_ = nullptr;
     esp_event_handler_instance_t instance_got_ip_ = nullptr;
+    esp_netif_t* sta_netif_ = nullptr;
+    bool initialized_ = false;
     std::string ssid_;
     std::string password_;
     std::string ip_address_;
