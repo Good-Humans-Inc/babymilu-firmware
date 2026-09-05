@@ -41,6 +41,7 @@ protected:
     lv_obj_t* overlay_container_ = nullptr;
     lv_obj_t* overlay_bubble_ = nullptr;
     lv_obj_t* overlay_text_ = nullptr;
+    esp_timer_handle_t system_message_timer_ = nullptr;
 
     DisplayFonts fonts_;
     ThemeColors current_theme_;
@@ -72,7 +73,7 @@ public:
     void SetDisplayRotation180(bool upside_down);
     
     // Public method to force create a message in content_ (works even when CONFIG_USE_WECHAT_MESSAGE_STYLE is disabled)
-    void CreateSystemMessage(const char* message);
+    void CreateSystemMessage(const char* message, int duration_ms = 0);
     
     // Public method to clear all system messages created by CreateSystemMessage
     virtual void ClearSystemMessages() override;

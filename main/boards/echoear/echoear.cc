@@ -177,6 +177,14 @@ static void SdAnimInitTask(void* /*arg*/) {
 
     ESP_LOGI(TAG, "[SD/ANIM] === Initializing animations ===");
     animation_init();
+    Animation_t* normal_animation = animation_get_normal_animation();
+    if (normal_animation != nullptr && normal_animation->len > 0) {
+        auto display = Board::GetInstance().GetDisplay();
+        if (display != nullptr) {
+            ESP_LOGI(TAG, "[SD/ANIM] Character ready; clearing connection banner");
+            display->ClearSystemMessages();
+        }
+    }
     ESP_LOGI(TAG, "[SD/ANIM] === Animations initialization completed ===");
     s_sd_anim_init_task_handle = nullptr;
     vTaskDelete(NULL);

@@ -16,6 +16,7 @@ NO_AUDIO_PROCESSOR = (
     ROOT / "main/audio_processing/no_audio_processor.cc"
 ).read_text(encoding="utf-8")
 WIFI_BOARD = (ROOT / "main/boards/common/wifi_board.cc").read_text(encoding="utf-8")
+LCD_DISPLAY = (ROOT / "main/display/lcd_display.cc").read_text(encoding="utf-8")
 WIFI_STATION = (
     ROOT / "managed_components/78__esp-wifi-connect/wifi_station.cc"
 ).read_text(encoding="utf-8")
@@ -89,6 +90,19 @@ class EchoEarStartupContractTest(unittest.TestCase):
         self.assertIn(
             "name.lower().startswith(board_type.lower())", RELEASE_SCRIPT
         )
+
+    def test_connection_banner_is_bounded_and_cleared_when_character_loads(self) -> None:
+        self.assertIn(
+            "CreateSystemMessage(connected_message, 10000)", WIFI_BOARD
+        )
+        self.assertIn(
+            "CreateSystemMessage(connected_message, 10000)", APPLICATION
+        )
+        self.assertIn("esp_timer_start_once(system_message_timer_", LCD_DISPLAY)
+        self.assertIn(
+            '"[SD/ANIM] Character ready; clearing connection banner"', ECHOEAR
+        )
+        self.assertIn("display->ClearSystemMessages();", ECHOEAR)
 
 
 if __name__ == "__main__":

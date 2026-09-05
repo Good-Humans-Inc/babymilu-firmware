@@ -415,7 +415,9 @@ void WifiBoard::StartNetwork() {
             LcdDisplay* lcd_display = static_cast<LcdDisplay*>(display);
             if (lcd_display != nullptr) {
                 ESP_LOGI(TAG, "Display is LcdDisplay, using CreateSystemMessage for connected message");
-                lcd_display->CreateSystemMessage(connected_message);
+                // This is only a bridge while the deferred character bundle
+                // loads. Never leave it covering the character indefinitely.
+                lcd_display->CreateSystemMessage(connected_message, 10000);
             }
             
             // Also try standard methods as fallback
@@ -424,7 +426,7 @@ void WifiBoard::StartNetwork() {
             
             // Also try ShowNotification as fallback
             vTaskDelay(pdMS_TO_TICKS(100));
-            display->ShowNotification(connected_message, 0);
+            display->ShowNotification(connected_message, 10000);
             ESP_LOGI(TAG, "Called ShowNotification with connected message");
         } else {
             ESP_LOGI(TAG, "Animation is available, not showing connected message");

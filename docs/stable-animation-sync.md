@@ -23,3 +23,11 @@ rerun. A dedicated task—not the FreeRTOS timer-service task—waits between
 attempts. Transient failures retry after 2, 5, 10, 30, and 60 seconds, then stop
 until a new MQTT connection or update command resets the retry budget. This
 prevents both a missed update and an unbounded retry/reboot loop.
+
+## Connection banner lifecycle
+
+While deferred character assets are loading, the display may show
+`Connected! I am traveling over :D`. The banner is cleared as soon as the
+normal character animation is ready and also has a 10-second safety timeout.
+The timeout prevents a missing or invalid bundle from permanently covering the
+device UI.
