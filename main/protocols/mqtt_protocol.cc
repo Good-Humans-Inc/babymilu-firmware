@@ -113,7 +113,7 @@ void MqttProtocol::PublishAnimationSyncStatus() {
     cJSON_AddStringToObject(status, "type", "animation_sync_status");
     cJSON_AddStringToObject(status, "status", "applied");
     cJSON_AddStringToObject(status, "deviceId", SystemInfo::GetMacAddress().c_str());
-    cJSON_AddStringToObject(status, "sha256", installed_sha256.c_str());
+    cJSON_AddStringToObject(status, "installedSha256", installed_sha256.c_str());
     char* payload = cJSON_PrintUnformatted(status);
     if (payload != nullptr) {
         if (mqtt_->Publish(publish_topic_, payload)) {
@@ -462,24 +462,9 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
     bool is_connected = mqtt_->IsConnected();
     ESP_LOGI(TAG, "MQTT connection status after Connect(): %s", is_connected ? "connected" : "not connected");
     
-    // Try immediate subscription (may fail if CONNACK not received yet)
-    // OnConnected callback will also try to subscribe as a fallback
-    if (!subscribe_topic_.empty()) {
-        ESP_LOGI(TAG, "Attempting initial subscription to topic: %s", subscribe_topic_.c_str());
-        if (!is_connected) {
-            ESP_LOGW(TAG, "MQTT not fully connected yet, subscribe may fail - will retry in OnConnected callback");
-        }
-        if (!mqtt_->Subscribe(subscribe_topic_)) {
-            ESP_LOGW(TAG, "Initial subscribe failed (may retry in OnConnected): %s", subscribe_topic_.c_str());
-            ESP_LOGW(TAG, "Current connection status: %s", mqtt_->IsConnected() ? "connected" : "not connected");
-            // Don't fail completely - OnConnected callback will retry and provide better diagnostics
-        } else {
-            ESP_LOGI(TAG, "Successfully subscribed to topic (initial): %s", subscribe_topic_.c_str());
-        }
-    } else {
-        ESP_LOGW(TAG, "Subscribe topic is empty, cannot subscribe to receive messages");
-    }
-    
+    // Subscription and reconciliation are owned by OnConnected for the first
+    // connection and every ESP-MQTT reconnect. A second initial subscription
+    // here previously hid adapters that failed to invoke their callbacks.
     return true;
 }
 

@@ -36,6 +36,14 @@ class LowBatteryStartupContractTest(unittest.TestCase):
         self.assertIn("voltage_mv == 0", ECHOEAR)
         self.assertIn("return false", ECHOEAR)
 
+    def test_runtime_guard_pauses_heavy_work_and_recovers_with_hysteresis(self):
+        self.assertIn("kRuntimeCriticalSamplesRequired = 3", ECHOEAR)
+        self.assertIn("runtime_low_battery_protected_", ECHOEAR)
+        self.assertIn("SetLowBatteryPaused(true)", ECHOEAR)
+        self.assertIn("kDeviceStateLowBattery", APPLICATION)
+        self.assertIn("voltage_mv >= kStartupRecoveryVoltageMv", ECHOEAR)
+        self.assertIn("SetLowBatteryPaused(false)", ECHOEAR)
+
 
 if __name__ == "__main__":
     unittest.main()
