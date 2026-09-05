@@ -6,6 +6,7 @@
 #include "ota.h"
 #include "animation/animation_updater.h"
 #include "ssid_manager.h"
+#include "system_info.h"
 
 #include <esp_log.h>
 #include <esp_system.h>
@@ -91,6 +92,38 @@ MqttProtocol::~MqttProtocol() {
         delete mqtt_;
     }
     vEventGroupDelete(event_group_handle_);
+}
+
+void MqttProtocol::PublishAnimationSyncStatus() {
+    if (mqtt_ == nullptr || !mqtt_->IsConnected() || publish_topic_.empty()) {
+        return;
+    }
+
+    std::string installed_sha256;
+    if (!AnimationUpdater::GetInstance().GetInstalledAnimationSha256(installed_sha256)) {
+        ESP_LOGW(TAG, "No valid installed animation bundle to report");
+        return;
+    }
+
+    cJSON* status = cJSON_CreateObject();
+    if (status == nullptr) {
+        ESP_LOGE(TAG, "Failed to allocate animation sync status JSON");
+        return;
+    }
+    cJSON_AddStringToObject(status, "type", "animation_sync_status");
+    cJSON_AddStringToObject(status, "status", "applied");
+    cJSON_AddStringToObject(status, "deviceId", SystemInfo::GetMacAddress().c_str());
+    cJSON_AddStringToObject(status, "sha256", installed_sha256.c_str());
+    char* payload = cJSON_PrintUnformatted(status);
+    if (payload != nullptr) {
+        if (mqtt_->Publish(publish_topic_, payload)) {
+            ESP_LOGI(TAG, "Reported applied animation SHA: %s", installed_sha256.c_str());
+        } else {
+            ESP_LOGW(TAG, "Failed to publish applied animation SHA");
+        }
+        free(payload);
+    }
+    cJSON_Delete(status);
 }
 
 bool MqttProtocol::Start() {
@@ -208,6 +241,9 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
                 ESP_LOGI(TAG, "Successfully subscribed to topic (from OnConnected): %s", subscribe_topic_.c_str());
             }
         }
+        // Report what is actually installed only after the runtime reconnects.
+        // After an update-triggered reboot this is the applied acknowledgement.
+        PublishAnimationSyncStatus();
         // Reconcile the one stable per-device animation object after every
         // authenticated MQTT connection. The SHA sidecar makes this a cheap
         // no-op when the installed bundle is already current.

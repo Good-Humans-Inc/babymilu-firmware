@@ -19,6 +19,18 @@ class AnimationSyncContractTest(unittest.TestCase):
         self.assertIn("PrepareRemoteUpdate", MQTT)
         self.assertIn("TriggerUpdateLoop", MQTT)
 
+    def test_overlapping_triggers_are_coalesced_and_failures_retry_with_a_bound(self):
+        self.assertIn("compare_exchange_strong", UPDATER)
+        self.assertIn("rerun_requested_", UPDATER)
+        self.assertIn("ANIMATION_UPDATE_MAX_RETRIES", UPDATER)
+        self.assertIn("Animation update retry budget exhausted", UPDATER)
+
+    def test_installed_sha_is_reported_after_mqtt_reconnect(self):
+        self.assertIn('"animation_sync_status"', MQTT)
+        self.assertIn('"applied"', MQTT)
+        self.assertIn("GetInstalledAnimationSha256", MQTT)
+        self.assertIn("PublishAnimationSyncStatus();", MQTT)
+
     def test_download_is_verified_before_atomic_install(self):
         self.assertIn('const char* download_path = "/sdcard/test.bin.download"', UPDATER)
         self.assertIn("GetLocalSha256(download_path, downloaded_sha256)", UPDATER)
