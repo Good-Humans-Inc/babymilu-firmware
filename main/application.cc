@@ -567,6 +567,7 @@ static const char *const STATE_STRINGS[] = {
     "upgrading",
     "activating",
     "audio_testing",
+    "low_battery",
     "fatal_error",
     "invalid_state"};
 
@@ -2498,6 +2499,13 @@ void Application::SetDeviceState(DeviceState state)
         // In WiFi config flow, show WiFi animation only when talk button enters
         // audio testing mode.
         display->SetEmotion("wifi");
+        break;
+    case kDeviceStateLowBattery:
+        audio_processor_->Stop();
+        wake_word_->StopDetection();
+        audio_decode_queue_.clear();
+        audio_decode_cv_.notify_all();
+        ResetDecoder();
         break;
     case kDeviceStateUpgrading:
     case kDeviceStateActivating:

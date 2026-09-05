@@ -63,10 +63,22 @@ public:
     // Return the SHA-256 of the currently installed stable animation bundle.
     bool GetInstalledAnimationSha256(std::string& sha256);
 
+    // Repair or discard files left by a power loss during atomic installation.
+    void RecoverInterruptedInstall();
+
     // Apply an MQTT-provided stable asset identity before triggering an update.
     void PrepareRemoteUpdate(const std::string& asset_url, const std::string& sha256);
 
+    // Cooperatively pause network and disk work while voltage is unsafe.
+    void SetLowBatteryPaused(bool paused);
+
 private:
+    enum class UpdateResult {
+        kSucceeded,
+        kFailed,
+        kInstalledRestartRequired,
+    };
+
     AnimationUpdater();
     ~AnimationUpdater();
     
@@ -78,7 +90,7 @@ private:
     static void UpdateTask(void* parameter);
     static void RemoteUpdateTask(void* parameter);
     static void RetryTask(void* parameter);
-    void UpdateLoop();
+    UpdateResult UpdateLoop();
     void TriggerUpdateLoopInternal(bool reset_retry_budget);
     void FinishUpdateTask(bool success);
     void ScheduleRetry(bool count_failure);
@@ -134,6 +146,7 @@ private:
     std::atomic<bool> rerun_requested_{false};
     std::atomic<uint32_t> retry_attempt_{0};
     std::atomic<bool> enabled_{true};
+    std::atomic<bool> low_battery_paused_{false};
     std::string server_url_;
     std::string expected_sha256_;
     mutable std::mutex update_identity_mutex_;

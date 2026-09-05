@@ -8,6 +8,7 @@
 #include "backlight.h"
 #include "board.h"
 #include "animation/animation.h"
+#include "animation/animation_updater.h"
 #include "sd_card.h"
 #include "sd_card_startup.h"
 #include "power_save_timer.h"
@@ -18,6 +19,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <algorithm>
+#include <atomic>
 
 #include <driver/i2c_master.h>
 #include "i2c_device.h"
@@ -49,6 +51,7 @@ constexpr uint16_t kCriticalStartupVoltageMv = 3060;
 constexpr uint16_t kStartupRecoveryVoltageMv = 3180;
 constexpr int kStartupSampleCount = 5;
 constexpr int kCriticalSamplesRequired = 4;
+constexpr int kRuntimeCriticalSamplesRequired = 3;
 constexpr int kRecoverySamplesRequired = 3;
 constexpr TickType_t kStartupSampleDelay = pdMS_TO_TICKS(250);
 constexpr TickType_t kRecoverySampleDelay = pdMS_TO_TICKS(2000);
@@ -173,6 +176,7 @@ static void SdAnimInitTask(void* /*arg*/) {
     ESP_LOGI(TAG, "[SD/ANIM] Waiting for audio runtime reservation gate");
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 
+    AnimationUpdater::GetInstance().RecoverInterruptedInstall();
     ShowStartupGifFromSdCard();
 
     ESP_LOGI(TAG, "[SD/ANIM] === Initializing animations ===");
@@ -534,6 +538,7 @@ private:
     std::string previous_emotion_ = "normal";  // Store previous emotion string to restore
     int previous_volume_ = -1;  // Store volume before muting (for restore on unmute)
     bool battery_monitor_started_ = false;
+    std::atomic<bool> runtime_low_battery_protected_{false};
 
     bool ReadBatteryState(int& level, bool& charging, bool& discharging,
                           uint16_t& voltage_mv, int16_t& current_ma) {
@@ -1633,18 +1638,24 @@ private:
         if (battery_monitor_started_) {
             return;
         }
-        // Battery monitoring reports telemetry only. Inactivity presentation is
-        // owned exclusively by the 30-second power-save callback above.
+        // Runtime protection uses raw voltage, repeated samples, and hysteresis.
+        // Percentage is presentation-only; an invalid read cannot become a
+        // false 0% shutdown.
         BaseType_t task_result = xTaskCreate([](void* arg) {
             EchoEar* board = static_cast<EchoEar*>(arg);
             int log_counter = 0;  // Counter for 5-minute battery logging (60 iterations * 5 seconds = 5 minutes)
+            int critical_samples = 0;
+            int recovered_samples = 0;
             
             while (true) {
                 int battery_level = 0;
                 bool charging = false;
                 bool discharging = false;
+                uint16_t voltage_mv = 0;
+                int16_t current_ma = 0;
 
-                if (board->GetBatteryLevel(battery_level, charging, discharging)) {
+                if (board->ReadBatteryState(battery_level, charging, discharging,
+                                            voltage_mv, current_ma)) {
                     // Log battery percentage every 30 seconds (6 iterations * 5 seconds)
                     log_counter++;
                     if (log_counter >= 6) {
@@ -1653,6 +1664,54 @@ private:
                         ESP_LOGE(TAG, "[BATTERY] %d%%, %s", 
                                 battery_level, charging ? "charging" : (discharging ? "discharging" : "idle"));
                     }
+
+                    if (!board->runtime_low_battery_protected_.load()) {
+                        critical_samples = voltage_mv <= kCriticalStartupVoltageMv
+                            ? critical_samples + 1 : 0;
+                        if (critical_samples >= kRuntimeCriticalSamplesRequired) {
+                            board->runtime_low_battery_protected_.store(true);
+                            recovered_samples = 0;
+                            AnimationUpdater::GetInstance().SetLowBatteryPaused(true);
+                            if (board->power_save_timer_ != nullptr) {
+                                board->power_save_timer_->SetEnabled(false);
+                            }
+                            if (board->backlight_ != nullptr) {
+                                board->backlight_->SetBrightness(10, false);
+                            }
+                            board->ShowCriticalBatteryMessage(battery_level, charging);
+                            Application::GetInstance().Schedule([]() {
+                                Application::GetInstance().SetDeviceState(kDeviceStateLowBattery);
+                            });
+                            ESP_LOGW(TAG, "[BATTERY_GUARD] Runtime protection entered at %u mV",
+                                     voltage_mv);
+                        }
+                    } else {
+                        board->ShowCriticalBatteryMessage(battery_level, charging);
+                        recovered_samples = voltage_mv >= kStartupRecoveryVoltageMv
+                            ? recovered_samples + 1 : 0;
+                        if (recovered_samples >= kRecoverySamplesRequired) {
+                            board->runtime_low_battery_protected_.store(false);
+                            critical_samples = 0;
+                            if (board->display_ != nullptr) {
+                                board->display_->ClearOverlayMessage();
+                            }
+                            if (board->backlight_ != nullptr) {
+                                board->backlight_->RestoreBrightness();
+                            }
+                            if (board->power_save_timer_ != nullptr) {
+                                board->power_save_timer_->SetEnabled(true);
+                            }
+                            Application::GetInstance().Schedule([]() {
+                                Application::GetInstance().SetDeviceState(kDeviceStateIdle);
+                            });
+                            AnimationUpdater::GetInstance().SetLowBatteryPaused(false);
+                            ESP_LOGI(TAG, "[BATTERY_GUARD] Runtime protection cleared at %u mV",
+                                     voltage_mv);
+                        }
+                    }
+                } else {
+                    critical_samples = 0;
+                    recovered_samples = 0;
                 }
 
                 // Check every 5 seconds

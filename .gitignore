@@ -3,6 +3,9 @@ components/
 managed_components/
 !managed_components/
 managed_components/*
+!managed_components/78__esp-ml307/
+managed_components/78__esp-ml307/*
+!managed_components/78__esp-ml307/esp_mqtt.cc
 !managed_components/78__esp-wifi-connect/
 managed_components/78__esp-wifi-connect/*
 !managed_components/78__esp-wifi-connect/wifi_station.cc
