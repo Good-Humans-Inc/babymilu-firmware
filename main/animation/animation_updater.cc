@@ -132,9 +132,9 @@ void AnimationUpdater::Stop() {
         update_timer_ = nullptr;
     }
 
-    if (retry_timer_ != nullptr) {
-        xTimerDelete(retry_timer_, portMAX_DELAY);
-        retry_timer_ = nullptr;
+    if (retry_task_handle_ != nullptr) {
+        vTaskDelete(retry_task_handle_);
+        retry_task_handle_ = nullptr;
     }
     
     ESP_LOGI(TAG, "Animation updater stopped");
@@ -841,11 +841,13 @@ void AnimationUpdater::TriggerUpdateLoop() {
     TriggerUpdateLoopInternal(true);
 }
 
-void AnimationUpdater::RetryTimerCallback(TimerHandle_t timer) {
-    auto* updater = static_cast<AnimationUpdater*>(pvTimerGetTimerID(timer));
-    if (updater != nullptr) {
-        updater->TriggerUpdateLoopInternal(false);
-    }
+void AnimationUpdater::RetryTask(void* parameter) {
+    auto* updater = static_cast<AnimationUpdater*>(parameter);
+    const uint32_t delay_ms = updater->retry_delay_ms_.load();
+    vTaskDelay(pdMS_TO_TICKS(delay_ms));
+    updater->retry_task_handle_ = nullptr;
+    updater->TriggerUpdateLoopInternal(false);
+    vTaskDelete(nullptr);
 }
 
 void AnimationUpdater::ScheduleRetry(bool count_failure) {
@@ -866,22 +868,16 @@ void AnimationUpdater::ScheduleRetry(bool count_failure) {
         ESP_LOGI(TAG, "Scheduling coalesced animation update rerun");
     }
 
-    if (retry_timer_ == nullptr) {
-        retry_timer_ = xTimerCreate(
-            "anim_update_retry",
-            pdMS_TO_TICKS(delay_ms),
-            pdFALSE,
-            this,
-            RetryTimerCallback
-        );
-        if (retry_timer_ == nullptr) {
-            ESP_LOGE(TAG, "Failed to allocate animation update retry timer");
-            return;
-        }
+    retry_delay_ms_.store(delay_ms);
+    if (retry_task_handle_ != nullptr) {
+        ESP_LOGI(TAG, "Animation update retry task is already scheduled");
+        return;
     }
 
-    if (xTimerChangePeriod(retry_timer_, pdMS_TO_TICKS(delay_ms), 0) != pdPASS) {
-        ESP_LOGE(TAG, "Failed to arm animation update retry timer");
+    if (xTaskCreate(RetryTask, "anim_retry", 2048, this, 1,
+                    &retry_task_handle_) != pdPASS) {
+        retry_task_handle_ = nullptr;
+        ESP_LOGE(TAG, "Failed to create animation update retry task");
     }
 }
 
@@ -1029,8 +1025,10 @@ void AnimationUpdater::UpdateLoop() {
     }
     
     const char* file_path = "/sdcard/test.bin";
-    const char* download_path = "/sdcard/test.bin.download";
-    const char* backup_path = "/sdcard/test.bin.backup";
+    // EchoEar's FAT volume is configured for 8.3 filenames. Keep staging names
+    // within that limit so atomic installation also works on physical devices.
+    const char* download_path = "/sdcard/test.tmp";
+    const char* backup_path = "/sdcard/test.bak";
     
     ESP_LOGI(TAG, "Checking remote file header...");
     uint32_t remote_file_count = 0, remote_checksum = 0, remote_combined_length = 0;
