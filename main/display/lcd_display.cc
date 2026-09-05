@@ -80,6 +80,20 @@ LcdDisplay::LcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_handle_
 
     current_theme_name_ = "dark";
     current_theme_ = DARK_THEME;
+
+    const esp_timer_create_args_t system_message_timer_args = {
+        .callback = [](void* arg) {
+            auto* display = static_cast<LcdDisplay*>(arg);
+            if (display != nullptr) {
+                display->ClearSystemMessages();
+            }
+        },
+        .arg = this,
+        .dispatch_method = ESP_TIMER_TASK,
+        .name = "system_msg_timer",
+        .skip_unhandled_events = true,
+    };
+    ESP_ERROR_CHECK(esp_timer_create(&system_message_timer_args, &system_message_timer_));
 }
 
 SpiLcdDisplay::SpiLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_handle_t panel,
@@ -278,6 +292,13 @@ MipiLcdDisplay::MipiLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel
 
 LcdDisplay::~LcdDisplay()
 {
+    if (system_message_timer_ != nullptr)
+    {
+        esp_timer_stop(system_message_timer_);
+        esp_timer_delete(system_message_timer_);
+        system_message_timer_ = nullptr;
+    }
+
     // 然后再清理 LVGL 对象
     if (content_ != nullptr)
     {
@@ -1031,9 +1052,10 @@ void LcdDisplay::SetPreviewImage(const lv_img_dsc_t *img_dsc)
 #endif
 
 // Public method to create system messages directly in content_ (works even when CONFIG_USE_WECHAT_MESSAGE_STYLE is disabled)
-void LcdDisplay::CreateSystemMessage(const char* message)
+void LcdDisplay::CreateSystemMessage(const char* message, int duration_ms)
 {
-    ESP_LOGI("LcdDisplay", "CreateSystemMessage called: message='%s'", message ? message : "NULL");
+    ESP_LOGI("LcdDisplay", "CreateSystemMessage called: message='%s', duration_ms=%d",
+             message ? message : "NULL", duration_ms);
     DisplayLockGuard lock(this);
     if (content_ == nullptr)
     {
@@ -1121,12 +1143,25 @@ void LcdDisplay::CreateSystemMessage(const char* message)
     // Center align the bubble in container
     lv_obj_align(msg_bubble, LV_ALIGN_CENTER, 0, 0);
 
+    if (system_message_timer_ != nullptr)
+    {
+        esp_timer_stop(system_message_timer_);
+        if (duration_ms > 0)
+        {
+            ESP_ERROR_CHECK(esp_timer_start_once(system_message_timer_, duration_ms * 1000));
+        }
+    }
+
     ESP_LOGI("LcdDisplay", "CreateSystemMessage: Message created successfully");
 }
 
 void LcdDisplay::ClearSystemMessages()
 {
     ESP_LOGI("LcdDisplay", "ClearSystemMessages called");
+    if (system_message_timer_ != nullptr)
+    {
+        esp_timer_stop(system_message_timer_);
+    }
     DisplayLockGuard lock(this);
     if (content_ == nullptr)
     {

@@ -1310,7 +1310,9 @@ void Application::Start()
                 LcdDisplay* lcd_display = static_cast<LcdDisplay*>(display);
                 if (lcd_display != nullptr) {
                     ESP_LOGI(TAG, "Display is LcdDisplay, using CreateSystemMessage for connected message");
-                    lcd_display->CreateSystemMessage(connected_message);
+                    // The character loader clears this sooner when ready; the
+                    // timeout guarantees a failed load cannot pin the banner.
+                    lcd_display->CreateSystemMessage(connected_message, 10000);
                 }
                 
                 // Also try standard methods as fallback
@@ -1319,7 +1321,7 @@ void Application::Start()
                 
                 // Also try ShowNotification as fallback
                 vTaskDelay(pdMS_TO_TICKS(100));
-                display->ShowNotification(connected_message, 0);
+                display->ShowNotification(connected_message, 10000);
                 ESP_LOGI(TAG, "Called ShowNotification with connected message");
             } else {
                 ESP_LOGI(TAG, "Animation is available, not showing connected message");
