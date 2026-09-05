@@ -77,7 +77,7 @@ private:
     // Background task
     static void UpdateTask(void* parameter);
     static void RemoteUpdateTask(void* parameter);
-    static void RetryTimerCallback(TimerHandle_t timer);
+    static void RetryTask(void* parameter);
     void UpdateLoop();
     void TriggerUpdateLoopInternal(bool reset_retry_budget);
     void FinishUpdateTask(bool success);
@@ -140,7 +140,8 @@ private:
     uint32_t check_interval_seconds_{10}; // Default 10 seconds
     TaskHandle_t update_task_handle_{nullptr};
     TimerHandle_t update_timer_{nullptr};
-    TimerHandle_t retry_timer_{nullptr};
+    TaskHandle_t retry_task_handle_{nullptr};
+    std::atomic<uint32_t> retry_delay_ms_{0};
     
     // Statistics
     std::atomic<uint32_t> check_count_{0};

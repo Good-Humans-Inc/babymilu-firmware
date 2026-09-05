@@ -32,9 +32,13 @@ class AnimationSyncContractTest(unittest.TestCase):
         self.assertIn("PublishAnimationSyncStatus();", MQTT)
 
     def test_download_is_verified_before_atomic_install(self):
-        self.assertIn('const char* download_path = "/sdcard/test.bin.download"', UPDATER)
+        self.assertIn('const char* download_path = "/sdcard/test.tmp"', UPDATER)
         self.assertIn("GetLocalSha256(download_path, downloaded_sha256)", UPDATER)
-        self.assertIn('const char* backup_path = "/sdcard/test.bin.backup"', UPDATER)
+        self.assertIn('const char* backup_path = "/sdcard/test.bak"', UPDATER)
+
+    def test_retry_does_not_run_network_work_on_timer_service_stack(self):
+        self.assertIn('xTaskCreate(RetryTask, "anim_retry", 2048', UPDATER)
+        self.assertNotIn("RetryTimerCallback", UPDATER)
 
 
 if __name__ == "__main__":
