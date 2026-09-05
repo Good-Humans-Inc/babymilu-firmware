@@ -14,10 +14,12 @@ does not contain credentials or user data.
 On every MQTT connection firmware subscribes first, reports the valid locally
 installed SHA as `animation_sync_status` with status `applied`, and reconciles
 the stable object. A matching SHA is a no-op. A different SHA is downloaded to
-`test.bin.download`, structure- and SHA-validated, atomically installed, and
+the 8.3-compatible `test.tmp`, structure- and SHA-validated, atomically
+installed using `test.bak`, and
 activated by one reboot.
 
 Concurrent reconnect and retained-message triggers are coalesced into a pending
-rerun. Transient failures retry after 2, 5, 10, 30, and 60 seconds, then stop
+rerun. A dedicated task—not the FreeRTOS timer-service task—waits between
+attempts. Transient failures retry after 2, 5, 10, 30, and 60 seconds, then stop
 until a new MQTT connection or update command resets the retry budget. This
 prevents both a missed update and an unbounded retry/reboot loop.
