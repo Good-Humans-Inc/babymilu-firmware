@@ -415,7 +415,9 @@ void WifiBoard::StartNetwork() {
             LcdDisplay* lcd_display = static_cast<LcdDisplay*>(display);
             if (lcd_display != nullptr) {
                 ESP_LOGI(TAG, "Display is LcdDisplay, using CreateSystemMessage for connected message");
-                lcd_display->CreateSystemMessage(connected_message);
+                // This is only a bridge while the deferred character bundle
+                // loads. Never leave it covering the character indefinitely.
+                lcd_display->CreateSystemMessage(connected_message, 10000);
             }
             
             // Also try standard methods as fallback
@@ -424,7 +426,7 @@ void WifiBoard::StartNetwork() {
             
             // Also try ShowNotification as fallback
             vTaskDelay(pdMS_TO_TICKS(100));
-            display->ShowNotification(connected_message, 0);
+            display->ShowNotification(connected_message, 10000);
             ESP_LOGI(TAG, "Called ShowNotification with connected message");
         } else {
             ESP_LOGI(TAG, "Animation is available, not showing connected message");
@@ -434,12 +436,12 @@ void WifiBoard::StartNetwork() {
     // Note: OnDisconnected callback is not available in WifiStation class
     // Disconnection handling is done internally by WifiStation with automatic reconnection
     
-    wifi_station.Start();
+    const bool wifi_started = wifi_station.Start();
 
     // Try to connect to WiFi, if failed, use BLE for configuration
     // Keep this longer than per-SSID retry window (3 retries x 15s) so
     // WifiStation can finish retries before BLE fallback.
-    if (!wifi_station.WaitForConnected(60 * 1000)) {
+    if (!wifi_started || !wifi_station.WaitForConnected(60 * 1000)) {
         {
             Settings provisioning(kProvisioningNamespace, false);
             const int provisioning_state = provisioning.GetInt("state");

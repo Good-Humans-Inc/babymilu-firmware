@@ -52,6 +52,10 @@ void AfeWakeWord::Initialize(AudioCodec* codec) {
             }
         }
     }
+    if (wakenet_model_ == nullptr || wake_words_.empty()) {
+        ESP_LOGE(TAG, "No wake-word model is available; wake-word detection disabled");
+        return;
+    }
 
     std::string input_format;
     for (int i = 0; i < codec_->input_channels() - ref_num; i++) {
@@ -61,6 +65,10 @@ void AfeWakeWord::Initialize(AudioCodec* codec) {
         input_format.push_back('R');
     }
     afe_config_t* afe_config = afe_config_init(input_format.c_str(), models, AFE_TYPE_SR, AFE_MODE_HIGH_PERF);
+    if (afe_config == nullptr) {
+        ESP_LOGE(TAG, "Failed to allocate wake-word AFE configuration");
+        return;
+    }
     afe_config->aec_init = codec_->input_reference();
     afe_config->aec_mode = AEC_MODE_SR_HIGH_PERF;
     afe_config->afe_perferred_core = 1;
@@ -68,13 +76,26 @@ void AfeWakeWord::Initialize(AudioCodec* codec) {
     afe_config->memory_alloc_mode = AFE_MEMORY_ALLOC_MORE_PSRAM;
     
     afe_iface_ = esp_afe_handle_from_config(afe_config);
+    if (afe_iface_ == nullptr) {
+        ESP_LOGE(TAG, "Failed to select wake-word AFE implementation");
+        return;
+    }
     afe_data_ = afe_iface_->create_from_config(afe_config);
+    if (afe_data_ == nullptr) {
+        ESP_LOGE(TAG, "Failed to allocate wake-word AFE runtime; detection disabled");
+        return;
+    }
 
-    xTaskCreate([](void* arg) {
+    BaseType_t task_result = xTaskCreate([](void* arg) {
         auto this_ = (AfeWakeWord*)arg;
         this_->AudioDetectionTask();
         vTaskDelete(NULL);
     }, "audio_detection", 4096, this, 3, nullptr);
+    if (task_result != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create wake-word task; detection disabled");
+        afe_iface_->destroy(afe_data_);
+        afe_data_ = nullptr;
+    }
 }
 
 void AfeWakeWord::OnWakeWordDetected(std::function<void(const std::string& wake_word)> callback) {
@@ -82,6 +103,10 @@ void AfeWakeWord::OnWakeWordDetected(std::function<void(const std::string& wake_
 }
 
 void AfeWakeWord::StartDetection() {
+    if (afe_data_ == nullptr) {
+        ESP_LOGW(TAG, "Ignoring wake-word start because initialization failed");
+        return;
+    }
     xEventGroupSetBits(event_group_, DETECTION_RUNNING_EVENT);
     ESP_LOGI(TAG, "Wake word detection STARTED - waiting for audio input");
 }
@@ -94,7 +119,8 @@ void AfeWakeWord::StopDetection() {
 }
 
 bool AfeWakeWord::IsDetectionRunning() {
-    return xEventGroupGetBits(event_group_) & DETECTION_RUNNING_EVENT;
+    return afe_data_ != nullptr &&
+        (xEventGroupGetBits(event_group_) & DETECTION_RUNNING_EVENT);
 }
 
 void AfeWakeWord::Feed(const std::vector<int16_t>& data) {

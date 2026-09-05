@@ -20,17 +20,34 @@
 #include <errno.h>
 #include <dirent.h>
 #include <strings.h>
+#include <mbedtls/sha256.h>
 
 #define TAG "AnimationUpdater"
 #define ANIMATION_UPDATER_STACK_SIZE 10240
 #define LEGACY_GIF_TEST_BIN_FILE_COUNT 20u
 #define SMILEY_LOOP_ONLY_GIF_TEST_BIN_FILE_COUNT 21u
 #define EXPECTED_GIF_TEST_BIN_FILE_COUNT 22u
+#define ANIMATION_UPDATE_MAX_RETRIES 5u
 
 // Server version - should match the lambda function's SERVER_VERSION
 #define SERVER_VERSION "1.0.1"
 
 namespace {
+
+std::string NormalizeSha256(std::string value) {
+    value.erase(std::remove_if(value.begin(), value.end(), [](unsigned char ch) {
+        return std::isspace(ch) != 0;
+    }), value.end());
+    if (value.size() != 64 || !std::all_of(value.begin(), value.end(), [](unsigned char ch) {
+            return std::isxdigit(ch) != 0;
+        })) {
+        return "";
+    }
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    return value;
+}
 
 bool IsSupportedGifTestBinFileCount(uint32_t file_count) {
     return file_count == LEGACY_GIF_TEST_BIN_FILE_COUNT ||
@@ -92,43 +109,15 @@ void AnimationUpdater::Initialize() {
 }
 
 void AnimationUpdater::Start() {
-    if (is_running_.load()) {
-        ESP_LOGW(TAG, "Animation updater is already running");
-        return;
-    }
-    
     if (!enabled_.load()) {
         ESP_LOGI(TAG, "Animation updater is disabled, not starting");
         return;
     }
-    
-    ESP_LOGI(TAG, "Starting animation updater");
-    
-    uint32_t stack_size_used = 0;
-    BaseType_t ret = CreateUpdaterTaskWithRetry(
-        UpdateTask,
-        "animation_updater",
-        this,
-        &update_task_handle_,
-        &stack_size_used
-    );
-    
-    if (ret != pdPASS) {
-        ESP_LOGE(TAG, "Failed to create animation updater task");
-        return;
-    }
-    
-    ESP_LOGI(TAG, "Animation updater task created successfully with %u-byte stack", stack_size_used);
-    
-    is_running_.store(true);
-    ESP_LOGI(TAG, "Animation updater started successfully");
+
+    TriggerUpdateLoopInternal(true);
 }
 
 void AnimationUpdater::Stop() {
-    if (!is_running_.load()) {
-        return;
-    }
-    
     ESP_LOGI(TAG, "Stopping animation updater");
     
     is_running_.store(false);
@@ -142,14 +131,39 @@ void AnimationUpdater::Stop() {
         xTimerDelete(update_timer_, portMAX_DELAY);
         update_timer_ = nullptr;
     }
+
+    if (retry_task_handle_ != nullptr) {
+        vTaskDelete(retry_task_handle_);
+        retry_task_handle_ = nullptr;
+    }
     
     ESP_LOGI(TAG, "Animation updater stopped");
 }
 
 void AnimationUpdater::SetServerUrl(const std::string& url) {
-    server_url_ = url;
+    {
+        std::lock_guard<std::mutex> lock(update_identity_mutex_);
+        server_url_ = url;
+    }
     SaveConfiguration();
     ESP_LOGI(TAG, "Server URL updated to: %s", url.c_str());
+}
+
+void AnimationUpdater::PrepareRemoteUpdate(const std::string& asset_url, const std::string& sha256) {
+    std::string logged_url;
+    std::string logged_sha256;
+    {
+        std::lock_guard<std::mutex> lock(update_identity_mutex_);
+        if (!asset_url.empty()) {
+            server_url_ = asset_url;
+        }
+        expected_sha256_ = NormalizeSha256(sha256);
+        logged_url = server_url_;
+        logged_sha256 = expected_sha256_;
+    }
+    ESP_LOGI(TAG, "Prepared remote animation update: url=%s sha256=%s",
+             logged_url.empty() ? "<device-stable-default>" : logged_url.c_str(),
+             logged_sha256.empty() ? "<sidecar>" : logged_sha256.c_str());
 }
 
 void AnimationUpdater::SetCheckInterval(uint32_t interval_seconds) {
@@ -254,8 +268,11 @@ bool AnimationUpdater::ForceUpdateCheck() {
 std::string AnimationUpdater::BuildMegaDownloadUrl() {
     // Direct GCS URL for mega.bin scoped by device MAC (lowercase + URL-encoded ':')
     // Use configured server URL if available
-    if (!server_url_.empty()) {
-        return server_url_;
+    {
+        std::lock_guard<std::mutex> lock(update_identity_mutex_);
+        if (!server_url_.empty()) {
+            return server_url_;
+        }
     }
     
     // Fallback: construct URL from MAC address (legacy behavior)
@@ -267,7 +284,64 @@ std::string AnimationUpdater::BuildMegaDownloadUrl() {
     for (char c : mac_lower) {
         if (c == ':') mac_encoded += "%3A"; else mac_encoded += c;
     }
-    return std::string("https://storage.googleapis.com/milu-public/device_bin/") + mac_encoded + "/test.bin";
+    return std::string("https://storage.googleapis.com/milu-public-new/device_bin/") + mac_encoded + "/test.bin";
+}
+
+bool AnimationUpdater::GetRemoteSha256(const std::string& url, std::string& sha256) {
+    auto http = std::unique_ptr<Http>(Board::GetInstance().CreateHttp());
+    if (!http) return false;
+    http->SetHeader("User-Agent", "BabyMilu-Animation-SHA/1.0");
+    http->SetHeader("Accept", "text/plain");
+    http->SetHeader("Accept-Encoding", "identity");
+    http->SetTimeout(10000);
+    if (!http->Open("GET", url + ".sha256")) return false;
+    const int status = http->GetStatusCode();
+    const std::string body = status == 200 ? http->ReadAll() : std::string();
+    http->Close();
+    if (status != 200) return false;
+    sha256 = NormalizeSha256(body.substr(0, 64));
+    return !sha256.empty();
+}
+
+bool AnimationUpdater::GetLocalSha256(const char* file_path, std::string& sha256) {
+    FILE* file = fopen(file_path, "rb");
+    if (!file) return false;
+    mbedtls_sha256_context context;
+    mbedtls_sha256_init(&context);
+    if (mbedtls_sha256_starts(&context, 0) != 0) {
+        fclose(file);
+        mbedtls_sha256_free(&context);
+        return false;
+    }
+    unsigned char buffer[4096];
+    size_t count = 0;
+    while ((count = fread(buffer, 1, sizeof(buffer), file)) > 0) {
+        if (mbedtls_sha256_update(&context, buffer, count) != 0) {
+            fclose(file);
+            mbedtls_sha256_free(&context);
+            return false;
+        }
+    }
+    fclose(file);
+    unsigned char digest[32];
+    if (mbedtls_sha256_finish(&context, digest) != 0) {
+        mbedtls_sha256_free(&context);
+        return false;
+    }
+    mbedtls_sha256_free(&context);
+    static const char* hex = "0123456789abcdef";
+    sha256.resize(64);
+    for (size_t index = 0; index < sizeof(digest); ++index) {
+        sha256[index * 2] = hex[digest[index] >> 4];
+        sha256[index * 2 + 1] = hex[digest[index] & 0x0f];
+    }
+    return true;
+}
+
+bool AnimationUpdater::GetInstalledAnimationSha256(std::string& sha256) {
+    sha256.clear();
+    return GetLocalSha256("/sdcard/test.bin", sha256) &&
+           ValidateGifMegaAnimationFileFromDisk("/sdcard/test.bin");
 }
 
 std::string AnimationUpdater::BuildStartupWavDownloadUrl() {
@@ -612,11 +686,12 @@ bool AnimationUpdater::SaveStartupWavMetadata(size_t size,
         return false;
     }
 
-    size_t written = fwrite(payload, 1, strlen(payload), file);
+    const size_t payload_length = strlen(payload);
+    size_t written = fwrite(payload, 1, payload_length, file);
     fclose(file);
     free(payload);
 
-    if (written != strlen(payload)) {
+    if (written != payload_length) {
         unlink(kStartupWavMetadataPath);
         return false;
     }
@@ -647,11 +722,12 @@ bool AnimationUpdater::SaveStartupGifMetadata(size_t size,
         return false;
     }
 
-    size_t written = fwrite(payload, 1, strlen(payload), file);
+    const size_t payload_length = strlen(payload);
+    size_t written = fwrite(payload, 1, payload_length, file);
     fclose(file);
     free(payload);
 
-    if (written != strlen(payload)) {
+    if (written != payload_length) {
         unlink(kStartupGifMetadataPath);
         return false;
     }
@@ -762,10 +838,75 @@ void AnimationUpdater::RemoteUpdateTask(void* parameter) {
 }
 
 void AnimationUpdater::TriggerUpdateLoop() {
+    TriggerUpdateLoopInternal(true);
+}
+
+void AnimationUpdater::RetryTask(void* parameter) {
+    auto* updater = static_cast<AnimationUpdater*>(parameter);
+    const uint32_t delay_ms = updater->retry_delay_ms_.load();
+    vTaskDelay(pdMS_TO_TICKS(delay_ms));
+    updater->retry_task_handle_ = nullptr;
+    updater->TriggerUpdateLoopInternal(false);
+    vTaskDelete(nullptr);
+}
+
+void AnimationUpdater::ScheduleRetry(bool count_failure) {
+    uint32_t delay_ms = 250;
+    if (count_failure) {
+        static const uint32_t kRetryDelayMs[ANIMATION_UPDATE_MAX_RETRIES] = {
+            2000, 5000, 10000, 30000, 60000,
+        };
+        const uint32_t attempt = retry_attempt_.fetch_add(1);
+        if (attempt >= ANIMATION_UPDATE_MAX_RETRIES) {
+            ESP_LOGE(TAG, "Animation update retry budget exhausted");
+            return;
+        }
+        delay_ms = kRetryDelayMs[attempt];
+        ESP_LOGW(TAG, "Scheduling animation update retry %u/%u in %u ms",
+                 attempt + 1, ANIMATION_UPDATE_MAX_RETRIES, delay_ms);
+    } else {
+        ESP_LOGI(TAG, "Scheduling coalesced animation update rerun");
+    }
+
+    retry_delay_ms_.store(delay_ms);
+    if (retry_task_handle_ != nullptr) {
+        ESP_LOGI(TAG, "Animation update retry task is already scheduled");
+        return;
+    }
+
+    if (xTaskCreate(RetryTask, "anim_retry", 2048, this, 1,
+                    &retry_task_handle_) != pdPASS) {
+        retry_task_handle_ = nullptr;
+        ESP_LOGE(TAG, "Failed to create animation update retry task");
+    }
+}
+
+void AnimationUpdater::FinishUpdateTask(bool success) {
+    update_task_handle_ = nullptr;
+    is_running_.store(false);
+    const bool rerun = rerun_requested_.exchange(false);
+    if (success) {
+        retry_attempt_.store(0);
+    }
+    if (rerun) {
+        ScheduleRetry(false);
+    } else if (!success) {
+        ScheduleRetry(true);
+    }
+    vTaskDelete(nullptr);
+}
+
+void AnimationUpdater::TriggerUpdateLoopInternal(bool reset_retry_budget) {
     ESP_LOGI(TAG, "Triggering update loop from remote request");
 
-    if (is_running_.load()) {
-        ESP_LOGW(TAG, "Animation updater is already running, skipping duplicate remote trigger");
+    if (reset_retry_budget) {
+        retry_attempt_.store(0);
+    }
+
+    bool expected = false;
+    if (!is_running_.compare_exchange_strong(expected, true)) {
+        rerun_requested_.store(true);
+        ESP_LOGW(TAG, "Animation updater is already running; coalescing a rerun");
         return;
     }
       
@@ -789,15 +930,16 @@ void AnimationUpdater::TriggerUpdateLoop() {
         RemoteUpdateTask,
         "remote_anim_update",
         this,
-        nullptr, // Don't need to track the handle since task will delete itself
+        &update_task_handle_,
         &stack_size_used
     );
     
     if (ret == pdPASS) {
-        is_running_.store(true);
         ESP_LOGI(TAG, "Remote update task created successfully with %u-byte stack",
                  stack_size_used);
     } else {
+        update_task_handle_ = nullptr;
+        is_running_.store(false);
         // Log detailed error information
         free_heap = esp_get_free_heap_size();
         largest_free_block = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
@@ -808,6 +950,7 @@ void AnimationUpdater::TriggerUpdateLoop() {
         ESP_LOGE(TAG, "Memory fragmentation detected - largest contiguous block (%u bytes) is insufficient", 
                  (uint32_t)largest_free_block);
         ESP_LOGE(TAG, "Possible solutions: free memory or wait for memory to defragment");
+        ScheduleRetry(true);
     }
 }
 
@@ -822,6 +965,27 @@ void AnimationUpdater::UpdateLoop() {
     std::string url = BuildMegaDownloadUrl();
     url = AppendCacheBuster(url);
     ESP_LOGI(TAG, "Checking for updates from: %s", url.c_str());
+
+    std::string expected_sha256;
+    {
+        std::lock_guard<std::mutex> lock(update_identity_mutex_);
+        expected_sha256 = expected_sha256_;
+        expected_sha256_.clear();
+    }
+    const size_t query_start = url.find('?');
+    std::string stable_url = query_start == std::string::npos ? url : url.substr(0, query_start);
+    if (expected_sha256.empty()) {
+        GetRemoteSha256(stable_url, expected_sha256);
+    }
+    std::string local_sha256;
+    if (!expected_sha256.empty() &&
+        GetLocalSha256("/sdcard/test.bin", local_sha256) &&
+        local_sha256 == expected_sha256 &&
+        ValidateGifMegaAnimationFileFromDisk("/sdcard/test.bin")) {
+        ESP_LOGI(TAG, "Installed animation SHA matches remote; no download needed");
+        FinishUpdateTask(true);
+        return;
+    }
 
     std::string startup_gif_url = BuildStartupGifDownloadUrl();
     if (startup_gif_url.empty()) {
@@ -855,14 +1019,16 @@ void AnimationUpdater::UpdateLoop() {
         esp_err_t init_ret = SdCard::Initialize();
         if (init_ret != ESP_OK) {
             ESP_LOGE(TAG, "SD card not available, cannot download");
-            is_running_.store(false);
-            update_task_handle_ = nullptr;
-            vTaskDelete(NULL);
+            FinishUpdateTask(false);
             return;
         }
     }
     
     const char* file_path = "/sdcard/test.bin";
+    // EchoEar's FAT volume is configured for 8.3 filenames. Keep staging names
+    // within that limit so atomic installation also works on physical devices.
+    const char* download_path = "/sdcard/test.tmp";
+    const char* backup_path = "/sdcard/test.bak";
     
     ESP_LOGI(TAG, "Checking remote file header...");
     uint32_t remote_file_count = 0, remote_checksum = 0, remote_combined_length = 0;
@@ -885,9 +1051,7 @@ void AnimationUpdater::UpdateLoop() {
             if (ValidateGifMegaAnimationFileFromDisk(file_path)) {
                 ESP_LOGI(TAG, "Local file is valid and matches remote file. Skipping download.");
                 ESP_LOGI(TAG, "No download needed - file is already up to date.");
-                is_running_.store(false);
-                update_task_handle_ = nullptr;
-                vTaskDelete(NULL);
+                FinishUpdateTask(true);
                 return;
             } else {
                 ESP_LOGW(TAG, "Local file header matches but validation failed. File may be corrupted. Will re-download.");
@@ -948,9 +1112,7 @@ void AnimationUpdater::UpdateLoop() {
     auto http = std::unique_ptr<Http>(board.CreateHttp());
     if (!http) {
         ESP_LOGE(TAG, "Failed to create HTTP client");
-        is_running_.store(false);
-        update_task_handle_ = nullptr;
-        vTaskDelete(NULL);
+        FinishUpdateTask(false);
         return;
     }
     
@@ -963,9 +1125,7 @@ void AnimationUpdater::UpdateLoop() {
     // Open connection
     if (!http->Open("GET", url)) {
         ESP_LOGE(TAG, "Failed to open HTTP connection");
-        is_running_.store(false);
-        update_task_handle_ = nullptr;
-        vTaskDelete(NULL);
+        FinishUpdateTask(false);
         return;
     }
     
@@ -974,26 +1134,18 @@ void AnimationUpdater::UpdateLoop() {
     ESP_LOGI(TAG, "HTTP status code: %d", status_code);
     if (status_code != 200) {
         http->Close();
-        is_running_.store(false);
-        update_task_handle_ = nullptr;
-        vTaskDelete(NULL);
+        FinishUpdateTask(false);
         return;
     }
     
-    // Remove existing file
-    if (access(file_path, F_OK) == 0) {
-        ESP_LOGI(TAG, "Removing existing file before download...");
-        unlink(file_path);
-    }
+    unlink(download_path);
     
     // Open file for writing
-    FILE* file = fopen(file_path, "wb");
+    FILE* file = fopen(download_path, "wb");
     if (!file) {
-        ESP_LOGE(TAG, "Failed to open file for writing: %s", file_path);
+        ESP_LOGE(TAG, "Failed to open file for writing: %s", download_path);
         http->Close();
-        is_running_.store(false);
-        update_task_handle_ = nullptr;
-        vTaskDelete(NULL);
+        FinishUpdateTask(false);
         return;
     }
     
@@ -1001,7 +1153,7 @@ void AnimationUpdater::UpdateLoop() {
     std::unique_ptr<char[]> buffer(new char[8192]);
     size_t total_read = 0;
     
-    ESP_LOGI(TAG, "Starting download stream to %s...", file_path);
+    ESP_LOGI(TAG, "Starting download stream to %s...", download_path);
     
     while (true) {
         int bytes_read = http->Read(buffer.get(), 8192);
@@ -1013,11 +1165,9 @@ void AnimationUpdater::UpdateLoop() {
         if (written != (size_t)bytes_read) {
             ESP_LOGE(TAG, "Failed to write to file");
             fclose(file);
-            unlink(file_path);
+            unlink(download_path);
             http->Close();
-            is_running_.store(false);
-            update_task_handle_ = nullptr;
-            vTaskDelete(NULL);
+            FinishUpdateTask(false);
             return;
         }
         
@@ -1035,11 +1185,9 @@ void AnimationUpdater::UpdateLoop() {
     if (total_read == 0) {
         ESP_LOGE(TAG, "Downloaded file is 0 bytes - invalid file, removing");
         fclose(file);
-        unlink(file_path);
+        unlink(download_path);
         http->Close();
-        is_running_.store(false);
-        update_task_handle_ = nullptr;
-        vTaskDelete(NULL);
+        FinishUpdateTask(false);
         return;
     }
     
@@ -1058,17 +1206,41 @@ void AnimationUpdater::UpdateLoop() {
     ESP_LOGI(TAG, "Closing HTTP connection...");
     http->Close();
     
-    ESP_LOGI(TAG, "✅ Download completed: %u bytes saved to %s", (unsigned int)total_read, file_path);
+    std::string downloaded_sha256;
+    if (!ValidateGifMegaAnimationFileFromDisk(download_path) ||
+        !GetLocalSha256(download_path, downloaded_sha256) ||
+        (!expected_sha256.empty() && downloaded_sha256 != expected_sha256)) {
+        ESP_LOGE(TAG, "Downloaded animation failed structure or SHA validation");
+        unlink(download_path);
+        FinishUpdateTask(false);
+        return;
+    }
+
+    unlink(backup_path);
+    const bool had_existing = access(file_path, F_OK) == 0;
+    if (had_existing && rename(file_path, backup_path) != 0) {
+        ESP_LOGE(TAG, "Failed to stage existing animation for replacement: errno=%d", errno);
+        unlink(download_path);
+        FinishUpdateTask(false);
+        return;
+    }
+    if (rename(download_path, file_path) != 0) {
+        ESP_LOGE(TAG, "Failed to install downloaded animation: errno=%d", errno);
+        if (had_existing) rename(backup_path, file_path);
+        unlink(download_path);
+        FinishUpdateTask(false);
+        return;
+    }
+    unlink(backup_path);
+    ESP_LOGI(TAG, "✅ Download completed and SHA verified: %u bytes saved to %s", (unsigned int)total_read, file_path);
     ESP_LOGI(TAG, "Animation update completed successfully. Rebooting device in 2 seconds...");
     vTaskDelay(pdMS_TO_TICKS(2000)); // Give time for logs to flush
     
     ESP_LOGI(TAG, "Rebooting now...");
     esp_restart();
     
-    // Should never reach here
-    is_running_.store(false);
-    update_task_handle_ = nullptr;
-    vTaskDelete(NULL); // Delete this task
+    // Should never reach here.
+    FinishUpdateTask(true);
 }
 
 // Original HTTP server checking logic
@@ -2962,7 +3134,7 @@ void AnimationUpdater::ReloadAnimations() {
 
 void AnimationUpdater::LoadConfiguration() {
     // Animation server URL is dynamically constructed from MAC address
-    // Pattern: https://storage.googleapis.com/milu-public/device_bin/<MAC_encoded>/mega.bin
+    // Pattern: https://storage.googleapis.com/milu-public-new/device_bin/<MAC_encoded>/test.bin
     // Leave server_url_ empty to use the dynamic GCS URL (handled in BuildMegaDownloadUrl)
     server_url_ = "";
     

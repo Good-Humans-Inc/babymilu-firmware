@@ -7,21 +7,17 @@
 #include "iot/thing_manager.h"
 #include "backlight.h"
 #include "board.h"
-#include "animation/animation_updater.h"
 #include "animation/animation.h"
 #include "sd_card.h"
 #include "sd_card_startup.h"
 #include "power_save_timer.h"
-#include "system_info.h"
 
 #include <wifi_station.h>
-#include <ssid_manager.h>
-#include "settings.h"
 #include <esp_log.h>
 #include <esp_random.h>
-#include <cJSON.h>
 #include <cstdio>
 #include <cstdlib>
+#include <algorithm>
 
 #include <driver/i2c_master.h>
 #include "i2c_device.h"
@@ -36,11 +32,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 #include <freertos/task.h>
-#include <algorithm>
-#include <atomic>
-#include <memory>
 #include <string>
-#include <vector>
 
 // BMI270 includes
 #include "bmi270_api.h"
@@ -48,11 +40,25 @@
 
 #define TAG "EchoEar"
 
+namespace {
+
+// The displayed percentage currently maps 3000-4200 mV linearly. Keep the
+// startup decision in raw millivolts so a rounding change cannot weaken the
+// brownout guard. 3060 mV is roughly 5%; 3180 mV is roughly 15%.
+constexpr uint16_t kCriticalStartupVoltageMv = 3060;
+constexpr uint16_t kStartupRecoveryVoltageMv = 3180;
+constexpr int kStartupSampleCount = 5;
+constexpr int kCriticalSamplesRequired = 4;
+constexpr int kRecoverySamplesRequired = 3;
+constexpr TickType_t kStartupSampleDelay = pdMS_TO_TICKS(250);
+constexpr TickType_t kRecoverySampleDelay = pdMS_TO_TICKS(2000);
+
+}  // namespace
+
 LV_FONT_DECLARE(font_puhui_20_4);
 LV_FONT_DECLARE(font_awesome_20_4);
 temperature_sensor_handle_t temp_sensor = NULL;
 float tsens_value;
-static std::atomic<bool> s_firestore_startup_done{false};
 
 static void ChipTemperatureLogTask(void* /*arg*/) {
     while (true) {
@@ -65,172 +71,6 @@ static void ChipTemperatureLogTask(void* /*arg*/) {
             ESP_LOGW(TAG, "[TEMP] Failed to read chip temperature: %s", esp_err_to_name(ret));
         }
         vTaskDelay(pdMS_TO_TICKS(20000));
-    }
-}
-
-static bool WaitForAnimationUpdaterCheckToFinish() {
-    AnimationUpdater& updater = AnimationUpdater::GetInstance();
-    const TickType_t wait_step = pdMS_TO_TICKS(500);
-    const int max_wait_for_start_steps = 40;   // 20 seconds max to observe updater start
-    const int max_wait_for_finish_steps = 240; // 120 seconds max to observe updater finish
-
-    bool saw_running = false;
-    for (int i = 0; i < max_wait_for_start_steps; ++i) {
-        if (updater.IsRunning()) {
-            saw_running = true;
-            ESP_LOGI(TAG, "[FIRESTORE] Animation updater has started; waiting for check to finish");
-            break;
-        }
-        vTaskDelay(wait_step);
-    }
-
-    if (!saw_running) {
-        ESP_LOGW(TAG, "[FIRESTORE] Timed out waiting for animation updater to start; continuing with Firestore request");
-        return false;
-    }
-
-    for (int i = 0; i < max_wait_for_finish_steps; ++i) {
-        if (!updater.IsRunning()) {
-            ESP_LOGI(TAG, "[FIRESTORE] Animation updater check finished");
-            return true;
-        }
-        vTaskDelay(wait_step);
-    }
-
-    ESP_LOGW(TAG, "[FIRESTORE] Timed out waiting for animation updater to finish");
-    return false;
-}
-
-static void ApplyFirestoreWifiRanking(const std::string& response) {
-    cJSON* root = cJSON_Parse(response.c_str());
-    if (!root) {
-        ESP_LOGE(TAG, "[FIRESTORE] Failed to parse Firestore JSON response");
-        return;
-    }
-
-    cJSON* fields = cJSON_GetObjectItem(root, "fields");
-    cJSON* wifi_setting = fields ? cJSON_GetObjectItem(fields, "wifiSetting") : nullptr;
-    cJSON* wifi_map = wifi_setting ? cJSON_GetObjectItem(wifi_setting, "mapValue") : nullptr;
-    cJSON* wifi_fields = wifi_map ? cJSON_GetObjectItem(wifi_map, "fields") : nullptr;
-    cJSON* ranked_networks = wifi_fields ? cJSON_GetObjectItem(wifi_fields, "rankedNetworks") : nullptr;
-    cJSON* array_value = ranked_networks ? cJSON_GetObjectItem(ranked_networks, "arrayValue") : nullptr;
-    cJSON* values = array_value ? cJSON_GetObjectItem(array_value, "values") : nullptr;
-
-    if (!cJSON_IsArray(values)) {
-        ESP_LOGW(TAG, "[FIRESTORE] No wifiSetting.rankedNetworks array found in Firestore document");
-        cJSON_Delete(root);
-        return;
-    }
-
-    std::vector<std::string> ranked_ssids;
-    cJSON* value = nullptr;
-    cJSON_ArrayForEach(value, values) {
-        cJSON* string_value = cJSON_GetObjectItem(value, "stringValue");
-        if (cJSON_IsString(string_value) && string_value->valuestring != nullptr) {
-            ranked_ssids.emplace_back(string_value->valuestring);
-        }
-    }
-
-    cJSON_Delete(root);
-
-    if (ranked_ssids.empty()) {
-        ESP_LOGW(TAG, "[FIRESTORE] rankedNetworks exists but is empty");
-        return;
-    }
-
-    auto& ssid_manager = SsidManager::GetInstance();
-    const auto& current = ssid_manager.GetSsidList();
-    if (current.empty()) {
-        ESP_LOGW(TAG, "[FIRESTORE] No on-device WiFi credentials to reorder");
-        return;
-    }
-
-    std::vector<SsidItem> reordered;
-    reordered.reserve(current.size());
-
-    for (const auto& ranked_ssid : ranked_ssids) {
-        auto it = std::find_if(current.begin(), current.end(), [&ranked_ssid](const SsidItem& item) {
-            return item.ssid == ranked_ssid;
-        });
-        if (it != current.end()) {
-            reordered.push_back(*it);
-        }
-    }
-
-    for (const auto& item : current) {
-        auto it = std::find_if(reordered.begin(), reordered.end(), [&item](const SsidItem& ranked_item) {
-            return ranked_item.ssid == item.ssid;
-        });
-        if (it == reordered.end()) {
-            reordered.push_back(item);
-        }
-    }
-
-    bool order_changed = reordered.size() != current.size();
-    if (!order_changed) {
-        for (size_t i = 0; i < current.size(); ++i) {
-            if (current[i].ssid != reordered[i].ssid) {
-                order_changed = true;
-                break;
-            }
-        }
-    }
-
-    if (!order_changed) {
-        ESP_LOGI(TAG, "[FIRESTORE] WiFi credential order already matches Firestore ranking");
-        return;
-    }
-
-    ESP_LOGI(TAG, "[FIRESTORE] Reordering WiFi credentials to match Firestore ranking");
-    ssid_manager.Clear();
-    for (auto it = reordered.rbegin(); it != reordered.rend(); ++it) {
-        ssid_manager.AddSsid(it->ssid, it->password);
-    }
-
-    if (!reordered.empty()) {
-        ESP_LOGI(TAG, "[FIRESTORE] Highest priority WiFi is now: %s", reordered.front().ssid.c_str());
-    }
-}
-
-static void FetchFirestoreDeviceDocumentAndApplyRanking() {
-    std::string mac_address = SystemInfo::GetMacAddress();
-    std::string firestore_url =
-        "https://firestore.googleapis.com/v1/projects/composed-augury-469200-g6/"
-        "databases/(default)/documents/devices/" + mac_address + "/";
-
-    std::unique_ptr<Http> http(Board::GetInstance().CreateHttp());
-    if (!http) {
-        ESP_LOGE(TAG, "[FIRESTORE] Failed to create HTTP client");
-        return;
-    }
-
-    http->SetHeader("Accept", "application/json");
-    http->SetHeader("Accept-Encoding", "identity");
-    http->SetTimeout(10000);
-
-    ESP_LOGI(TAG, "[FIRESTORE] GET %s", firestore_url.c_str());
-    if (!http->Open("GET", firestore_url)) {
-        ESP_LOGE(TAG, "[FIRESTORE] Failed to open HTTPS connection");
-        return;
-    }
-
-    int status_code = http->GetStatusCode();
-    std::string response = http->ReadAll();
-    if (response.empty()) {
-        char buffer[256];
-        int bytes_read = 0;
-        while ((bytes_read = http->Read(buffer, sizeof(buffer))) > 0) {
-            response.append(buffer, bytes_read);
-        }
-    }
-    http->Close();
-
-    ESP_LOGI(TAG, "[FIRESTORE] Status: %d", status_code);
-
-    if (status_code == 200 && !response.empty()) {
-        ApplyFirestoreWifiRanking(response);
-    } else if (status_code == 200) {
-        ESP_LOGW(TAG, "[FIRESTORE] Empty response body");
     }
 }
 
@@ -279,6 +119,8 @@ static bool ReadFileToHeap(const char* path, uint8_t** out_data, size_t* out_siz
     return true;
 }
 
+static TaskHandle_t s_sd_anim_init_task_handle = nullptr;
+
 // Show /sdcard/startup.gif on the LCD as soon as the SD card is
 // mounted, before animation_init() runs. The file is read from SD card root
 // (no dependency on test.bin). The buffer is intentionally kept alive for
@@ -317,7 +159,6 @@ static void ShowStartupGifFromSdCard() {
 
 static void SdAnimInitTask(void* /*arg*/) {
     ESP_LOGI(TAG, "[SD/ANIM] Background init task started on core %d", xPortGetCoreID());
-    s_firestore_startup_done.store(false);
     
     if (!SdCard::IsMounted()) {
         esp_err_t ret = SdCardStartup::ProcessStartup();
@@ -326,36 +167,26 @@ static void SdAnimInitTask(void* /*arg*/) {
         ESP_LOGI(TAG, "[SD/ANIM] SD card already mounted, skipping startup");
     }
 
-    // Play startup.gif as soon as SD is up, before the slower
-    // animation_init() pulls the rest of test.bin into RAM.
+    // Mounting the SD card is lightweight and lets Application play startup.wav.
+    // Keep the GIF decoder and animation assets behind an explicit gate so the
+    // long-lived audio runtime can claim contiguous internal RAM first.
+    ESP_LOGI(TAG, "[SD/ANIM] Waiting for audio runtime reservation gate");
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+
     ShowStartupGifFromSdCard();
 
     ESP_LOGI(TAG, "[SD/ANIM] === Initializing animations ===");
     animation_init();
-    ESP_LOGI(TAG, "[SD/ANIM] === Animations initialization completed ===");
-
-    auto& wifi_station = WifiStation::GetInstance();
-    const TickType_t wait_step = pdMS_TO_TICKS(500);
-    const int max_wait_steps = 40;  // 20 seconds max
-    bool wifi_ready = false;
-    for (int i = 0; i < max_wait_steps; ++i) {
-        if (wifi_station.IsConnected()) {
-            wifi_ready = true;
-            break;
+    Animation_t* normal_animation = animation_get_normal_animation();
+    if (normal_animation != nullptr && normal_animation->len > 0) {
+        auto display = Board::GetInstance().GetDisplay();
+        if (display != nullptr) {
+            ESP_LOGI(TAG, "[SD/ANIM] Character ready; clearing connection banner");
+            display->ClearSystemMessages();
         }
-        vTaskDelay(wait_step);
     }
-
-    if (wifi_ready) {
-        ESP_LOGI(TAG, "[FIRESTORE] WiFi connected");
-        WaitForAnimationUpdaterCheckToFinish();
-        ESP_LOGI(TAG, "[FIRESTORE] Requesting device document after animation updater check");
-        FetchFirestoreDeviceDocumentAndApplyRanking();
-    } else {
-        ESP_LOGW(TAG, "[FIRESTORE] WiFi was not ready within timeout, skipping device document request");
-    }
-
-    s_firestore_startup_done.store(true);
+    ESP_LOGI(TAG, "[SD/ANIM] === Animations initialization completed ===");
+    s_sd_anim_init_task_handle = nullptr;
     vTaskDelete(NULL);
 }
 static const st77916_lcd_init_cmd_t vendor_specific_init_yysj[] = {
@@ -555,43 +386,20 @@ typedef struct {
 
 class Charge : public I2cDevice {
 public:
-    Charge(i2c_master_bus_handle_t i2c_bus, uint8_t addr) : I2cDevice(i2c_bus, addr) {
-        read_buffer_ = new uint8_t[8];
-    }
-    ~Charge() {
-        delete[] read_buffer_;
-    }
-    void Printcharge() {
-        if (!enabled_) {
-            return;
-        }
-        if (TryReadRegs(0x08, read_buffer_, 2) != ESP_OK) {
-            HandleReadFailure("voltage");
-            return;
-        }
-        if (TryReadRegs(0x0c, read_buffer_ + 2, 2) != ESP_OK) {
-            HandleReadFailure("current");
-            return;
-        }
-        consecutive_read_failures_ = 0;
-        ESP_ERROR_CHECK(temperature_sensor_get_celsius(temp_sensor, &tsens_value));
-
-        // Read voltage and current values (currently unused but available for future use)
-        (void)((uint16_t)(read_buffer_[1] << 8 | read_buffer_[0]));  // voltage
-        (void)((int16_t)(read_buffer_[3] << 8 | read_buffer_[2]));  // current
-    }
+    Charge(i2c_master_bus_handle_t i2c_bus, uint8_t addr) : I2cDevice(i2c_bus, addr) {}
     
     // Get battery voltage in millivolts
     uint16_t GetVoltage() {
         if (!enabled_) {
             return 0;
         }
-        if (TryReadRegs(0x08, read_buffer_, 2) != ESP_OK) {
+        uint8_t buffer[2] = {0};
+        if (TryReadRegs(0x08, buffer, sizeof(buffer)) != ESP_OK) {
             HandleReadFailure("voltage");
             return 0;
         }
         consecutive_read_failures_ = 0;
-        uint16_t voltage_raw = (read_buffer_[1] << 8) | read_buffer_[0];
+        uint16_t voltage_raw = (buffer[1] << 8) | buffer[0];
         // Voltage register format: typically in units of 0.1mV or similar
         // Assuming raw value needs scaling - adjust based on actual chip specifications
         // For now, assuming it's already in mV or needs minimal conversion
@@ -603,25 +411,18 @@ public:
         if (!enabled_) {
             return 0;
         }
-        if (TryReadRegs(0x0c, read_buffer_ + 2, 2) != ESP_OK) {
+        uint8_t buffer[2] = {0};
+        if (TryReadRegs(0x0c, buffer, sizeof(buffer)) != ESP_OK) {
             HandleReadFailure("current");
             return 0;
         }
         consecutive_read_failures_ = 0;
-        int16_t current_raw = (int16_t)((read_buffer_[3] << 8) | read_buffer_[2]);
+        int16_t current_raw = (int16_t)((buffer[1] << 8) | buffer[0]);
         // Current register format: typically in units of 0.1mA or similar
         // Adjust scaling based on actual chip specifications
         return current_raw;
     }
     
-    static void TaskFunction(void *pvParameters) {
-        Charge* charge = static_cast<Charge*>(pvParameters);
-        while (true) {
-            charge->Printcharge();
-            vTaskDelay(pdMS_TO_TICKS(300));
-        }
-    }
-
     bool IsAvailable() const {
         return enabled_;
     }
@@ -638,7 +439,6 @@ private:
     }
 
     static constexpr uint8_t kMaxConsecutiveReadFailures = 3;
-    uint8_t* read_buffer_ = nullptr;
     uint8_t consecutive_read_failures_ = 0;
     bool enabled_ = true;
 };
@@ -733,6 +533,45 @@ private:
     esp_timer_handle_t volume_message_timer_ = nullptr;  // Timer to clear volume message
     std::string previous_emotion_ = "normal";  // Store previous emotion string to restore
     int previous_volume_ = -1;  // Store volume before muting (for restore on unmute)
+    bool battery_monitor_started_ = false;
+
+    bool ReadBatteryState(int& level, bool& charging, bool& discharging,
+                          uint16_t& voltage_mv, int16_t& current_ma) {
+        if (charge_ == nullptr || !charge_->IsAvailable()) {
+            return false;
+        }
+
+        voltage_mv = charge_->GetVoltage();
+        if (voltage_mv == 0 || !charge_->IsAvailable()) {
+            return false;
+        }
+
+        current_ma = charge_->GetCurrent();
+        if (!charge_->IsAvailable()) {
+            return false;
+        }
+
+        charging = current_ma > 50;
+        discharging = current_ma < -50;
+
+        constexpr uint16_t kMinVoltageMv = 3000;
+        constexpr uint16_t kMaxVoltageMv = 4200;
+        const uint16_t clamped_voltage =
+            std::min(std::max(voltage_mv, kMinVoltageMv), kMaxVoltageMv);
+        level = ((clamped_voltage - kMinVoltageMv) * 100) /
+                (kMaxVoltageMv - kMinVoltageMv);
+        return true;
+    }
+
+    void ShowCriticalBatteryMessage(int level, bool charging) {
+        if (display_ == nullptr) {
+            return;
+        }
+        const std::string message = charging
+            ? "Battery too low: " + std::to_string(level) + "%\nCharging - please wait"
+            : "Battery too low: " + std::to_string(level) + "%\nPlease plug in charger";
+        display_->CreateOverlayMessage(message.c_str());
+    }
 
     void InitializeVolumeMessageTimer() {
         if (volume_message_timer_ != nullptr) {
@@ -1641,7 +1480,6 @@ private:
             charge_ = nullptr;
             return;
         }
-        xTaskCreatePinnedToCore(Charge::TaskFunction, "batterydecTask", 3 * 1024, charge_, 6, NULL, 0);
     }
 
     void InitializeCst816sTouchPad() {
@@ -1787,14 +1625,17 @@ private:
         });
         power_save_timer_->SetEnabled(true);
 
-        // Start periodic battery telemetry.
-        InitializeBatteryMonitor();
+        // Periodic telemetry starts only after the startup battery guard. This
+        // keeps the guard's initial sample set free of competing gauge reads.
     }
 
     void InitializeBatteryMonitor() {
+        if (battery_monitor_started_) {
+            return;
+        }
         // Battery monitoring reports telemetry only. Inactivity presentation is
         // owned exclusively by the 30-second power-save callback above.
-        xTaskCreate([](void* arg) {
+        BaseType_t task_result = xTaskCreate([](void* arg) {
             EchoEar* board = static_cast<EchoEar*>(arg);
             int log_counter = 0;  // Counter for 5-minute battery logging (60 iterations * 5 seconds = 5 minutes)
             
@@ -1818,7 +1659,12 @@ private:
                 vTaskDelay(pdMS_TO_TICKS(5000));
             }
         }, "battery_monitor", 4096, this, 5, NULL);
-        ESP_LOGI(TAG, "[BATTERY] Battery monitoring task started for always power saving mode");
+        if (task_result == pdPASS) {
+            battery_monitor_started_ = true;
+            ESP_LOGI(TAG, "[BATTERY] Battery monitoring task started");
+        } else {
+            ESP_LOGE(TAG, "[BATTERY] Failed to start battery monitoring task");
+        }
     }
 
     void InitializeEmotionResetTimer() {
@@ -1899,10 +1745,11 @@ public:
         // Pin to core 0 so WiFi (core 1 in your logs) can connect concurrently.
         ESP_LOGI(TAG, "[SD/ANIM] Starting background init task");
         animation_block_startup_load(true);
-        BaseType_t task_ret = xTaskCreatePinnedToCore(SdAnimInitTask, "sd_anim_init", 8192, nullptr, 1, nullptr, 0);
+        BaseType_t task_ret = xTaskCreatePinnedToCore(SdAnimInitTask, "sd_anim_init", 8192, nullptr, 1,
+                                                     &s_sd_anim_init_task_handle, 0);
         if (task_ret != pdPASS) {
             ESP_LOGW(TAG, "[SD/ANIM] Failed to start background init task");
-            s_firestore_startup_done.store(true);
+            s_sd_anim_init_task_handle = nullptr;
             animation_block_startup_load(false);
         }
     }
@@ -1937,39 +1784,11 @@ public:
     }
 
     virtual bool GetBatteryLevel(int &level, bool& charging, bool& discharging) override {
-        if (charge_ == nullptr || !charge_->IsAvailable()) {
+        uint16_t voltage_mv = 0;
+        int16_t current_ma = 0;
+        if (!ReadBatteryState(level, charging, discharging, voltage_mv, current_ma)) {
             return false;
         }
-        
-        // Read voltage and current from charge IC
-        uint16_t voltage_mv = charge_->GetVoltage();
-        int16_t current_ma = charge_->GetCurrent();
-        
-        // Determine charging/discharging status based on current
-        // Positive current typically means charging, negative means discharging
-        charging = (current_ma > 50);  // Threshold: > 50mA considered charging
-        discharging = (current_ma < -50);  // Threshold: < -50mA considered discharging
-        
-        // Convert voltage to battery level percentage
-        // Typical Li-ion battery: 3.0V (0%) to 4.2V (100%)
-        // Voltage register might be in different units - adjust based on actual chip
-        // Assuming voltage is in millivolts, typical range: 3000mV (0%) to 4200mV (100%)
-        const uint16_t MIN_VOLTAGE_MV = 3000;  // 3.0V = 0%
-        const uint16_t MAX_VOLTAGE_MV = 4200;  // 4.2V = 100%
-        
-        // Clamp voltage to valid range
-        if (voltage_mv < MIN_VOLTAGE_MV) {
-            voltage_mv = MIN_VOLTAGE_MV;
-        } else if (voltage_mv > MAX_VOLTAGE_MV) {
-            voltage_mv = MAX_VOLTAGE_MV;
-        }
-        
-        // Calculate percentage using linear interpolation
-        level = ((voltage_mv - MIN_VOLTAGE_MV) * 100) / (MAX_VOLTAGE_MV - MIN_VOLTAGE_MV);
-        
-        // Ensure level is in valid range
-        if (level < 0) level = 0;
-        if (level > 100) level = 100;
         
         // Log as E so the SD error-log hook captures battery telemetry in err.txt.
         static int64_t last_log_time = 0;
@@ -1985,22 +1804,97 @@ public:
         return true;
     }
 
-    virtual void WaitForStartupNetworkTasks() override {
-        if (s_firestore_startup_done.load()) {
+    void WaitForSafeStartupPower() override {
+        int valid_samples = 0;
+        int critical_samples = 0;
+        int level = 0;
+        bool charging = false;
+        bool discharging = false;
+        uint16_t voltage_mv = 0;
+        int16_t current_ma = 0;
+
+        for (int sample = 0; sample < kStartupSampleCount; ++sample) {
+            if (ReadBatteryState(level, charging, discharging, voltage_mv, current_ma)) {
+                ++valid_samples;
+                if (voltage_mv <= kCriticalStartupVoltageMv) {
+                    ++critical_samples;
+                }
+            }
+            vTaskDelay(kStartupSampleDelay);
+        }
+
+        // Missing or inconsistent telemetry must not masquerade as 0% and
+        // must not brick a device whose battery gauge is unavailable.
+        if (valid_samples < kCriticalSamplesRequired ||
+            critical_samples < kCriticalSamplesRequired) {
+            ESP_LOGI(TAG,
+                     "[BATTERY_GUARD] Startup allowed: valid=%d critical=%d",
+                     valid_samples, critical_samples);
+            InitializeBatteryMonitor();
             return;
         }
 
-        ESP_LOGI(TAG, "[FIRESTORE] Waiting for startup Firestore request before server connection");
-        const TickType_t wait_step = pdMS_TO_TICKS(500);
-        while (!s_firestore_startup_done.load()) {
-            vTaskDelay(wait_step);
+        ESP_LOGW(TAG,
+                 "[BATTERY_GUARD] Critical battery confirmed at %u mV; "
+                 "holding audio and network startup",
+                 voltage_mv);
+        if (power_save_timer_ != nullptr) {
+            power_save_timer_->SetEnabled(false);
         }
-        ESP_LOGI(TAG, "[FIRESTORE] Startup Firestore request finished");
+        if (backlight_ != nullptr) {
+            backlight_->SetBrightness(10, false);
+        }
+        ShowCriticalBatteryMessage(level, charging);
+
+        int recovered_samples = 0;
+        while (recovered_samples < kRecoverySamplesRequired) {
+            vTaskDelay(kRecoverySampleDelay);
+            if (!ReadBatteryState(level, charging, discharging, voltage_mv, current_ma)) {
+                recovered_samples = 0;
+                ESP_LOGW(TAG,
+                         "[BATTERY_GUARD] Battery telemetry unavailable while "
+                         "startup is held");
+                continue;
+            }
+
+            ShowCriticalBatteryMessage(level, charging);
+            if (voltage_mv >= kStartupRecoveryVoltageMv) {
+                ++recovered_samples;
+            } else {
+                recovered_samples = 0;
+            }
+            ESP_LOGI(TAG,
+                     "[BATTERY_GUARD] %u mV, level=%d%%, charging=%s, "
+                     "recovery=%d/%d",
+                     voltage_mv, level, charging ? "yes" : "no",
+                     recovered_samples, kRecoverySamplesRequired);
+        }
+
+        ESP_LOGI(TAG,
+                 "[BATTERY_GUARD] Battery recovered to %u mV; resuming startup",
+                 voltage_mv);
+        if (display_ != nullptr) {
+            display_->ClearOverlayMessage();
+        }
+        if (backlight_ != nullptr) {
+            backlight_->RestoreBrightness();
+        }
+        if (power_save_timer_ != nullptr) {
+            power_save_timer_->SetEnabled(true);
+        }
+        InitializeBatteryMonitor();
     }
 
     virtual void StartNetwork() override {
         // Call parent's StartNetwork to proceed with normal WiFi initialization
         WifiBoard::StartNetwork();
+    }
+
+    void ReleaseDeferredStartupResources() override {
+        if (s_sd_anim_init_task_handle != nullptr) {
+            ESP_LOGI(TAG, "[SD/ANIM] Releasing audio-first startup gate");
+            xTaskNotifyGive(s_sd_anim_init_task_handle);
+        }
     }
 };
 

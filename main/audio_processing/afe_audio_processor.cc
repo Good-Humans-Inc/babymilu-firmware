@@ -23,10 +23,16 @@ void AfeAudioProcessor::Initialize(AudioCodec* codec) {
     }
 
     srmodel_list_t *models = esp_srmodel_init("model");
-    char* ns_model_name = esp_srmodel_filter(models, ESP_NSNET_PREFIX, NULL);
-    char* vad_model_name = esp_srmodel_filter(models, ESP_VADN_PREFIX, NULL);
-    
+    char* ns_model_name = models == nullptr ? nullptr :
+        esp_srmodel_filter(models, ESP_NSNET_PREFIX, NULL);
+    char* vad_model_name = models == nullptr ? nullptr :
+        esp_srmodel_filter(models, ESP_VADN_PREFIX, NULL);
+
     afe_config_t* afe_config = afe_config_init(input_format.c_str(), NULL, AFE_TYPE_VC, AFE_MODE_HIGH_PERF);
+    if (afe_config == nullptr) {
+        ESP_LOGE(TAG, "Failed to allocate AFE processor configuration");
+        return;
+    }
     afe_config->aec_mode = AEC_MODE_VOIP_HIGH_PERF;
     afe_config->vad_mode = VAD_MODE_0;
     afe_config->vad_min_noise_ms = 100;  // Original setting - 100ms minimum noise duration
@@ -56,13 +62,26 @@ void AfeAudioProcessor::Initialize(AudioCodec* codec) {
 #endif
 
     afe_iface_ = esp_afe_handle_from_config(afe_config);
+    if (afe_iface_ == nullptr) {
+        ESP_LOGE(TAG, "Failed to select AFE processor implementation");
+        return;
+    }
     afe_data_ = afe_iface_->create_from_config(afe_config);
+    if (afe_data_ == nullptr) {
+        ESP_LOGE(TAG, "Failed to allocate AFE processor runtime; audio processing disabled");
+        return;
+    }
     
-    xTaskCreate([](void* arg) {
+    BaseType_t task_result = xTaskCreate([](void* arg) {
         auto this_ = (AfeAudioProcessor*)arg;
         this_->AudioProcessorTask();
         vTaskDelete(NULL);
     }, "audio_communication", 4096, this, 3, NULL);
+    if (task_result != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create audio processor task; audio processing disabled");
+        afe_iface_->destroy(afe_data_);
+        afe_data_ = nullptr;
+    }
 }
 
 AfeAudioProcessor::~AfeAudioProcessor() {
@@ -87,6 +106,10 @@ void AfeAudioProcessor::Feed(const std::vector<int16_t>& data) {
 }
 
 void AfeAudioProcessor::Start() {
+    if (afe_data_ == nullptr) {
+        ESP_LOGW(TAG, "Ignoring audio processor start because initialization failed");
+        return;
+    }
     xEventGroupSetBits(event_group_, PROCESSOR_RUNNING);
 }
 
@@ -98,7 +121,8 @@ void AfeAudioProcessor::Stop() {
 }
 
 bool AfeAudioProcessor::IsRunning() {
-    return xEventGroupGetBits(event_group_) & PROCESSOR_RUNNING;
+    return afe_data_ != nullptr &&
+        (xEventGroupGetBits(event_group_) & PROCESSOR_RUNNING);
 }
 
 void AfeAudioProcessor::OnOutput(std::function<void(std::vector<int16_t>&& data)> callback) {
@@ -147,6 +171,10 @@ void AfeAudioProcessor::AudioProcessorTask() {
 }
 
 void AfeAudioProcessor::EnableDeviceAec(bool enable) {
+    if (afe_data_ == nullptr || afe_iface_ == nullptr) {
+        ESP_LOGW(TAG, "Ignoring AEC change because audio processor is unavailable");
+        return;
+    }
     if (enable) {
 #if CONFIG_USE_DEVICE_AEC
         afe_iface_->enable_aec(afe_data_);
