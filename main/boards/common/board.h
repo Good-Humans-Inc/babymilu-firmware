@@ -45,6 +45,9 @@ public:
     virtual WebSocket* CreateWebSocket() = 0;
     virtual Mqtt* CreateMqtt() = 0;
     virtual Udp* CreateUdp() = 0;
+    // Called before audio and networking are started. Battery-powered boards
+    // may block here while critical power recovers; the default is a no-op.
+    virtual void WaitForSafeStartupPower() {}
     virtual void StartNetwork() = 0;
     virtual void ReleaseDeferredStartupResources() {}
     virtual const char* GetNetworkStateIcon() = 0;

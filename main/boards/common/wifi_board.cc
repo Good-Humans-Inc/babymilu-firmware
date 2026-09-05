@@ -434,12 +434,12 @@ void WifiBoard::StartNetwork() {
     // Note: OnDisconnected callback is not available in WifiStation class
     // Disconnection handling is done internally by WifiStation with automatic reconnection
     
-    wifi_station.Start();
+    const bool wifi_started = wifi_station.Start();
 
     // Try to connect to WiFi, if failed, use BLE for configuration
     // Keep this longer than per-SSID retry window (3 retries x 15s) so
     // WifiStation can finish retries before BLE fallback.
-    if (!wifi_station.WaitForConnected(60 * 1000)) {
+    if (!wifi_started || !wifi_station.WaitForConnected(60 * 1000)) {
         {
             Settings provisioning(kProvisioningNamespace, false);
             const int provisioning_state = provisioning.GetInt("state");

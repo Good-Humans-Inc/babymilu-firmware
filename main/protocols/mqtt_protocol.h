@@ -53,6 +53,7 @@ private:
     bool StartMqttClient(bool report_error=false);
     void AttemptReconnection();  // Continuous retry until connected
     void ParseServerHello(const cJSON* root);
+    void PublishAnimationSyncStatus();
     std::string DecodeHexString(const std::string& hex_string);
 
     bool SendText(const std::string& text) override;

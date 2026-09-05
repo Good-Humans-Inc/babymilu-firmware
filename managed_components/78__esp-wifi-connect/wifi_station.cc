@@ -5,6 +5,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/event_groups.h>
 #include <esp_log.h>
+#include <esp_heap_caps.h>
 #include <esp_wifi.h>
 #include <nvs.h>
 #include "nvs_flash.h"
@@ -111,17 +112,42 @@ void WifiStation::Stop() {
     
     // 取消注册事件处理程序
     if (instance_any_id_ != nullptr) {
-        ESP_ERROR_CHECK(esp_event_handler_instance_unregister(WIFI_EVENT, ESP_EVENT_ANY_ID, instance_any_id_));
+        esp_err_t err = esp_event_handler_instance_unregister(
+            WIFI_EVENT, ESP_EVENT_ANY_ID, instance_any_id_);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to unregister WiFi event handler: %s",
+                     esp_err_to_name(err));
+        }
         instance_any_id_ = nullptr;
     }
     if (instance_got_ip_ != nullptr) {
-        ESP_ERROR_CHECK(esp_event_handler_instance_unregister(IP_EVENT, IP_EVENT_STA_GOT_IP, instance_got_ip_));
+        esp_err_t err = esp_event_handler_instance_unregister(
+            IP_EVENT, IP_EVENT_STA_GOT_IP, instance_got_ip_);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to unregister IP event handler: %s",
+                     esp_err_to_name(err));
+        }
         instance_got_ip_ = nullptr;
     }
 
-    // Reset the WiFi stack
-    ESP_ERROR_CHECK(esp_wifi_stop());
-    ESP_ERROR_CHECK(esp_wifi_deinit());
+    // Reset the WiFi stack only if initialization completed. In particular,
+    // this must be safe after esp_wifi_init() returns ESP_ERR_NO_MEM.
+    if (initialized_) {
+        esp_err_t err = esp_wifi_stop();
+        if (err != ESP_OK && err != ESP_ERR_WIFI_NOT_INIT) {
+            ESP_LOGW(TAG, "Failed to stop WiFi: %s", esp_err_to_name(err));
+        }
+        err = esp_wifi_deinit();
+        if (err != ESP_OK && err != ESP_ERR_WIFI_NOT_INIT) {
+            ESP_LOGW(TAG, "Failed to deinitialize WiFi: %s", esp_err_to_name(err));
+        }
+        initialized_ = false;
+    }
+    if (sta_netif_ != nullptr) {
+        esp_netif_destroy_default_wifi(sta_netif_);
+        sta_netif_ = nullptr;
+    }
+    xEventGroupClearBits(event_group_, WIFI_EVENT_CONNECTED);
 }
 
 void WifiStation::OnScanBegin(std::function<void()> on_scan_begin) {
@@ -136,33 +162,78 @@ void WifiStation::OnConnected(std::function<void(const std::string& ssid)> on_co
     on_connected_ = on_connected;
 }
 
-void WifiStation::Start() {
-    // Initialize the TCP/IP stack
-    ESP_ERROR_CHECK(esp_netif_init());
+bool WifiStation::Start() {
+    xEventGroupClearBits(event_group_, WIFI_EVENT_CONNECTED);
 
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT,
-                                                        ESP_EVENT_ANY_ID,
-                                                        &WifiStation::WifiEventHandler,
-                                                        this,
-                                                        &instance_any_id_));
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT,
-                                                        IP_EVENT_STA_GOT_IP,
-                                                        &WifiStation::IpEventHandler,
-                                                        this,
-                                                        &instance_got_ip_));
+    // Initialize the TCP/IP stack
+    esp_err_t err = esp_netif_init();
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+        ESP_LOGE(TAG, "Failed to initialize TCP/IP stack: %s", esp_err_to_name(err));
+        return false;
+    }
+
+    err = esp_event_handler_instance_register(WIFI_EVENT,
+                                              ESP_EVENT_ANY_ID,
+                                              &WifiStation::WifiEventHandler,
+                                              this,
+                                              &instance_any_id_);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to register WiFi event handler: %s", esp_err_to_name(err));
+        return false;
+    }
+    err = esp_event_handler_instance_register(IP_EVENT,
+                                              IP_EVENT_STA_GOT_IP,
+                                              &WifiStation::IpEventHandler,
+                                              this,
+                                              &instance_got_ip_);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to register IP event handler: %s", esp_err_to_name(err));
+        Stop();
+        return false;
+    }
 
     // Create the default event loop
-    esp_netif_create_default_wifi_sta();
+    sta_netif_ = esp_netif_create_default_wifi_sta();
+    if (sta_netif_ == nullptr) {
+        ESP_LOGE(TAG, "Failed to create default WiFi station interface");
+        Stop();
+        return false;
+    }
 
     // Initialize the WiFi stack in station mode
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     cfg.nvs_enable = false;
-    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-    ESP_ERROR_CHECK(esp_wifi_start());
+    err = esp_wifi_init(&cfg);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG,
+                 "WiFi initialization failed without rebooting: %s "
+                 "(internal free=%u, largest=%u)",
+                 esp_err_to_name(err),
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+        Stop();
+        return false;
+    }
+    initialized_ = true;
+
+    err = esp_wifi_set_mode(WIFI_MODE_STA);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to set WiFi station mode: %s", esp_err_to_name(err));
+        Stop();
+        return false;
+    }
+    err = esp_wifi_start();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start WiFi: %s", esp_err_to_name(err));
+        Stop();
+        return false;
+    }
 
     if (max_tx_power_ != 0) {
-        ESP_ERROR_CHECK(esp_wifi_set_max_tx_power(max_tx_power_));
+        err = esp_wifi_set_max_tx_power(max_tx_power_);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to set WiFi TX power: %s", esp_err_to_name(err));
+        }
     }
 
     // Setup the timer to scan WiFi
@@ -175,7 +246,12 @@ void WifiStation::Start() {
         .name = "WiFiScanTimer",
         .skip_unhandled_events = true
     };
-    ESP_ERROR_CHECK(esp_timer_create(&timer_args, &timer_handle_));
+    err = esp_timer_create(&timer_args, &timer_handle_);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to create WiFi scan timer: %s", esp_err_to_name(err));
+        Stop();
+        return false;
+    }
 
     // Setup reconnect timer to delay retries for the same SSID.
     esp_timer_create_args_t reconnect_timer_args = {
@@ -189,10 +265,19 @@ void WifiStation::Start() {
         .name = "WiFiReconnectTimer",
         .skip_unhandled_events = true
     };
-    ESP_ERROR_CHECK(esp_timer_create(&reconnect_timer_args, &reconnect_timer_handle_));
+    err = esp_timer_create(&reconnect_timer_args, &reconnect_timer_handle_);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to create WiFi reconnect timer: %s", esp_err_to_name(err));
+        Stop();
+        return false;
+    }
+    return true;
 }
 
 bool WifiStation::WaitForConnected(int timeout_ms) {
+    if (!initialized_) {
+        return false;
+    }
     auto bits = xEventGroupWaitBits(event_group_, WIFI_EVENT_CONNECTED, pdFALSE, pdFALSE, timeout_ms / portTICK_PERIOD_MS);
     return (bits & WIFI_EVENT_CONNECTED) != 0;
 }

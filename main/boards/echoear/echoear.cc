@@ -17,6 +17,7 @@
 #include <esp_random.h>
 #include <cstdio>
 #include <cstdlib>
+#include <algorithm>
 
 #include <driver/i2c_master.h>
 #include "i2c_device.h"
@@ -38,6 +39,21 @@
 #include "i2c_bus.h"
 
 #define TAG "EchoEar"
+
+namespace {
+
+// The displayed percentage currently maps 3000-4200 mV linearly. Keep the
+// startup decision in raw millivolts so a rounding change cannot weaken the
+// brownout guard. 3060 mV is roughly 5%; 3180 mV is roughly 15%.
+constexpr uint16_t kCriticalStartupVoltageMv = 3060;
+constexpr uint16_t kStartupRecoveryVoltageMv = 3180;
+constexpr int kStartupSampleCount = 5;
+constexpr int kCriticalSamplesRequired = 4;
+constexpr int kRecoverySamplesRequired = 3;
+constexpr TickType_t kStartupSampleDelay = pdMS_TO_TICKS(250);
+constexpr TickType_t kRecoverySampleDelay = pdMS_TO_TICKS(2000);
+
+}  // namespace
 
 LV_FONT_DECLARE(font_puhui_20_4);
 LV_FONT_DECLARE(font_awesome_20_4);
@@ -362,43 +378,20 @@ typedef struct {
 
 class Charge : public I2cDevice {
 public:
-    Charge(i2c_master_bus_handle_t i2c_bus, uint8_t addr) : I2cDevice(i2c_bus, addr) {
-        read_buffer_ = new uint8_t[8];
-    }
-    ~Charge() {
-        delete[] read_buffer_;
-    }
-    void Printcharge() {
-        if (!enabled_) {
-            return;
-        }
-        if (TryReadRegs(0x08, read_buffer_, 2) != ESP_OK) {
-            HandleReadFailure("voltage");
-            return;
-        }
-        if (TryReadRegs(0x0c, read_buffer_ + 2, 2) != ESP_OK) {
-            HandleReadFailure("current");
-            return;
-        }
-        consecutive_read_failures_ = 0;
-        ESP_ERROR_CHECK(temperature_sensor_get_celsius(temp_sensor, &tsens_value));
-
-        // Read voltage and current values (currently unused but available for future use)
-        (void)((uint16_t)(read_buffer_[1] << 8 | read_buffer_[0]));  // voltage
-        (void)((int16_t)(read_buffer_[3] << 8 | read_buffer_[2]));  // current
-    }
+    Charge(i2c_master_bus_handle_t i2c_bus, uint8_t addr) : I2cDevice(i2c_bus, addr) {}
     
     // Get battery voltage in millivolts
     uint16_t GetVoltage() {
         if (!enabled_) {
             return 0;
         }
-        if (TryReadRegs(0x08, read_buffer_, 2) != ESP_OK) {
+        uint8_t buffer[2] = {0};
+        if (TryReadRegs(0x08, buffer, sizeof(buffer)) != ESP_OK) {
             HandleReadFailure("voltage");
             return 0;
         }
         consecutive_read_failures_ = 0;
-        uint16_t voltage_raw = (read_buffer_[1] << 8) | read_buffer_[0];
+        uint16_t voltage_raw = (buffer[1] << 8) | buffer[0];
         // Voltage register format: typically in units of 0.1mV or similar
         // Assuming raw value needs scaling - adjust based on actual chip specifications
         // For now, assuming it's already in mV or needs minimal conversion
@@ -410,25 +403,18 @@ public:
         if (!enabled_) {
             return 0;
         }
-        if (TryReadRegs(0x0c, read_buffer_ + 2, 2) != ESP_OK) {
+        uint8_t buffer[2] = {0};
+        if (TryReadRegs(0x0c, buffer, sizeof(buffer)) != ESP_OK) {
             HandleReadFailure("current");
             return 0;
         }
         consecutive_read_failures_ = 0;
-        int16_t current_raw = (int16_t)((read_buffer_[3] << 8) | read_buffer_[2]);
+        int16_t current_raw = (int16_t)((buffer[1] << 8) | buffer[0]);
         // Current register format: typically in units of 0.1mA or similar
         // Adjust scaling based on actual chip specifications
         return current_raw;
     }
     
-    static void TaskFunction(void *pvParameters) {
-        Charge* charge = static_cast<Charge*>(pvParameters);
-        while (true) {
-            charge->Printcharge();
-            vTaskDelay(pdMS_TO_TICKS(300));
-        }
-    }
-
     bool IsAvailable() const {
         return enabled_;
     }
@@ -445,7 +431,6 @@ private:
     }
 
     static constexpr uint8_t kMaxConsecutiveReadFailures = 3;
-    uint8_t* read_buffer_ = nullptr;
     uint8_t consecutive_read_failures_ = 0;
     bool enabled_ = true;
 };
@@ -540,6 +525,45 @@ private:
     esp_timer_handle_t volume_message_timer_ = nullptr;  // Timer to clear volume message
     std::string previous_emotion_ = "normal";  // Store previous emotion string to restore
     int previous_volume_ = -1;  // Store volume before muting (for restore on unmute)
+    bool battery_monitor_started_ = false;
+
+    bool ReadBatteryState(int& level, bool& charging, bool& discharging,
+                          uint16_t& voltage_mv, int16_t& current_ma) {
+        if (charge_ == nullptr || !charge_->IsAvailable()) {
+            return false;
+        }
+
+        voltage_mv = charge_->GetVoltage();
+        if (voltage_mv == 0 || !charge_->IsAvailable()) {
+            return false;
+        }
+
+        current_ma = charge_->GetCurrent();
+        if (!charge_->IsAvailable()) {
+            return false;
+        }
+
+        charging = current_ma > 50;
+        discharging = current_ma < -50;
+
+        constexpr uint16_t kMinVoltageMv = 3000;
+        constexpr uint16_t kMaxVoltageMv = 4200;
+        const uint16_t clamped_voltage =
+            std::min(std::max(voltage_mv, kMinVoltageMv), kMaxVoltageMv);
+        level = ((clamped_voltage - kMinVoltageMv) * 100) /
+                (kMaxVoltageMv - kMinVoltageMv);
+        return true;
+    }
+
+    void ShowCriticalBatteryMessage(int level, bool charging) {
+        if (display_ == nullptr) {
+            return;
+        }
+        const std::string message = charging
+            ? "Battery too low: " + std::to_string(level) + "%\nCharging - please wait"
+            : "Battery too low: " + std::to_string(level) + "%\nPlease plug in charger";
+        display_->CreateOverlayMessage(message.c_str());
+    }
 
     void InitializeVolumeMessageTimer() {
         if (volume_message_timer_ != nullptr) {
@@ -1448,7 +1472,6 @@ private:
             charge_ = nullptr;
             return;
         }
-        xTaskCreatePinnedToCore(Charge::TaskFunction, "batterydecTask", 3 * 1024, charge_, 6, NULL, 0);
     }
 
     void InitializeCst816sTouchPad() {
@@ -1594,14 +1617,17 @@ private:
         });
         power_save_timer_->SetEnabled(true);
 
-        // Start periodic battery telemetry.
-        InitializeBatteryMonitor();
+        // Periodic telemetry starts only after the startup battery guard. This
+        // keeps the guard's initial sample set free of competing gauge reads.
     }
 
     void InitializeBatteryMonitor() {
+        if (battery_monitor_started_) {
+            return;
+        }
         // Battery monitoring reports telemetry only. Inactivity presentation is
         // owned exclusively by the 30-second power-save callback above.
-        xTaskCreate([](void* arg) {
+        BaseType_t task_result = xTaskCreate([](void* arg) {
             EchoEar* board = static_cast<EchoEar*>(arg);
             int log_counter = 0;  // Counter for 5-minute battery logging (60 iterations * 5 seconds = 5 minutes)
             
@@ -1625,7 +1651,12 @@ private:
                 vTaskDelay(pdMS_TO_TICKS(5000));
             }
         }, "battery_monitor", 4096, this, 5, NULL);
-        ESP_LOGI(TAG, "[BATTERY] Battery monitoring task started for always power saving mode");
+        if (task_result == pdPASS) {
+            battery_monitor_started_ = true;
+            ESP_LOGI(TAG, "[BATTERY] Battery monitoring task started");
+        } else {
+            ESP_LOGE(TAG, "[BATTERY] Failed to start battery monitoring task");
+        }
     }
 
     void InitializeEmotionResetTimer() {
@@ -1745,39 +1776,11 @@ public:
     }
 
     virtual bool GetBatteryLevel(int &level, bool& charging, bool& discharging) override {
-        if (charge_ == nullptr || !charge_->IsAvailable()) {
+        uint16_t voltage_mv = 0;
+        int16_t current_ma = 0;
+        if (!ReadBatteryState(level, charging, discharging, voltage_mv, current_ma)) {
             return false;
         }
-        
-        // Read voltage and current from charge IC
-        uint16_t voltage_mv = charge_->GetVoltage();
-        int16_t current_ma = charge_->GetCurrent();
-        
-        // Determine charging/discharging status based on current
-        // Positive current typically means charging, negative means discharging
-        charging = (current_ma > 50);  // Threshold: > 50mA considered charging
-        discharging = (current_ma < -50);  // Threshold: < -50mA considered discharging
-        
-        // Convert voltage to battery level percentage
-        // Typical Li-ion battery: 3.0V (0%) to 4.2V (100%)
-        // Voltage register might be in different units - adjust based on actual chip
-        // Assuming voltage is in millivolts, typical range: 3000mV (0%) to 4200mV (100%)
-        const uint16_t MIN_VOLTAGE_MV = 3000;  // 3.0V = 0%
-        const uint16_t MAX_VOLTAGE_MV = 4200;  // 4.2V = 100%
-        
-        // Clamp voltage to valid range
-        if (voltage_mv < MIN_VOLTAGE_MV) {
-            voltage_mv = MIN_VOLTAGE_MV;
-        } else if (voltage_mv > MAX_VOLTAGE_MV) {
-            voltage_mv = MAX_VOLTAGE_MV;
-        }
-        
-        // Calculate percentage using linear interpolation
-        level = ((voltage_mv - MIN_VOLTAGE_MV) * 100) / (MAX_VOLTAGE_MV - MIN_VOLTAGE_MV);
-        
-        // Ensure level is in valid range
-        if (level < 0) level = 0;
-        if (level > 100) level = 100;
         
         // Log as E so the SD error-log hook captures battery telemetry in err.txt.
         static int64_t last_log_time = 0;
@@ -1791,6 +1794,87 @@ public:
         }
         
         return true;
+    }
+
+    void WaitForSafeStartupPower() override {
+        int valid_samples = 0;
+        int critical_samples = 0;
+        int level = 0;
+        bool charging = false;
+        bool discharging = false;
+        uint16_t voltage_mv = 0;
+        int16_t current_ma = 0;
+
+        for (int sample = 0; sample < kStartupSampleCount; ++sample) {
+            if (ReadBatteryState(level, charging, discharging, voltage_mv, current_ma)) {
+                ++valid_samples;
+                if (voltage_mv <= kCriticalStartupVoltageMv) {
+                    ++critical_samples;
+                }
+            }
+            vTaskDelay(kStartupSampleDelay);
+        }
+
+        // Missing or inconsistent telemetry must not masquerade as 0% and
+        // must not brick a device whose battery gauge is unavailable.
+        if (valid_samples < kCriticalSamplesRequired ||
+            critical_samples < kCriticalSamplesRequired) {
+            ESP_LOGI(TAG,
+                     "[BATTERY_GUARD] Startup allowed: valid=%d critical=%d",
+                     valid_samples, critical_samples);
+            InitializeBatteryMonitor();
+            return;
+        }
+
+        ESP_LOGW(TAG,
+                 "[BATTERY_GUARD] Critical battery confirmed at %u mV; "
+                 "holding audio and network startup",
+                 voltage_mv);
+        if (power_save_timer_ != nullptr) {
+            power_save_timer_->SetEnabled(false);
+        }
+        if (backlight_ != nullptr) {
+            backlight_->SetBrightness(10, false);
+        }
+        ShowCriticalBatteryMessage(level, charging);
+
+        int recovered_samples = 0;
+        while (recovered_samples < kRecoverySamplesRequired) {
+            vTaskDelay(kRecoverySampleDelay);
+            if (!ReadBatteryState(level, charging, discharging, voltage_mv, current_ma)) {
+                recovered_samples = 0;
+                ESP_LOGW(TAG,
+                         "[BATTERY_GUARD] Battery telemetry unavailable while "
+                         "startup is held");
+                continue;
+            }
+
+            ShowCriticalBatteryMessage(level, charging);
+            if (voltage_mv >= kStartupRecoveryVoltageMv) {
+                ++recovered_samples;
+            } else {
+                recovered_samples = 0;
+            }
+            ESP_LOGI(TAG,
+                     "[BATTERY_GUARD] %u mV, level=%d%%, charging=%s, "
+                     "recovery=%d/%d",
+                     voltage_mv, level, charging ? "yes" : "no",
+                     recovered_samples, kRecoverySamplesRequired);
+        }
+
+        ESP_LOGI(TAG,
+                 "[BATTERY_GUARD] Battery recovered to %u mV; resuming startup",
+                 voltage_mv);
+        if (display_ != nullptr) {
+            display_->ClearOverlayMessage();
+        }
+        if (backlight_ != nullptr) {
+            backlight_->RestoreBrightness();
+        }
+        if (power_save_timer_ != nullptr) {
+            power_save_timer_->SetEnabled(true);
+        }
+        InitializeBatteryMonitor();
     }
 
     virtual void StartNetwork() override {

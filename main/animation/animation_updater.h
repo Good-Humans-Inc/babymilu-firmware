@@ -4,6 +4,7 @@
 #include <string>
 #include <memory>
 #include <atomic>
+#include <mutex>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/timers.h>
@@ -59,6 +60,12 @@ public:
     // Trigger the update loop (runs in a separate task)
     void TriggerUpdateLoop();
 
+    // Return the SHA-256 of the currently installed stable animation bundle.
+    bool GetInstalledAnimationSha256(std::string& sha256);
+
+    // Apply an MQTT-provided stable asset identity before triggering an update.
+    void PrepareRemoteUpdate(const std::string& asset_url, const std::string& sha256);
+
 private:
     AnimationUpdater();
     ~AnimationUpdater();
@@ -70,7 +77,11 @@ private:
     // Background task
     static void UpdateTask(void* parameter);
     static void RemoteUpdateTask(void* parameter);
+    static void RetryTimerCallback(TimerHandle_t timer);
     void UpdateLoop();
+    void TriggerUpdateLoopInternal(bool reset_retry_budget);
+    void FinishUpdateTask(bool success);
+    void ScheduleRetry(bool count_failure);
     
     // HTTP operations
     bool CheckServerForUpdates();
@@ -104,6 +115,8 @@ private:
     size_t GetLocalFileSize(const char* file_path);
     bool GetLocalFileHeader(const char* file_path, uint32_t& file_count, uint32_t& checksum, uint32_t& combined_length);
     bool GetRemoteFileHeader(const std::string& url, uint32_t& file_count, uint32_t& checksum, uint32_t& combined_length);
+    bool GetRemoteSha256(const std::string& url, std::string& sha256);
+    bool GetLocalSha256(const char* file_path, std::string& sha256);
     std::string BuildMegaDownloadUrl();
     std::string BuildStartupWavDownloadUrl();
     std::string BuildStartupGifDownloadUrl();
@@ -118,11 +131,16 @@ private:
     
     // Member variables
     std::atomic<bool> is_running_{false};
+    std::atomic<bool> rerun_requested_{false};
+    std::atomic<uint32_t> retry_attempt_{0};
     std::atomic<bool> enabled_{true};
     std::string server_url_;
+    std::string expected_sha256_;
+    mutable std::mutex update_identity_mutex_;
     uint32_t check_interval_seconds_{10}; // Default 10 seconds
     TaskHandle_t update_task_handle_{nullptr};
     TimerHandle_t update_timer_{nullptr};
+    TimerHandle_t retry_timer_{nullptr};
     
     // Statistics
     std::atomic<uint32_t> check_count_{0};

@@ -39,6 +39,13 @@ provisioning process remains audio-free. Allocation and task-creation failures
 disable the affected audio feature instead of leaving a partially initialized
 object that can crash later.
 
+EchoEar release images must be produced with `python3 scripts/release.py
+echoear`; this regenerates `sdkconfig` from the board configuration so a stale
+development configuration cannot silently re-enable ESP-SR. Wi-Fi driver
+initialization is also nonfatal: if any initialization allocation fails, the
+station is cleaned up and the device returns to BLE configuration instead of
+aborting into a reboot loop.
+
 EchoEar no longer reads a device document directly from the public Firestore
 REST API during startup. That unauthenticated request targeted the legacy
 `(default)` database, duplicated the device's persisted credential ordering and
