@@ -220,6 +220,45 @@ bool MqttProtocol::Start() {
     return StartMqttClient(false);
 }
 
+void MqttProtocol::HandleMqttConnected(const std::string& client_id) {
+    // EspMqtt invokes OnConnected from the small esp-mqtt worker stack. Keep
+    // subscription diagnostics, JSON status creation, and reconciliation on
+    // the application task so adding a second subscription cannot overflow
+    // mqtt_task.
+    ESP_LOGI(TAG, "MQTT client fully connected (deferred from mqtt_task)");
+    reconnect_backoff_ms_ = 200;
+    if (!subscribe_topic_.empty()) {
+        ESP_LOGI(TAG, "Subscribing to topic: %s", subscribe_topic_.c_str());
+        if (!mqtt_->Subscribe(subscribe_topic_)) {
+            ESP_LOGE(TAG, "Failed to subscribe to topic: %s", subscribe_topic_.c_str());
+            if (!publish_topic_.empty()) {
+                const std::string test_msg =
+                    "{\"type\":\"test\",\"diagnostic\":\"subscribe_failed\"}";
+                if (mqtt_->Publish(publish_topic_, test_msg)) {
+                    ESP_LOGE(TAG,
+                             "Subscribe denied while publish works: client_id=%s topic=%s",
+                             client_id.empty() ? "<empty>" : client_id.c_str(),
+                             subscribe_topic_.c_str());
+                }
+            }
+        } else {
+            ESP_LOGI(TAG, "Successfully subscribed to topic: %s", subscribe_topic_.c_str());
+        }
+
+        const std::string wifi_topic = subscribe_topic_ + "/wifi";
+        if (!mqtt_->Subscribe(wifi_topic)) {
+            ESP_LOGE(TAG, "Failed to subscribe to WiFi desired-state topic: %s",
+                     wifi_topic.c_str());
+        } else {
+            ESP_LOGI(TAG, "Subscribed to retained WiFi desired state: %s",
+                     wifi_topic.c_str());
+        }
+    }
+
+    PublishAnimationSyncStatus();
+    AnimationUpdater::GetInstance().TriggerUpdateLoop();
+}
+
 bool MqttProtocol::StartMqttClient(bool report_error) {
     // Use single global MQTT client - don't recreate if already connected
     if (mqtt_ != nullptr && mqtt_->IsConnected()) {
@@ -298,58 +337,8 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
     });
 
     mqtt_->OnConnected([this, client_id]() {
-        ESP_LOGI(TAG, "MQTT client fully connected (CONNACK received)");
-        // Reset reconnection backoff on successful connection
-        reconnect_backoff_ms_ = 200;
-        // Subscribe in the OnConnected callback to ensure we're fully connected
-        if (!subscribe_topic_.empty()) {
-            ESP_LOGI(TAG, "Subscribing to topic (from OnConnected): %s", subscribe_topic_.c_str());
-            bool is_connected = mqtt_->IsConnected();
-            ESP_LOGI(TAG, "Connection status before subscribe: %s", is_connected ? "connected" : "not connected");
-            
-            if (!mqtt_->Subscribe(subscribe_topic_)) {
-                ESP_LOGE(TAG, "Failed to subscribe to topic (from OnConnected): %s", subscribe_topic_.c_str());
-                bool still_connected = mqtt_->IsConnected();
-                ESP_LOGE(TAG, "Connection status after failed subscribe: %s", still_connected ? "connected" : "disconnected");
-                
-                // Diagnostic: Try to publish to see if it's ACL-specific to SUBSCRIBE
-                if (!publish_topic_.empty()) {
-                    ESP_LOGI(TAG, "Testing publish capability to diagnose ACL issue...");
-                    std::string test_msg = "{\"type\":\"test\",\"diagnostic\":\"subscribe_failed\"}";
-                    if (mqtt_->Publish(publish_topic_, test_msg)) {
-                        ESP_LOGI(TAG, "Publish succeeded - connection is working, likely ACL denies SUBSCRIBE");
-                        ESP_LOGE(TAG, "DIAGNOSIS: Broker ACL likely denies SUBSCRIBE for client_id=%s to topic=%s", 
-                                 client_id.empty() ? "<empty>" : client_id.c_str(), subscribe_topic_.c_str());
-                    } else {
-                        ESP_LOGE(TAG, "Publish also failed - connection may be broken or ACL denies both PUBLISH and SUBSCRIBE");
-                    }
-                } else {
-                    ESP_LOGE(TAG, "DIAGNOSIS: Subscribe failed, but cannot test publish (publish_topic empty). Likely ACL denies SUBSCRIBE for client_id=%s to topic=%s",
-                             client_id.empty() ? "<empty>" : client_id.c_str(), subscribe_topic_.c_str());
-                }
-            } else {
-                ESP_LOGI(TAG, "Successfully subscribed to topic (from OnConnected): %s", subscribe_topic_.c_str());
-            }
-
-            // Retained Wi-Fi desired state is isolated from the base command
-            // topic so it cannot replace a retained animation update.
-            const std::string wifi_topic = subscribe_topic_ + "/wifi";
-            if (!mqtt_->Subscribe(wifi_topic)) {
-                ESP_LOGE(TAG, "Failed to subscribe to WiFi desired-state topic: %s",
-                         wifi_topic.c_str());
-            } else {
-                ESP_LOGI(TAG, "Subscribed to retained WiFi desired state: %s",
-                         wifi_topic.c_str());
-            }
-        }
-        // Report what is actually installed only after the runtime reconnects.
-        // After an update-triggered reboot this is the applied acknowledgement.
-        PublishAnimationSyncStatus();
-        // Reconcile the one stable per-device animation object after every
-        // authenticated MQTT connection. The SHA sidecar makes this a cheap
-        // no-op when the installed bundle is already current.
-        Application::GetInstance().Schedule([]() {
-            AnimationUpdater::GetInstance().TriggerUpdateLoop();
+        Application::GetInstance().Schedule([this, client_id]() {
+            HandleMqttConnected(client_id);
         });
     });
 

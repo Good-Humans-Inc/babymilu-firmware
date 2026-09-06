@@ -52,6 +52,7 @@ private:
     uint32_t remote_sequence_;
 
     bool StartMqttClient(bool report_error=false);
+    void HandleMqttConnected(const std::string& client_id);
     void AttemptReconnection();  // Continuous retry until connected
     void ParseServerHello(const cJSON* root);
     void PublishAnimationSyncStatus();
