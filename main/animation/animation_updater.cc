@@ -1197,6 +1197,7 @@ AnimationUpdater::UpdateResult AnimationUpdater::UpdateLoop() {
         http->Close();
         return UpdateResult::kFailed;
     }
+    const size_t content_length = http->GetBodyLength();
     
     unlink(download_path);
     
@@ -1211,6 +1212,15 @@ AnimationUpdater::UpdateResult AnimationUpdater::UpdateLoop() {
     // Download and write to file
     std::unique_ptr<char[]> buffer(new char[8192]);
     size_t total_read = 0;
+    int last_progress = -1;
+    auto* display = Board::GetInstance().GetDisplay();
+    if (display != nullptr) {
+        display->ShowCharacterTransferProgress(0);
+        last_progress = 0;
+    }
+    const auto clear_transfer_progress = [display]() {
+        if (display != nullptr) display->ClearCharacterTransferProgress();
+    };
     
     ESP_LOGI(TAG, "Starting download stream to %s...", download_path);
     
@@ -1220,6 +1230,7 @@ AnimationUpdater::UpdateResult AnimationUpdater::UpdateLoop() {
             fclose(file);
             unlink(download_path);
             http->Close();
+            clear_transfer_progress();
             return UpdateResult::kFailed;
         }
         int bytes_read = http->Read(buffer.get(), 8192);
@@ -1233,10 +1244,19 @@ AnimationUpdater::UpdateResult AnimationUpdater::UpdateLoop() {
             fclose(file);
             unlink(download_path);
             http->Close();
+            clear_transfer_progress();
             return UpdateResult::kFailed;
         }
         
         total_read += bytes_read;
+
+        if (display != nullptr && content_length > 0) {
+            const int progress = std::min(99, static_cast<int>((total_read * 100) / content_length));
+            if (progress != last_progress) {
+                display->ShowCharacterTransferProgress(progress);
+                last_progress = progress;
+            }
+        }
         
         // Log progress every 50KB (or at first 1KB to show download started)
         if (total_read == 1024 || total_read % 51200 == 0) {
@@ -1252,6 +1272,7 @@ AnimationUpdater::UpdateResult AnimationUpdater::UpdateLoop() {
         fclose(file);
         unlink(download_path);
         http->Close();
+        clear_transfer_progress();
         return UpdateResult::kFailed;
     }
     
@@ -1276,6 +1297,7 @@ AnimationUpdater::UpdateResult AnimationUpdater::UpdateLoop() {
         downloaded_sha256 != expected_sha256) {
         ESP_LOGE(TAG, "Downloaded animation failed structure or SHA validation");
         unlink(download_path);
+        clear_transfer_progress();
         return UpdateResult::kFailed;
     }
 
@@ -1284,16 +1306,19 @@ AnimationUpdater::UpdateResult AnimationUpdater::UpdateLoop() {
     if (had_existing && rename(file_path, backup_path) != 0) {
         ESP_LOGE(TAG, "Failed to stage existing animation for replacement: errno=%d", errno);
         unlink(download_path);
+        clear_transfer_progress();
         return UpdateResult::kFailed;
     }
     if (rename(download_path, file_path) != 0) {
         ESP_LOGE(TAG, "Failed to install downloaded animation: errno=%d", errno);
         if (had_existing) rename(backup_path, file_path);
         unlink(download_path);
+        clear_transfer_progress();
         return UpdateResult::kFailed;
     }
     unlink(backup_path);
     ESP_LOGI(TAG, "✅ Download completed and SHA verified: %u bytes saved to %s", (unsigned int)total_read, file_path);
+    if (display != nullptr) display->ShowCharacterTransferProgress(100, true);
     return UpdateResult::kInstalledRestartRequired;
 }
 

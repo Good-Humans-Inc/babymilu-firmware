@@ -41,6 +41,10 @@ protected:
     lv_obj_t* overlay_container_ = nullptr;
     lv_obj_t* overlay_bubble_ = nullptr;
     lv_obj_t* overlay_text_ = nullptr;
+    lv_obj_t* character_transfer_container_ = nullptr;
+    lv_obj_t* character_transfer_label_ = nullptr;
+    lv_obj_t* character_transfer_bar_ = nullptr;
+    lv_obj_t* character_transfer_percent_ = nullptr;
     esp_timer_handle_t system_message_timer_ = nullptr;
 
     DisplayFonts fonts_;
@@ -81,6 +85,8 @@ public:
     // Overlay message (top, does not affect layout)
     void CreateOverlayMessage(const char* message);
     void ClearOverlayMessage();
+    virtual void ShowCharacterTransferProgress(int progress, bool restarting = false) override;
+    virtual void ClearCharacterTransferProgress() override;
 };
 
 // RGB LCD显示器

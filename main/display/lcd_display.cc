@@ -299,6 +299,15 @@ LcdDisplay::~LcdDisplay()
         system_message_timer_ = nullptr;
     }
 
+    if (character_transfer_container_ != nullptr)
+    {
+        lv_obj_del(character_transfer_container_);
+        character_transfer_container_ = nullptr;
+        character_transfer_label_ = nullptr;
+        character_transfer_bar_ = nullptr;
+        character_transfer_percent_ = nullptr;
+    }
+
     // 然后再清理 LVGL 对象
     if (content_ != nullptr)
     {
@@ -1254,6 +1263,70 @@ void LcdDisplay::ClearOverlayMessage()
         overlay_container_ = nullptr;
         overlay_bubble_ = nullptr;
         overlay_text_ = nullptr;
+    }
+}
+
+void LcdDisplay::ShowCharacterTransferProgress(int progress, bool restarting)
+{
+    DisplayLockGuard lock(this);
+    progress = std::max(0, std::min(100, progress));
+
+    if (character_transfer_container_ == nullptr) {
+        auto screen = lv_screen_active();
+        character_transfer_container_ = lv_obj_create(screen);
+        lv_obj_set_size(character_transfer_container_, LV_HOR_RES, LV_VER_RES);
+        lv_obj_align(character_transfer_container_, LV_ALIGN_CENTER, 0, 0);
+        lv_obj_set_scrollbar_mode(character_transfer_container_, LV_SCROLLBAR_MODE_OFF);
+        lv_obj_set_style_radius(character_transfer_container_, 0, 0);
+        lv_obj_set_style_border_width(character_transfer_container_, 0, 0);
+        lv_obj_set_style_pad_all(character_transfer_container_, 18, 0);
+        lv_obj_set_style_bg_color(character_transfer_container_, current_theme_.background, 0);
+        lv_obj_set_style_bg_opa(character_transfer_container_, LV_OPA_COVER, 0);
+        lv_obj_move_foreground(character_transfer_container_);
+
+        character_transfer_label_ = lv_label_create(character_transfer_container_);
+        lv_obj_set_width(character_transfer_label_, LV_HOR_RES - 36);
+        lv_label_set_long_mode(character_transfer_label_, LV_LABEL_LONG_WRAP);
+        lv_obj_set_style_text_font(character_transfer_label_, fonts_.text_font, 0);
+        lv_obj_set_style_text_color(character_transfer_label_, current_theme_.text, 0);
+        lv_obj_set_style_text_align(character_transfer_label_, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_align(character_transfer_label_, LV_ALIGN_CENTER, 0, -42);
+
+        character_transfer_bar_ = lv_bar_create(character_transfer_container_);
+        lv_obj_set_size(character_transfer_bar_, LV_HOR_RES - 72, 18);
+        lv_obj_align(character_transfer_bar_, LV_ALIGN_CENTER, 0, 16);
+        lv_bar_set_range(character_transfer_bar_, 0, 100);
+        lv_obj_set_style_bg_color(character_transfer_bar_, current_theme_.system_bubble, LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(character_transfer_bar_, LV_OPA_COVER, LV_PART_MAIN);
+        lv_obj_set_style_bg_color(character_transfer_bar_, current_theme_.text, LV_PART_INDICATOR);
+        lv_obj_set_style_bg_opa(character_transfer_bar_, LV_OPA_COVER, LV_PART_INDICATOR);
+        lv_obj_set_style_radius(character_transfer_bar_, 9, LV_PART_MAIN);
+        lv_obj_set_style_radius(character_transfer_bar_, 9, LV_PART_INDICATOR);
+
+        character_transfer_percent_ = lv_label_create(character_transfer_container_);
+        lv_obj_set_style_text_font(character_transfer_percent_, fonts_.text_font, 0);
+        lv_obj_set_style_text_color(character_transfer_percent_, current_theme_.text, 0);
+        lv_obj_align(character_transfer_percent_, LV_ALIGN_CENTER, 0, 50);
+    }
+
+    lv_label_set_text(character_transfer_label_, restarting
+        ? "Your character is here!\nRestarting BabyMilu..."
+        : "Your character is traveling over!");
+    lv_bar_set_value(character_transfer_bar_, progress, LV_ANIM_OFF);
+    char percent_text[8];
+    snprintf(percent_text, sizeof(percent_text), "%d%%", progress);
+    lv_label_set_text(character_transfer_percent_, percent_text);
+}
+
+void LcdDisplay::ClearCharacterTransferProgress()
+{
+    DisplayLockGuard lock(this);
+    if (character_transfer_container_ != nullptr) {
+        lv_obj_del(character_transfer_container_);
+        character_transfer_container_ = nullptr;
+        character_transfer_label_ = nullptr;
+        character_transfer_bar_ = nullptr;
+        character_transfer_percent_ = nullptr;
     }
 }
 
