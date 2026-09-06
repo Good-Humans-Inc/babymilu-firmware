@@ -1,5 +1,6 @@
 ﻿#include "animation_updater.h"
 #include "board.h"
+#include "application.h"
 #include "display.h"
 #include "system_info.h"
 #include "animation.h"
@@ -900,7 +901,12 @@ void AnimationUpdater::RetryTask(void* parameter) {
     const uint32_t delay_ms = updater->retry_delay_ms_.load();
     vTaskDelay(pdMS_TO_TICKS(delay_ms));
     updater->retry_task_handle_ = nullptr;
-    updater->TriggerUpdateLoopInternal(false);
+    // The retry task exists only as a lightweight delay. Running the full
+    // update-launch path on its 2 KiB stack overflowed on EchoEar when a SHA
+    // sidecar was absent. Hand the work back to the normal application task.
+    Application::GetInstance().Schedule([updater]() {
+        updater->TriggerUpdateLoopInternal(false);
+    });
     vTaskDelete(nullptr);
 }
 
