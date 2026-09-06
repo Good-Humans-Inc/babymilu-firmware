@@ -1,4 +1,5 @@
 #include "wifi_board.h"
+#include "wifi_priority.h"
 
 #include "display.h"
 #include "application.h"
@@ -127,23 +128,20 @@ std::pair<const char*, const char*> ClassifyWifiFailure(const WifiStation& stati
 
 // Keep newly added WiFi credentials at the lowest priority so existing
 // networks are tried first on startup.
-static void SaveCredentialAsLowestPriority(const std::string& ssid, const std::string& password) {
+static bool SaveCredentialAsLowestPriority(const std::string& ssid, const std::string& password) {
     auto& ssid_manager = SsidManager::GetInstance();
     auto current = ssid_manager.GetSsidList();
-
-    // Build target order: all existing (except same SSID) + new SSID at tail.
-    struct Cred {
-        std::string ssid;
-        std::string password;
-    };
-    std::vector<Cred> target;
-    target.reserve(current.size() + 1);
+    std::vector<WifiPriorityCredential> current_credentials;
+    current_credentials.reserve(current.size());
     for (const auto& item : current) {
-        if (item.ssid != ssid) {
-            target.push_back({item.ssid, item.password});
-        }
+        current_credentials.push_back({item.ssid, item.password});
     }
-    target.push_back({ssid, password});
+    std::vector<WifiPriorityCredential> target;
+    if (!AppendCredentialAtLowestPriority(
+            current_credentials, ssid, password, &target)) {
+        ESP_LOGW(TAG, "Cannot add SSID '%s': saved WiFi list is full", ssid.c_str());
+        return false;
+    }
 
     // Rebuild list in reverse order to place target head first because
     // SsidManager::AddSsid currently gives newly added entries higher priority.
@@ -151,6 +149,7 @@ static void SaveCredentialAsLowestPriority(const std::string& ssid, const std::s
     for (auto it = target.rbegin(); it != target.rend(); ++it) {
         ssid_manager.AddSsid(it->ssid, it->password);
     }
+    return true;
 }
 
 static bool ConsumeNextBleCredentialLowestFlag() {
@@ -848,7 +847,12 @@ bool WifiBoard::ParseProvisioningMessage(const WifiProvisioningMessage& message)
     }
 
     if (ConsumeNextBleCredentialLowestFlag()) {
-        SaveCredentialAsLowestPriority(ssid, password);
+        if (!SaveCredentialAsLowestPriority(ssid, password)) {
+            PublishBleValue(BuildProvisioningStatus(
+                message.attempt_id, "invalid", "WIFI_NETWORK_LIMIT"));
+            cJSON_Delete(root);
+            return false;
+        }
     } else {
         SsidManager::GetInstance().AddSsid(ssid, password);
     }

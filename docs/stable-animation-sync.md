@@ -19,6 +19,13 @@ the 8.3-compatible `test.tmp`, structure- and SHA-validated, atomically
 installed using `test.bak`, and
 activated by one reboot.
 
+During the verified bundle download, LCD devices replace the normal character
+view with `Your character is traveling over!`, a percentage, and a progress
+bar derived from the HTTP content length. The bar stops at 99% until structure
+and SHA validation succeed, then shows 100% and `Your character is here!`
+before the activation reboot. Failed or battery-paused downloads remove the
+progress view and remain eligible for the normal bounded retry policy.
+
 The SHA is authoritative: missing or malformed sidecars are retried, and a
 matching compact file header can never override a SHA mismatch. Before
 animation initialization, firmware restores `test.bak` if promotion was
