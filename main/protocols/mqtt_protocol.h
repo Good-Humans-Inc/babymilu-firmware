@@ -14,6 +14,7 @@
 #include <string>
 #include <map>
 #include <mutex>
+#include <vector>
 
 #define MQTT_PING_INTERVAL_SECONDS 90
 #define MQTT_RECONNECT_INTERVAL_MS 10000
@@ -54,6 +55,11 @@ private:
     void AttemptReconnection();  // Continuous retry until connected
     void ParseServerHello(const cJSON* root);
     void PublishAnimationSyncStatus();
+    void ApplyAndPublishWifiPriority(
+        const std::string& command_id,
+        int revision,
+        const std::vector<std::string>& ranked_ssids,
+        const std::vector<std::string>& deleted_ssids);
     std::string DecodeHexString(const std::string& hex_string);
 
     bool SendText(const std::string& text) override;

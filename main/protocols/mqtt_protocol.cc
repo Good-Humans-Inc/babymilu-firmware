@@ -6,6 +6,7 @@
 #include "ota.h"
 #include "animation/animation_updater.h"
 #include "ssid_manager.h"
+#include "boards/common/wifi_priority.h"
 #include "system_info.h"
 
 #include <esp_log.h>
@@ -16,6 +17,9 @@
 #include <algorithm>
 #include <cctype>
 #include <arpa/inet.h>
+#include <vector>
+#include <climits>
+#include <utility>
 #include "assets/lang_config.h"
 
 #define TAG "MQTT"
@@ -58,6 +62,32 @@ static std::string NormalizeConnectionMode(std::string mode, const char* fallbac
 static std::string GetStringField(const cJSON* root, const char* key) {
     auto item = cJSON_GetObjectItem(root, key);
     return cJSON_IsString(item) ? std::string(item->valuestring) : std::string();
+}
+
+static bool ParseWifiSsidArray(
+    const cJSON* root,
+    const char* key,
+    std::vector<std::string>* result) {
+    if (result == nullptr) return false;
+    auto array = cJSON_GetObjectItem(root, key);
+    if (!cJSON_IsArray(array) || cJSON_GetArraySize(array) > kMaxSavedWifiNetworks) {
+        return false;
+    }
+    result->clear();
+    cJSON* item = nullptr;
+    cJSON_ArrayForEach(item, array) {
+        if (!cJSON_IsString(item) || item->valuestring == nullptr) return false;
+        std::string ssid = item->valuestring;
+        if (ssid.empty() || ssid.size() > 32 ||
+            std::any_of(ssid.begin(), ssid.end(), [](unsigned char value) {
+                return value < 0x20 || value == 0x7f;
+            }) ||
+            std::find(result->begin(), result->end(), ssid) != result->end()) {
+            return false;
+        }
+        result->push_back(std::move(ssid));
+    }
+    return true;
 }
 
 static std::string ExtractWsStartMode(const cJSON* root) {
@@ -124,6 +154,66 @@ void MqttProtocol::PublishAnimationSyncStatus() {
         free(payload);
     }
     cJSON_Delete(status);
+}
+
+void MqttProtocol::ApplyAndPublishWifiPriority(
+    const std::string& command_id,
+    int revision,
+    const std::vector<std::string>& ranked_ssids,
+    const std::vector<std::string>& deleted_ssids) {
+    if (mqtt_ == nullptr || !mqtt_->IsConnected() || publish_topic_.empty()) return;
+
+    Settings wifi_settings("wifi", true);
+    const int applied_revision = wifi_settings.GetInt("priority_rev", 0);
+    std::string status_value = "applied";
+    if (revision < applied_revision) {
+        status_value = "ignored_stale";
+    } else if (revision > applied_revision) {
+        auto& manager = SsidManager::GetInstance();
+        const auto current = manager.GetSsidList();
+        std::vector<WifiPriorityCredential> credentials;
+        credentials.reserve(current.size());
+        for (const auto& item : current) {
+            credentials.push_back({item.ssid, item.password});
+        }
+        const auto reconciled = ReconcileWifiPriority(
+            credentials, ranked_ssids, deleted_ssids);
+        manager.Clear();
+        for (auto it = reconciled.rbegin(); it != reconciled.rend(); ++it) {
+            manager.AddSsid(it->ssid, it->password);
+        }
+        wifi_settings.SetInt("priority_rev", revision);
+        ESP_LOGI(TAG, "Applied WiFi priority revision %d (%u saved network(s))",
+                 revision, static_cast<unsigned>(reconciled.size()));
+    }
+
+    cJSON* response = cJSON_CreateObject();
+    if (response == nullptr) {
+        ESP_LOGE(TAG, "Failed to allocate WiFi priority acknowledgement");
+        return;
+    }
+    cJSON_AddNumberToObject(response, "v", 1);
+    cJSON_AddStringToObject(response, "type", "wifi_priority_applied");
+    cJSON_AddStringToObject(response, "commandId", command_id.c_str());
+    cJSON_AddNumberToObject(response, "revision", revision);
+    cJSON_AddStringToObject(response, "status", status_value.c_str());
+    cJSON_AddStringToObject(response, "deviceId", SystemInfo::GetMacAddress().c_str());
+    cJSON* applied = cJSON_AddArrayToObject(response, "rankedNetworks");
+    if (applied != nullptr) {
+        for (const auto& item : SsidManager::GetInstance().GetSsidList()) {
+            cJSON* encoded_ssid = cJSON_CreateString(item.ssid.c_str());
+            if (encoded_ssid == nullptr) break;
+            cJSON_AddItemToArray(applied, encoded_ssid);
+        }
+    }
+    char* encoded = cJSON_PrintUnformatted(response);
+    if (encoded != nullptr) {
+        if (!mqtt_->Publish(publish_topic_, encoded)) {
+            ESP_LOGW(TAG, "Failed to publish WiFi priority acknowledgement");
+        }
+        free(encoded);
+    }
+    cJSON_Delete(response);
 }
 
 bool MqttProtocol::Start() {
@@ -240,6 +330,17 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
             } else {
                 ESP_LOGI(TAG, "Successfully subscribed to topic (from OnConnected): %s", subscribe_topic_.c_str());
             }
+
+            // Retained Wi-Fi desired state is isolated from the base command
+            // topic so it cannot replace a retained animation update.
+            const std::string wifi_topic = subscribe_topic_ + "/wifi";
+            if (!mqtt_->Subscribe(wifi_topic)) {
+                ESP_LOGE(TAG, "Failed to subscribe to WiFi desired-state topic: %s",
+                         wifi_topic.c_str());
+            } else {
+                ESP_LOGI(TAG, "Subscribed to retained WiFi desired state: %s",
+                         wifi_topic.c_str());
+            }
         }
         // Report what is actually installed only after the runtime reconnects.
         // After an update-triggered reboot this is the applied acknowledgement.
@@ -352,6 +453,28 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
                 anim_updater.TriggerUpdateLoop();
             });
             // Don't forward remote_anim_update to on_incoming_json_ as it's a protocol-level message
+        } else if (strcmp(type->valuestring, "wifi_priority_update") == 0) {
+            const std::string command_id = GetStringField(root, "commandId");
+            auto revision_item = cJSON_GetObjectItem(root, "revision");
+            std::vector<std::string> ranked_ssids;
+            std::vector<std::string> deleted_ssids;
+            const bool revision_valid =
+                cJSON_IsNumber(revision_item) &&
+                revision_item->valuedouble >= 1 &&
+                revision_item->valuedouble <= INT_MAX &&
+                revision_item->valuedouble == revision_item->valueint;
+            if (command_id.empty() || command_id.size() > 80 || !revision_valid ||
+                !ParseWifiSsidArray(root, "rankedNetworks", &ranked_ssids) ||
+                !ParseWifiSsidArray(root, "deletedNetworks", &deleted_ssids)) {
+                ESP_LOGW(TAG, "wifi_priority_update ignored: invalid command payload");
+            } else {
+                const int revision = revision_item->valueint;
+                Application::GetInstance().Schedule(
+                    [this, command_id, revision, ranked_ssids, deleted_ssids]() {
+                        ApplyAndPublishWifiPriority(
+                            command_id, revision, ranked_ssids, deleted_ssids);
+                    });
+            }
         } else if (strcmp(type->valuestring, "wifi_reconfig_nimble") == 0) {
             // Remote WiFi reconfiguration request:
             // enter NimBLE WiFi setup mode without clearing existing credentials.
