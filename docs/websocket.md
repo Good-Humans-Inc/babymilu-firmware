@@ -207,7 +207,11 @@ WebSocket 文本帧以 JSON 方式传输，以下为常见的 `"type"` 字段及
    - `{"session_id": "xxx", "type": "tts", "state": "sentence_start", "text": "..."}`
      - 让设备在界面上显示当前要播放或朗读的文本片段（例如用于显示给用户）。  
 
-5. **MCP**
+5. **Goodbye**
+   - `{"type": "goodbye", "reason": "..."}` 表示会话已经终止。
+   - 这是终态消息：设备必须立即停止监听、恢复 normal/Idle 表情并关闭 WebSocket，不能只依赖稍后到达的 socket disconnect 回调。
+
+6. **MCP**
    - 服务器通过 type: "mcp" 的消息下发物联网相关的控制指令或返回调用结果，payload 结构同上。
    
    - **服务器到设备端发送 tools/call 的例子：**
@@ -264,6 +268,9 @@ WebSocket 文本帧以 JSON 方式传输，以下为常见的 `"type"` 字段及
 
 5. **Listening** / **Speaking** → **Idle**（遇到异常或主动中断）  
    - 调用 `SendAbortSpeaking(...)` 或 `CloseAudioChannel()` → 中断会话 → 关闭 WebSocket → 状态回到 Idle。  
+
+6. **Listening** / **Speaking** → **Idle**（服务器结束会话）
+   - 收到 `{"type":"goodbye"}` → 先恢复 Idle/normal，再关闭 WebSocket。即使断开回调延迟或丢失，设备也不会停留在 listening 动画。
 
 ### 自动模式状态流转图
 

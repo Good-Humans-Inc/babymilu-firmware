@@ -2749,7 +2749,30 @@ void Application::OpenWebSocketConnection() {
                 return;
             }
             
-            if (strcmp(type->valuestring, "tts") == 0) {
+            if (strcmp(type->valuestring, "goodbye") == 0) {
+                auto reason = cJSON_GetObjectItem(root, "reason");
+                const std::string reason_text = cJSON_IsString(reason)
+                    ? reason->valuestring
+                    : "unspecified";
+                ESP_LOGI(TAG, "Received conversation goodbye (WebSocket), reason=%s",
+                         reason_text.c_str());
+                Schedule([this, reason_text]() {
+                    // A goodbye is authoritative. Do not wait for the socket-close
+                    // callback to restore the face: that callback can arrive late or
+                    // not at all when the peer closes immediately after this frame.
+                    is_alarm_mode_ = false;
+                    aborted_ = false;
+                    state_before_tts_ = kDeviceStateUnknown;
+                    SetWebSocketConnectionMode("normal");
+                    SetDeviceState(kDeviceStateIdle);
+                    ESP_LOGI(TAG, "Conversation ended; device returned to idle (reason=%s)",
+                             reason_text.c_str());
+
+                    if (websocket_protocol_ && websocket_protocol_->IsAudioChannelOpened()) {
+                        websocket_protocol_->CloseAudioChannel();
+                    }
+                });
+            } else if (strcmp(type->valuestring, "tts") == 0) {
                 auto state = cJSON_GetObjectItem(root, "state");
                 if (strcmp(state->valuestring, "start") == 0) {
                     Schedule([this]() {
